@@ -1,0 +1,15 @@
+[package]
+name = "spotify_n"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json","blocking"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.13"
+regex = "1.5.4"
+
