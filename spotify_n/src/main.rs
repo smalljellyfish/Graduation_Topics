@@ -1,6 +1,7 @@
+use regex::Regex;
 use serde::Deserialize;
-use std::error::Error;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 
@@ -20,7 +21,7 @@ struct SearchResult {
 }
 
 #[derive(Deserialize)]
-struct Tracks{
+struct Tracks {
     items: Vec<Track>,
 }
 
@@ -42,6 +43,15 @@ async fn read_config() -> std::result::Result<Config, Box<dyn std::error::Error>
     let config: Config = serde_json::from_str(&content)?;
     Ok(config)
 }
+fn is_valid_spotify_url(url: &str) -> bool {
+    let re = Regex::new(r"https?://open\.spotify\.com/track/([a-zA-Z0-9]{22})").unwrap();
+    if let Some(captures) = re.captures(url) {
+        if let Some(match_) = captures.get(1) {
+            return match_.as_str().len() == 22;
+        }
+    }
+    false
+}
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -52,12 +62,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let input = input.trim();
-    if input.starts_with("http://") || input.starts_with("https://") || input.starts_with("/"){
+
+    if input.starts_with("http://") || input.starts_with("https://") {
+        if !is_valid_spotify_url(input) {
+            println!("你疑似輸入了 URL，但它不正確。");
+            return Ok(());
+        }
         fn extract_track_id_from_url(url: &str) -> Option<&str> {
             url.rsplit('/').next()
         }
-        
-        async fn get_track_info(client: &reqwest::Client, track_id: &str, access_token: &str) -> std::result::Result<Track, Box<dyn std::error::Error>> {
+
+        async fn get_track_info(
+            client: &reqwest::Client,
+            track_id: &str,
+            access_token: &str,
+        ) -> std::result::Result<Track, Box<dyn std::error::Error>> {
             let url = format!("https://api.spotify.com/v1/tracks/{}", track_id); // 假設這是獲取音軌信息的URL模板
             let response = client
                 .get(&url)
@@ -65,15 +84,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 .send()
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
-        
-            let body = response.text().await.map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
+
+            let body = response
+                .text()
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
             let track: Track = serde_json::from_str(&body)?;
-        
+
             Ok(track)
         }
-        
-        
-        
         let track_id = extract_track_id_from_url(input).unwrap();
         let track_info = get_track_info(&client, track_id, &access_token).await?;
         print_track_infos(vec![track_info]);
@@ -88,7 +107,11 @@ fn print_track_infos(track_infos: Vec<Track>) {
     println!(" ");
     println!("------------------------");
     for track_info in track_infos {
-        let artist_names: Vec<String> = track_info.artists.into_iter().map(|artist| artist.name).collect();
+        let artist_names: Vec<String> = track_info
+            .artists
+            .into_iter()
+            .map(|artist| artist.name)
+            .collect();
         println!("Track: {}", track_info.name);
         println!("Artists: {}", artist_names.join(", "));
         if let Some(spotify_url) = track_info.external_urls.get("spotify") {
@@ -97,23 +120,43 @@ fn print_track_infos(track_infos: Vec<Track>) {
         println!("------------------------");
     }
 }
-async fn search_track(client: &reqwest::Client, track_name: &str, access_token: &str) -> Result<Vec<Track>, Box<dyn Error>> {
-    let search_url = format!("https://api.spotify.com/v1/search?q={}&type=track&limit=10", track_name);
-    let response = client.get(&search_url)
+async fn search_track(
+    client: &reqwest::Client,
+    track_name: &str,
+    access_token: &str,
+) -> Result<Vec<Track>, Box<dyn Error>> {
+    let search_url = format!(
+        "https://api.spotify.com/v1/search?q={}&type=track&limit=10",
+        track_name
+    );
+    let response = client
+        .get(&search_url)
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await?;
 
     let search_result: SearchResult = response.json().await?;
-    let track_infos = search_result.tracks.items.into_iter().map(|track| {
-        let artist_names: Vec<String> = track.artists.into_iter().map(|artist| artist.name).collect();
-    let artists: Vec<Artist> = artist_names.into_iter().map(|name| Artist { name }).collect();
-        Track{
-            name: track.name,
-            artists,
-            external_urls: track.external_urls,
-        }
-    }).collect();
+    let track_infos = search_result
+        .tracks
+        .items
+        .into_iter()
+        .map(|track| {
+            let artist_names: Vec<String> = track
+                .artists
+                .into_iter()
+                .map(|artist| artist.name)
+                .collect();
+            let artists: Vec<Artist> = artist_names
+                .into_iter()
+                .map(|name| Artist { name })
+                .collect();
+            Track {
+                name: track.name,
+                artists,
+                external_urls: track.external_urls,
+            }
+        })
+        .collect();
     Ok(track_infos)
 }
 
