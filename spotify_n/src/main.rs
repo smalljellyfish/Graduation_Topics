@@ -44,9 +44,9 @@ async fn read_config() -> std::result::Result<Config, Box<dyn std::error::Error>
     Ok(config)
 }
 fn is_valid_spotify_url(url: &str) -> bool {
-    let re = Regex::new(r"https?://open\.spotify\.com/track/([a-zA-Z0-9]{22})").unwrap();
+    let re = Regex::new(r"(https?://)?open\.spotify\.com/track/([a-zA-Z0-9]{22})").unwrap();
     if let Some(captures) = re.captures(url) {
-        if let Some(match_) = captures.get(1) {
+        if let Some(match_) = captures.get(2) {
             return match_.as_str().len() == 22;
         }
     }
@@ -63,7 +63,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     std::io::stdin().read_line(&mut input).unwrap();
     let input = input.trim();
 
-    if input.starts_with("http://") || input.starts_with("https://") {
+    if input.starts_with("http://") || input.starts_with("https://") || input.starts_with("open.spotify.com") {
         if !is_valid_spotify_url(input) {
             println!("你疑似輸入了 URL，但它不正確。");
             return Ok(());
