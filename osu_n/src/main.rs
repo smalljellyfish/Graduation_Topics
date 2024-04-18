@@ -5,7 +5,7 @@ use std::io::{self, Write};
 
 #[derive(Debug, Deserialize)]
 struct Beatmap {
-    title: String,
+    // title: String,
     difficulty_rating: f32,
     id: i32,
     mode: String,
@@ -81,10 +81,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print the ID of each beatmapset
     for (index, beatmapset) in beatmapsets.iter().enumerate() {
         println!("{}: Beatmap Set ID: {}", index + 1, beatmapset.id);
+        println!("Links: https://osu.ppy.sh/beatmapsets/{}", beatmapset.id);
+        println!("-------------------------");
+
     }
 
     // Ask the user to choose a beatmapset
-    print!("Please choose a beatmapset by entering its number: ");
+    println!("If you want to check the detail");
+    print!("Please enter the item number: ");
     io::stdout().flush()?; // Make sure the prompt is immediately displayed
 
     let mut answer = String::new();
@@ -96,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print the beatmaps in the chosen beatmapset
     for beatmap in &chosen_beatmapset.beatmaps {
-        println!("Song Name: {}", beatmap.title);
+        // println!("Song Name: {}", beatmap.title);
         println!("Beatmap ID: {}", beatmap.id);
         println!("Difficulty Rating: {}", beatmap.difficulty_rating);
         println!("Mode: {}", beatmap.mode);
