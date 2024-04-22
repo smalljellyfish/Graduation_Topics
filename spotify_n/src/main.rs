@@ -22,7 +22,7 @@ struct Album {
     //#[serde(rename = "type")]
     //album_type_field: String,
     //uri: String,
-    artists: Vec<Artist>, 
+    artists: Vec<Artist>,
 }
 #[derive(Deserialize, Clone)]
 struct Albums {
@@ -67,6 +67,7 @@ struct Track {
     name: String,
     artists: Vec<Artist>,
     external_urls: HashMap<String, String>,
+    album: Album,
 }
 #[derive(Deserialize)]
 struct Config {
@@ -98,7 +99,7 @@ async fn search_album_by_url(
     access_token: &str,
 ) -> Result<Album, Box<dyn std::error::Error>> {
     let re = Regex::new(r"https?://open\.spotify\.com/album/([a-zA-Z0-9]+)").unwrap();
-   
+
     let album_id_result = match re.captures(url) {
         Some(caps) => match caps.get(1) {
             Some(m) => Ok(m.as_str().to_string()),
@@ -121,14 +122,13 @@ async fn search_album_by_url(
                 .await?
                 .json::<Album>()
                 .await?;
-    
+
             Ok(response)
-        },
+        }
         Err(e) => {
-            
             println!("ERROR: {}", e);
-            
-            Err(e) 
+
+            Err(e)
         }
     }
 }
@@ -153,7 +153,7 @@ async fn search_album_by_name(
 
     let search_result: SearchResult = response.json().await?;
     let total_pages =
-        (search_result.albums.clone().unwrap().items.len() as u32 + limit - 1) / limit; 
+        (search_result.albums.clone().unwrap().items.len() as u32 + limit - 1) / limit;
     let albums = search_result.albums.unwrap().items;
     Ok((albums, total_pages))
 }
@@ -261,40 +261,55 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
 
             "2" => {
-                let album_name = input; 
+                let album_name = input;
                 let limit = 20; // 限制每頁顯示最多26張專輯
                 let page = 1;
-                
+
                 // 这里假设search_album_by_name函数已经正确实现，能够返回正确的总页数
-                let (albums, _) = search_album_by_name(&client, album_name, &access_token, page, limit).await?;
-            
+                let (albums, _) =
+                    search_album_by_name(&client, album_name, &access_token, page, limit).await?;
+
                 // 展示专辑列表和选择提示
                 albums.iter().enumerate().for_each(|(index, album)| {
-                    println!("{}. {} - {} [{}]", 
+                    println!(
+                        "{}. {} - {} [{}]",
                         char::from(b'a' + index as u8), // 将索引转换为字母
-                        album.name, 
-                        album.artists.iter().map(|a| a.name.as_str()).collect::<Vec<&str>>().join(", "),
-                        album.external_urls.get("spotify").unwrap_or(&String::from("无URL"))
+                        album.name,
+                        album
+                            .artists
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect::<Vec<&str>>()
+                            .join(", "),
+                        album
+                            .external_urls
+                            .get("spotify")
+                            .unwrap_or(&String::from("无URL"))
                     );
                 });
-            
+
                 println!("請選擇專輯（a, b, c, ...）或輸入'exit'退出：");
                 let mut choice = String::new();
                 std::io::stdin().read_line(&mut choice).unwrap();
                 let choice = choice.trim().to_lowercase();
-                
+
                 if choice == "exit" {
                     return Ok(());
                 } else {
                     let index = choice.chars().next().unwrap() as usize - 'a' as usize;
                     if index < albums.len() {
                         let selected_album = &albums[index];
-                        
+
                         println!("---------------------------------------------");
                         println!("專輯名: {}", selected_album.name);
                         println!(
                             "歌手: {}",
-                            selected_album.artists.iter().map(|a| a.name.as_str()).collect::<Vec<&str>>().join(", ")
+                            selected_album
+                                .artists
+                                .iter()
+                                .map(|a| a.name.as_str())
+                                .collect::<Vec<&str>>()
+                                .join(", ")
                         );
                         if let Some(url) = selected_album.external_urls.get("spotify") {
                             println!("URL: {}", url);
@@ -303,13 +318,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     } else {
                         println!("無效");
                     }
-                } }
+                }
+            }
             _ => {
-                
                 println!("無效，請輸入1或2");
             }
         }
-        
     }
     Ok(())
 }
@@ -325,6 +339,7 @@ fn print_track_infos(track_infos: Vec<Track>) {
             .collect();
         println!("Track: {}", track_info.name);
         println!("Artists: {}", artist_names.join(", "));
+        println!("Album: {}", track_info.album.name); 
         if let Some(spotify_url) = track_info.external_urls.get("spotify") {
             println!("Spotify URL: {}", spotify_url);
         }
@@ -371,7 +386,7 @@ async fn search_track(
         .await?;
 
     let search_result: SearchResult = response.json().await?;
-    let total_pages = (search_result.tracks.clone().unwrap().total + limit - 1) / limit; 
+    let total_pages = (search_result.tracks.clone().unwrap().total + limit - 1) / limit;
     let track_infos = search_result
         .tracks
         .unwrap()
@@ -380,7 +395,8 @@ async fn search_track(
         .map(|track| Track {
             name: track.name,
             artists: track.artists,
-            external_urls: track.external_urls,
+            external_urls: track.external_urls, 
+            album: track.album, 
         })
         .collect();
     Ok((track_infos, total_pages))
