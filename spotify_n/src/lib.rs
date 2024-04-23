@@ -179,6 +179,25 @@ pub fn print_track_infos(track_infos: Vec<Track>) {
         println!("------------------------");
     }
 }
+pub fn print_album_info(album: &Album) {
+    println!("---------------------------------------------");
+    println!("專輯名: {}", album.name);
+    println!("專輯歌曲數: {}", album.total_tracks);
+    if let Some(spotify_album_url) = album.external_urls.get("spotify") {
+        println!("URL: {}", spotify_album_url);
+    }
+    println!("發布日期: {}", album.release_date);
+    println!(
+        "歌手: {}",
+        album
+            .artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<&str>>()
+            .join(", ")
+    );
+    println!("---------------------------------------------");
+}
 pub async fn get_track_info(
     client: &reqwest::Client,
     track_id: &str,
