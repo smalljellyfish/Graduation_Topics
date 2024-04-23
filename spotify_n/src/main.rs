@@ -1,6 +1,6 @@
 use spotify_search_lib::spotify_search::{
     get_access_token, is_valid_spotify_url, get_track_info, print_track_infos, search_track, search_album_by_url, search_album_by_name,
-};
+ print_album_info};
 use tokio;
 
 
@@ -29,7 +29,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let track_id = extract_track_id_from_url(input).unwrap();
             let track_info = get_track_info(&client, track_id, &access_token).await?;
             print_track_infos(vec![track_info]);
-            // 这里调用处理歌曲URL的函数
+            
         } else if input.contains("open.spotify.com/album/") {
             // 如果输入包含album URL，直接使用这个URL进行专辑搜索
 
@@ -38,27 +38,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
             match search_album_by_url(&client, album_url, &access_token).await {
                 Ok(album) => {
-                    println!("---------------------------------------------");
-                    println!("專輯名: {}", album.name);
-                    println!("專輯歌曲數: {}", album.total_tracks);
-                    if let Some(spotify_album_url) = album.external_urls.get("spotify") {
-                        println!("URL: {}", spotify_album_url);
-                    }
-                    println!("發布日期: {}", album.release_date);
-                    println!(
-                        "歌手: {}",
-                        album
-                            .artists
-                            .iter()
-                            .map(|artist| artist.name.as_str())
-                            .collect::<Vec<&str>>()
-                            .join(", ")
-                    );
-                    println!("---------------------------------------------");
+                print_album_info(&album);
                 }
-                Err(e) => println!("搜尋無結果 ， 請檢察網址是否正確 {}", e),
+                Err(e) => println!("ERROR: {}", e),
             }
-        } else {
+        }
+         else {
             println!("你疑似輸入了 URL，但它不正確。");
         }
     } else {
@@ -146,24 +131,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     let index = choice.chars().next().unwrap() as usize - 'a' as usize;
                     if index < albums.len() {
                         let selected_album = &albums[index];
-
-                        println!("---------------------------------------------");
-                        println!("專輯名: {}", selected_album.name);
-                        println!(
-                            "歌手: {}",
-                            selected_album
-                                .artists
-                                .iter()
-                                .map(|a| a.name.as_str())
-                                .collect::<Vec<&str>>()
-                                .join(", ")
-                        );
-                        if let Some(url) = selected_album.external_urls.get("spotify") {
-                            println!("URL: {}", url);
-                        }
-                        println!("---------------------------------------------");
+                        print_album_info(selected_album); 
                     } else {
-                        println!("無效");
+                        println!("無效的選擇");
                     }
                 }
             }
