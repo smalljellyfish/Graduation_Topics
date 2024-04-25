@@ -13,7 +13,6 @@ base64 = "0.13"
 regex = "1.5.4"
 rsa = "0.4.0"
 rand = "0.8.4"
-aes-gcm = "0.9.3"
 aead = "0.3.2"
 anyhow = "1.0.40"
 tokio = { version = "1", features = ["full"] }
