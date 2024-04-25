@@ -179,6 +179,27 @@
             println!("------------------------");
         }
     }
+    pub fn print_track_info_gui(track: &Track) -> String {                                      //新增打印結果進GUI
+        let artist_names = track.artists.iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<&str>>()
+            .join(", ");
+    
+        let album_name = &track.album.name;
+        let track_name = &track.name;
+    
+        
+        let binding = String::new();
+        let spotify_url = track.external_urls.get("spotify").unwrap_or(&binding);
+    
+        format!(
+            "Track: {}\nArtists: {}\nAlbum: {}\nSpotify URL: {}\n------------------------\n",
+            track_name,
+            artist_names,
+            album_name,
+            spotify_url
+        )
+    }
     pub fn print_album_info(album: &Album) {
         println!("---------------------------------------------");
         println!("專輯名: {}", album.name);

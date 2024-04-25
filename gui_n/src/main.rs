@@ -4,7 +4,7 @@
     search_album_by_name, search_album_by_url, search_track,
 }; */
 use tokio;
-use spotify_search_lib::spotify_search::{search_track,get_access_token};
+use spotify_search_lib::spotify_search::{search_track,get_access_token,Track,print_track_info_gui};
 use tokio::runtime::Runtime;
 
 
@@ -17,16 +17,15 @@ struct SpotifySearchApp {
     client: Arc<Mutex<Client>>,
     access_token: Arc<Mutex<String>>,
     search_query: String,
-    search_results: Arc<Mutex<String>>,  
+    search_results: Arc<Mutex<Vec<Track>>>,  
 }
-
 impl Default for SpotifySearchApp {
     fn default() -> Self {
         Self {
             client: Arc::new(Mutex::new(Client::new())),
             access_token: Arc::new(Mutex::new(String::new())),
             search_query: String::new(),
-            search_results: Arc::new(Mutex::new(String::new())),  
+            search_results: Arc::new(Mutex::new(Vec::new())), 
         }
     }
 }
@@ -59,31 +58,26 @@ impl epi::App for SpotifySearchApp {
                     let query = self.search_query.clone();
                     let search_results = self.search_results.clone();
                     tokio::spawn(async move {
-                        let result = search_track(&*client.lock().await, &query, &*access_token.lock().await, 1, 10).await;
+                        let result = search_track(&*client.lock().await, &query, &*access_token.lock().await, 1, 20).await;
                         let mut results = search_results.lock().await;
                         *results = match result {
-                            Ok((tracks, _)) => {
-                                tracks.iter().map(|t| {
-                                    let artist_names = t.artists.iter().map(|artist| artist.name.as_str()).collect::<Vec<&str>>().join(", ");
-                                    format!("Track: {}\nArtists: {}\nAlbum: {}\nSpotify URL: {}\n------------------------\n",
-                                        t.name,
-                                        artist_names,
-                                        t.album.name,
-                                        t.external_urls.get("spotify").unwrap_or(&String::new())
-                                    )
-                                }).collect::<Vec<String>>().join("\n")
-                            },
-                            Err(e) => format!("Error: {}", e),
+                            Ok((tracks, _)) => tracks,
+                            Err(_) => Vec::new(),
                         };
                     });
                 }
-               
-                if let Ok(search_results) = self.search_results.try_lock() {
-                    if !search_results.is_empty() {
-                        ui.label("Search Results:");
-                        ui.label(&*search_results);
+                // 使用 ScrollArea ?示搜索?果
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Ok(search_results) = self.search_results.try_lock() {
+                        if !search_results.is_empty() {
+                            ui.label("Search Results:");
+                            for track in search_results.iter() {
+                                let formatted_result = print_track_info_gui(track);                  //這裡調用函數
+                                ui.label(&formatted_result);
+                            }
+                        }
                     }
-                }
+                });
             });
         }
     }
