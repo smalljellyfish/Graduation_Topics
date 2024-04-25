@@ -6,10 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-eframe = { version = "0.26.2" ,features = [
-    "__screenshot", # __screenshot is so we can dump a screenshot using EFRAME_SCREENSHOT_TO
-] }
-env_logger = "0.11.3"
 reqwest = { version = "0.11", features = ["json","blocking"] }
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0"
@@ -17,11 +13,13 @@ base64 = "0.13"
 regex = "1.5.4"
 rsa = "0.4.0"
 rand = "0.8.4"
-aes-gcm = "0.9.3"
+//移除AES加密
 aead = "0.3.2"
 anyhow = "1.0.40"
 tokio = { version = "1", features = ["full"] }
-iced = "0.12.1"
+
+eframe = "0.15" 
+//新增GUI庫
 
 [lib]
 name = "spotify_search_lib"
