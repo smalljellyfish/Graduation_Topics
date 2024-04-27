@@ -109,12 +109,12 @@
             None => Err("URL疑似錯誤，請重新輸入".into()),
         };
     
-        // 在尝试使用album_id之前处理Result
+       
         match album_id_result {
             Ok(album_id) => {
-                // 现在album_id是一个String，可以直接使用
+                
                 let api_url = format!("https://api.spotify.com/v1/albums/{}", album_id);
-                // 使用api_url进行后续操作...
+                
                 let response = client
                     .get(&api_url)
                     .header(AUTHORIZATION, format!("Bearer {}", access_token))
@@ -133,7 +133,7 @@
             }
         }
     }
-    // 根据名称搜索专辑
+
     pub async fn search_album_by_name(
         client: &reqwest::Client,
         album_name: &str,
@@ -179,27 +179,25 @@
             println!("------------------------");
         }
     }
-    pub fn print_track_info_gui(track: &Track) -> String {                                      //新增打印結果進GUI
+    pub fn print_track_info_gui(track: &Track) -> (String, Option<String>) {       //移除URL
+        let track_name = &track.name;
+        let album_name = &track.album.name;
         let artist_names = track.artists.iter()
             .map(|artist| artist.name.as_str())
             .collect::<Vec<&str>>()
             .join(", ");
     
-        let album_name = &track.album.name;
-        let track_name = &track.name;
+        let spotify_url = track.external_urls.get("spotify").cloned();
     
-        
-        let binding = String::new();
-        let spotify_url = track.external_urls.get("spotify").unwrap_or(&binding);
-    
-        format!(
-            "Track: {}\nArtists: {}\nAlbum: {}\nSpotify URL: {}\n------------------------\n",
+        let info = format!(
+            "Track: {}\nArtists: {}\nAlbum: {}",
             track_name,
             artist_names,
-            album_name,
-            spotify_url
-        )
-    }
+            album_name
+        );
+    
+        (info, spotify_url)
+    } 
     pub fn print_album_info(album: &Album) {
         println!("---------------------------------------------");
         println!("專輯名: {}", album.name);
@@ -224,7 +222,7 @@
         track_id: &str,
         access_token: &str,
     ) -> std::result::Result<Track, Box<dyn std::error::Error>> {
-        let url = format!("https://api.spotify.com/v1/tracks/{}", track_id); // 假設這是獲取音軌信息的URL模板
+        let url = format!("https://api.spotify.com/v1/tracks/{}", track_id);
         let response = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", access_token))

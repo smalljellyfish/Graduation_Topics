@@ -1,3 +1,4 @@
+//use ::egui::debug_text::print;
 /*use spotify_search_lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, print_album_info, print_track_infos,
     search_album_by_name, search_album_by_url, search_track,
@@ -7,7 +8,7 @@ use spotify_search_lib::spotify_search::{
 };
 use tokio;
 use tokio::runtime::Runtime;
-
+//use ::egui::FontData;
 use eframe::{egui, epi};
 use reqwest::Client;
 use std::sync::Arc;
@@ -48,14 +49,14 @@ impl epi::App for SpotifySearchApp {
             *access_token.lock().await = token;
         });
 
-        let font_data = include_bytes!("NotoSansTC-VariableFont_wght.ttf");
+        let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
 
         
         let mut fonts = egui::FontDefinitions::default();
 
         
         fonts.font_data.insert(
-            "noto_sans_cjk".to_owned(),
+            "jf-openhuninn".to_owned(),
             std::borrow::Cow::Borrowed(font_data),
         );
         
@@ -63,31 +64,33 @@ impl epi::App for SpotifySearchApp {
             .fonts_for_family
             .entry(egui::FontFamily::Proportional)
             .or_default()
-            .insert(0, "noto_sans_cjk".to_owned());
+            .insert(0, "jf-openhuninn".to_owned());
         fonts
             .fonts_for_family
             .entry(egui::FontFamily::Monospace)
             .or_default()
-            .insert(0, "noto_sans_cjk".to_owned());
+            .insert(0, "jf-openhuninn".to_owned());
         
         fonts.family_and_size.insert(
             egui::TextStyle::Body,
-            (egui::FontFamily::Proportional, 20.0),
+            (egui::FontFamily::Proportional, 14.0),
         ); //文字大小
         fonts.family_and_size.insert(
             egui::TextStyle::Button,
-            (egui::FontFamily::Proportional, 16.0),
+            (egui::FontFamily::Proportional, 14.0),
         ); // 按鈕大小 
         fonts.family_and_size.insert(
             egui::TextStyle::Heading,
-            (egui::FontFamily::Proportional, 24.0),
+            (egui::FontFamily::Proportional, 22.0),
         ); //標題大小
 
         // 套用
         ctx.set_fonts(fonts);
     }
 
-    fn update(&mut self, ctx: &egui::CtxRef, _frame: &mut epi::Frame) {
+    fn update(&mut self, ctx: &egui::CtxRef, frame: &mut epi::Frame) {
+        let window_size = ctx.input().screen_rect.size(); // 擷取當前視窗大小
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Spotify Song Search");
             ui.horizontal(|ui| {
@@ -115,16 +118,25 @@ impl epi::App for SpotifySearchApp {
                     };
                 });
             }
-            
+
+            // ?示?前窗口大小
+            ui.label(format!("Window size: {:.0} x {:.0}", window_size.x, window_size.y));
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if let Ok(search_results) = self.search_results.try_lock() {
                     if !search_results.is_empty() {
                         ui.label("Search Results:");
                         for track in search_results.iter() {
-                            let formatted_result = print_track_info_gui(track);
+                            let (formatted_result, spotify_url) = print_track_info_gui(track);
                             ui.label(&formatted_result);
+                            
+                            if let Some(url) = spotify_url {
+                                
+                                ui.hyperlink_to(url.clone(), &url);
+                            }
+
+                            ui.add_space(10.0); // 間距
                         }
-                        
                     }
                 }
             });
@@ -136,7 +148,8 @@ fn main() {
 
     rt.block_on(async {
         let app = SpotifySearchApp::default();
-        let native_options = eframe::NativeOptions::default();
+        let mut native_options = eframe::NativeOptions::default();
+        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0)); //預設458x323
         eframe::run_native(Box::new(app), native_options);
     });
 }
