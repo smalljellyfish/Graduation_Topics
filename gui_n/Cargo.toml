@@ -13,14 +13,19 @@ base64 = "0.13"
 regex = "1.5.4"
 rsa = "0.4.0"
 rand = "0.8.4"
-//移除AES加密
+
 aead = "0.3.2"
 anyhow = "1.0.40"
 tokio = { version = "1", features = ["full"] }
 
-eframe = "0.15" 
-//新增GUI庫
+eframe = "0.15"
+
+encoding_rs = "0.8.34"
+
+egui = "0.27.2"  
+
 
 [lib]
 name = "spotify_search_lib"
 path = "src/lib1.rs"
+
