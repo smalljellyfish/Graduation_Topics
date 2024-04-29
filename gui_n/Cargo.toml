@@ -18,11 +18,13 @@ aead = "0.3.2"
 anyhow = "1.0.40"
 tokio = { version = "1", features = ["full"] }
 
-eframe = "0.15"
-
+eframe = "0.17"
+egui = "0.17"
+epi = "0.17"
 encoding_rs = "0.8.34"
 
-egui = "0.27.2"  
+image = "0.25.1"
+
 
 
 [lib]

@@ -1,4 +1,3 @@
-//use ::egui::debug_text::print;
 /*use spotify_search_lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, print_album_info, print_track_infos,
     search_album_by_name, search_album_by_url, search_track,
@@ -7,119 +6,95 @@ use spotify_search_lib::spotify_search::{
     get_access_token, print_track_info_gui, search_track,Track
 };
 use tokio;
-use tokio::runtime::Runtime;
+//use tokio::runtime::Runtime;
 //use ::egui::FontData;
-use eframe::{egui, epi};
-use reqwest::Client;
+use eframe;
+use epi;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use reqwest::Client;
+use tokio::sync::Mutex as AsyncMutex;
+use std::default::Default;
+
+
+
 
 struct SpotifySearchApp {
-    client: Arc<Mutex<Client>>,
-    access_token: Arc<Mutex<String>>,
+    client: Arc<AsyncMutex<Client>>,
+    access_token: Arc<AsyncMutex<String>>,
     search_query: String,
-    search_results: Arc<Mutex<Vec<Track>>>
+    search_results: Arc<AsyncMutex<Vec<Track>>>,
+    initialized: bool,
+    is_searching: Arc<AtomicBool>, 
 }
 impl Default for SpotifySearchApp {
     fn default() -> Self {
         Self {
-            client: Arc::new(Mutex::new(Client::new())),
-            access_token: Arc::new(Mutex::new(String::new())),
+            client: Arc::new(AsyncMutex::new(Client::new())),
+            access_token: Arc::new(AsyncMutex::new(String::new())),
             search_query: String::new(),
-            search_results: Arc::new(Mutex::new(Vec::new())),
+            search_results: Arc::new(AsyncMutex::new(Vec::new())),
+            initialized: false,
+            is_searching: Arc::new(AtomicBool::new(false)),
         }
     }
 }
+
 
 impl epi::App for SpotifySearchApp {
     fn name(&self) -> &str {
         "Spotify Search App"
     }
 
-    fn setup(
-        &mut self,
-        ctx: &egui::CtxRef,
-        _frame: &mut epi::Frame,
-        _storage: Option<&dyn epi::Storage>,
-    ) {
-        let client = self.client.clone();
-        let access_token = self.access_token.clone();
-        tokio::spawn(async move {
-            let token = get_access_token(&*client.lock().await).await.unwrap();
-            *access_token.lock().await = token;
-        });
+    fn update(&mut self, ctx: &epi::egui::Context, _frame: &epi::Frame) {
+        if !self.initialized {
+            let client = self.client.clone();
+            let access_token = self.access_token.clone();
+            tokio::spawn(async move {
+                let client_guard = client.lock().await; 
+                let token = get_access_token(&*client_guard).await.unwrap();
+                let mut access_token_guard = access_token.lock().await; 
+                *access_token_guard = token;
+            });
 
-        let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
 
-        
-        let mut fonts = egui::FontDefinitions::default();
+            let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
+            let mut fonts = epi::egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "jf-openhuninn".to_owned(),
+                epi::egui::FontData::from_owned(font_data.to_vec())
+            );
 
-        
-        fonts.font_data.insert(
-            "jf-openhuninn".to_owned(),
-            std::borrow::Cow::Borrowed(font_data),
-        );
-        
-        fonts
-            .fonts_for_family
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "jf-openhuninn".to_owned());
-        fonts
-            .fonts_for_family
-            .entry(egui::FontFamily::Monospace)
-            .or_default()
-            .insert(0, "jf-openhuninn".to_owned());
-        
-        fonts.family_and_size.insert(
-            egui::TextStyle::Body,
-            (egui::FontFamily::Proportional, 14.0),
-        ); //文字大小
-        fonts.family_and_size.insert(
-            egui::TextStyle::Button,
-            (egui::FontFamily::Proportional, 14.0),
-        ); // 按鈕大小 
-        fonts.family_and_size.insert(
-            egui::TextStyle::Heading,
-            (egui::FontFamily::Proportional, 22.0),
-        ); //標題大小
+            
+            fonts.families.get_mut(&epi::egui::FontFamily::Proportional).unwrap().insert(0, "jf-openhuninn".to_owned());
+            fonts.families.get_mut(&epi::egui::FontFamily::Monospace).unwrap().insert(0, "jf-openhuninn".to_owned());
 
-        // 套用
-        ctx.set_fonts(fonts);
-    }
+            ctx.set_fonts(fonts);
 
-    fn update(&mut self, ctx: &egui::CtxRef, frame: &mut epi::Frame) {
-        let window_size = ctx.input().screen_rect.size(); // 擷取當前視窗大小
+            self.initialized = true;
+        }
+        let window_size = ctx.input().screen_rect.size(); //擷取當前視窗大小
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Spotify Song Search");
             ui.horizontal(|ui| {
                 ui.label("Search for a song:");
-                ui.text_edit_singleline(&mut self.search_query);
+                let text_edit_response = ui.text_edit_singleline(&mut self.search_query);
+
+                // 檢查Enter 鍵是否按下
+                if text_edit_response.lost_focus() && ui.input().key_pressed(egui::Key::Enter) {
+                    self.perform_search(); 
+                }
             });
             if ui.button("Search").clicked() {
-                let client = self.client.clone();
-                let access_token = self.access_token.clone();
-                let query = self.search_query.clone();
-                let search_results = self.search_results.clone();
-                tokio::spawn(async move {
-                    let result = search_track(
-                        &*client.lock().await,
-                        &query,
-                        &*access_token.lock().await,
-                        1,
-                        20,
-                    )
-                    .await;
-                    let mut results = search_results.lock().await;
-                    *results = match result {
-                        Ok((tracks, _)) => tracks,
-                        Err(_) => Vec::new(),
-                    };
-                });
+                self.perform_search(); 
             }
-
-            // ?示?前窗口大小
+            if self.is_searching.load(Ordering::SeqCst) {
+                ui.label("Searching...");
+                ui.add(egui::ProgressBar::new(1.0));
+            }
+       
+            
             ui.label(format!("Window size: {:.0} x {:.0}", window_size.x, window_size.y));
 
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -143,13 +118,46 @@ impl epi::App for SpotifySearchApp {
         });
     }
 }
+
+
+impl SpotifySearchApp {
+    fn perform_search(&mut self) {
+        let client = self.client.clone();
+        let access_token = self.access_token.clone();
+        let query = self.search_query.clone();
+        let search_results = self.search_results.clone();
+        let is_searching = Arc::clone(&self.is_searching); 
+
+        is_searching.store(true, Ordering::SeqCst); 
+        tokio::spawn(async move {
+            let result = search_track(
+                &*client.lock().await,
+                &query,
+                &*access_token.lock().await,
+                1,
+                20,
+            ).await;
+
+            //tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;  //延遲兩秒
+
+            let mut results = search_results.lock().await;
+            *results = match result {
+                Ok((tracks, _)) => tracks,
+                Err(_) => Vec::new(),
+            };
+
+            is_searching.store(false, Ordering::SeqCst); 
+        });
+    }
+}
+
 fn main() {
-    let rt = Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async {
-        let app = SpotifySearchApp::default();
+        let app = SpotifySearchApp::default();  
         let mut native_options = eframe::NativeOptions::default();
-        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0)); //預設458x323
+        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0)); 
         eframe::run_native(Box::new(app), native_options);
     });
 }

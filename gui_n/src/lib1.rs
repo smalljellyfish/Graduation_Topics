@@ -1,13 +1,14 @@
-﻿pub mod spotify_search{
+﻿pub mod spotify_search {
+    use anyhow::{Error, Result};
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use serde::{Deserialize, Serialize};
-    use anyhow::{Result, Error};
     use std::collections::HashMap;
     //use std::error::Error as StdError;
+    use eframe::egui;
     use std::fs::File;
     use std::io::Read;
-    
+
     #[derive(Debug, Deserialize, Serialize, Clone)]
     pub struct Album {
         pub album_type: String,
@@ -15,7 +16,7 @@
         pub external_urls: HashMap<String, String>,
         //href: String,
         pub id: String,
-        //images: Vec<Image>,
+        pub images: Vec<Image>,
         pub name: String,
         pub release_date: String,
         //release_date_precision: String,
@@ -29,40 +30,40 @@
     pub struct Albums {
         pub items: Vec<Album>,
     }
-    #[derive(Debug, Deserialize, Serialize)]
+    #[derive(Debug, Deserialize, Serialize, Clone)]
     pub struct Image {
         pub url: String,
         pub height: u32,
         pub width: u32,
     }
-    
+
     #[derive(Debug, Deserialize, Serialize)]
     pub struct Restrictions {
         pub reason: String,
     }
-    
+
     #[derive(Deserialize)]
     pub struct AuthResponse {
         access_token: String,
     }
-    
+
     #[derive(Deserialize, Serialize, Debug, Clone)]
     pub struct Artist {
         pub name: String,
     }
-    
+
     #[derive(Deserialize)]
     pub struct SearchResult {
         pub tracks: Option<Tracks>,
         pub albums: Option<Albums>,
     }
-    
+
     #[derive(Deserialize, Clone)]
     pub struct Tracks {
         pub items: Vec<Track>,
         pub total: u32,
     }
-    
+
     #[derive(Deserialize, Clone)]
     pub struct Track {
         pub name: String,
@@ -75,15 +76,18 @@
         client_id: String,
         client_secret: String,
     }
+
     async fn read_config() -> Result<Config> {
-        let mut file = File::open("config.json").map_err(Error::new)?;  
+        let mut file = File::open("config.json").map_err(Error::new)?;
         let mut content = String::new();
-        file.read_to_string(&mut content).map_err(Error::new)?;  
-        let config: Config = serde_json::from_str(&content).map_err(Error::new)?;  
+        file.read_to_string(&mut content).map_err(Error::new)?;
+        let config: Config = serde_json::from_str(&content).map_err(Error::new)?;
         Ok(config)
     }
+
     pub fn is_valid_spotify_url(url: &str) -> bool {
-        let re = Regex::new(r"https?://open\.spotify\.com/(track|album)/([a-zA-Z0-9]{22})?").unwrap();
+        let re =
+            Regex::new(r"https?://open\.spotify\.com/(track|album)/([a-zA-Z0-9]{22})?").unwrap();
         if let Some(captures) = re.captures(url) {
             if captures.get(1).map_or(false, |m| m.as_str() == "track") {
                 return captures.get(2).map_or(false, |m| m.as_str().len() == 22);
@@ -93,14 +97,34 @@
         }
         false
     }
+
+    pub async fn download_and_convert_image(ui: &egui::Ui, image_url: &str) -> Result<egui::TextureId, Box<dyn std::error::Error>> {
+        let response = reqwest::get(image_url).await?;
+        let bytes = response.bytes().await?;
+        let image = image::load_from_memory(&bytes)?;
+        let image_buffer = image.to_rgba8();
+        let size = [image.width() as usize, image.height() as usize];
+        let color_image = egui::epaint::ColorImage::from_rgba_unmultiplied(size, &image_buffer);
     
+        // Prepare the image data
+        let image_data = egui::epaint::ImageData::Color(color_image);
+    
+        // Allocate a new texture ID
+        let texture_id = ui.ctx().tex_manager().write().alloc(
+            "custom_texture".to_string(),
+            image_data
+        );
+    
+        Ok(texture_id)
+    }
+
     pub async fn search_album_by_url(
         client: &reqwest::Client,
         url: &str,
         access_token: &str,
     ) -> Result<Album, Box<dyn std::error::Error>> {
         let re = Regex::new(r"https?://open\.spotify\.com/album/([a-zA-Z0-9]+)").unwrap();
-    
+
         let album_id_result = match re.captures(url) {
             Some(caps) => match caps.get(1) {
                 Some(m) => Ok(m.as_str().to_string()),
@@ -108,13 +132,13 @@
             },
             None => Err("URL疑似錯誤，請重新輸入".into()),
         };
-    
-       
+
+        // 在尝试使用album_id之前处理Result
         match album_id_result {
             Ok(album_id) => {
-                
+                // 现在album_id是一个String，可以直接使用
                 let api_url = format!("https://api.spotify.com/v1/albums/{}", album_id);
-                
+                // 使用api_url进行后续操作...
                 let response = client
                     .get(&api_url)
                     .header(AUTHORIZATION, format!("Bearer {}", access_token))
@@ -123,17 +147,17 @@
                     .await?
                     .json::<Album>()
                     .await?;
-    
+
                 Ok(response)
             }
             Err(e) => {
                 println!("ERROR: {}", e);
-    
+
                 Err(e)
             }
         }
     }
-
+    // 根据名称搜索专辑
     pub async fn search_album_by_name(
         client: &reqwest::Client,
         album_name: &str,
@@ -151,16 +175,14 @@
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await?;
-    
+
         let search_result: SearchResult = response.json().await?;
         let total_pages =
             (search_result.albums.clone().unwrap().items.len() as u32 + limit - 1) / limit;
         let albums = search_result.albums.unwrap().items;
         Ok((albums, total_pages))
     }
-    
-    
-    
+
     pub fn print_track_infos(track_infos: Vec<Track>) {
         println!(" ");
         println!("------------------------");
@@ -172,32 +194,33 @@
                 .collect();
             println!("Track: {}", track_info.name);
             println!("Artists: {}", artist_names.join(", "));
-            println!("Album: {}", track_info.album.name); 
+            println!("Album: {}", track_info.album.name);
             if let Some(spotify_url) = track_info.external_urls.get("spotify") {
                 println!("Spotify URL: {}", spotify_url);
             }
             println!("------------------------");
         }
     }
-    pub fn print_track_info_gui(track: &Track) -> (String, Option<String>) {       //移除URL
+    pub fn print_track_info_gui(track: &Track) -> (String, Option<String>) {
         let track_name = &track.name;
         let album_name = &track.album.name;
-        let artist_names = track.artists.iter()
+        let artist_names = track
+            .artists
+            .iter()
             .map(|artist| artist.name.as_str())
             .collect::<Vec<&str>>()
             .join(", ");
-    
+
         let spotify_url = track.external_urls.get("spotify").cloned();
-    
+
         let info = format!(
             "Track: {}\nArtists: {}\nAlbum: {}",
-            track_name,
-            artist_names,
-            album_name
+            track_name, artist_names, album_name
         );
-    
+
         (info, spotify_url)
-    } 
+    }
+
     pub fn print_album_info(album: &Album) {
         println!("---------------------------------------------");
         println!("專輯名: {}", album.name);
@@ -222,20 +245,20 @@
         track_id: &str,
         access_token: &str,
     ) -> std::result::Result<Track, Box<dyn std::error::Error>> {
-        let url = format!("https://api.spotify.com/v1/tracks/{}", track_id);
+        let url = format!("https://api.spotify.com/v1/tracks/{}", track_id); // 假設這是獲取音軌信息的URL模板
         let response = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await
             .map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
-    
+
         let body = response
             .text()
             .await
             .map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
         let track: Track = serde_json::from_str(&body)?;
-    
+
         Ok(track)
     }
     pub async fn search_track(
@@ -255,7 +278,7 @@
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await?;
-    
+
         let search_result: SearchResult = response.json().await?;
         let total_pages = (search_result.tracks.clone().unwrap().total + limit - 1) / limit;
         let track_infos = search_result
@@ -266,18 +289,18 @@
             .map(|track| Track {
                 name: track.name,
                 artists: track.artists,
-                external_urls: track.external_urls, 
-                album: track.album, 
+                external_urls: track.external_urls,
+                album: track.album,
             })
             .collect();
         Ok((track_infos, total_pages))
     }
-    
+
     pub async fn get_access_token(client: &reqwest::Client) -> Result<String> {
         let config = read_config().await?;
         let client_id = config.client_id;
         let client_secret = config.client_secret;
-    
+
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
         let auth_header = base64::encode(format!("{}:{}", client_id, client_secret));
@@ -286,10 +309,12 @@
             .header("Authorization", format!("Basic {}", auth_header))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
-    
+
         let response = request.send().await?;
         let auth_response: AuthResponse = response.json().await?;
-    
+
         Ok(auth_response.access_token)
     }
-    }
+
+
+}
