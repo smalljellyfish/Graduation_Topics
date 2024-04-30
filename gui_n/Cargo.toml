@@ -25,9 +25,8 @@ encoding_rs = "0.8.34"
 
 image = "0.25.1"
 
-
+lazy_static = "1.4.0"
 
 [lib]
 name = "spotify_search_lib"
 path = "src/lib1.rs"
-

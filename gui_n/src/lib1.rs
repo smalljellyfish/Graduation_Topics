@@ -4,10 +4,9 @@
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
-    //use std::error::Error as StdError;
-    use eframe::egui;
     use std::fs::File;
     use std::io::Read;
+    use lazy_static::lazy_static;
 
     #[derive(Debug, Deserialize, Serialize, Clone)]
     pub struct Album {
@@ -85,10 +84,13 @@
         Ok(config)
     }
 
+    lazy_static! {
+        static ref SPOTIFY_URL_REGEX: Regex = Regex::new(r"https?://open\.spotify\.com/(track|album)/([a-zA-Z0-9]{22})?")
+            .expect("Failed to compile Spotify URL regex");
+    }
+    
     pub fn is_valid_spotify_url(url: &str) -> bool {
-        let re =
-            Regex::new(r"https?://open\.spotify\.com/(track|album)/([a-zA-Z0-9]{22})?").unwrap();
-        if let Some(captures) = re.captures(url) {
+        if let Some(captures) = SPOTIFY_URL_REGEX.captures(url) {
             if captures.get(1).map_or(false, |m| m.as_str() == "track") {
                 return captures.get(2).map_or(false, |m| m.as_str().len() == 22);
             } else if captures.get(1).map_or(false, |m| m.as_str() == "album") {
@@ -96,26 +98,6 @@
             }
         }
         false
-    }
-
-    pub async fn download_and_convert_image(ui: &egui::Ui, image_url: &str) -> Result<egui::TextureId, Box<dyn std::error::Error>> {
-        let response = reqwest::get(image_url).await?;
-        let bytes = response.bytes().await?;
-        let image = image::load_from_memory(&bytes)?;
-        let image_buffer = image.to_rgba8();
-        let size = [image.width() as usize, image.height() as usize];
-        let color_image = egui::epaint::ColorImage::from_rgba_unmultiplied(size, &image_buffer);
-    
-        // Prepare the image data
-        let image_data = egui::epaint::ImageData::Color(color_image);
-    
-        // Allocate a new texture ID
-        let texture_id = ui.ctx().tex_manager().write().alloc(
-            "custom_texture".to_string(),
-            image_data
-        );
-    
-        Ok(texture_id)
     }
 
     pub async fn search_album_by_url(
@@ -220,6 +202,7 @@
 
         (info, spotify_url)
     }
+    
 
     pub fn print_album_info(album: &Album) {
         println!("---------------------------------------------");
@@ -244,30 +227,31 @@
         client: &reqwest::Client,
         track_id: &str,
         access_token: &str,
-    ) -> std::result::Result<Track, Box<dyn std::error::Error>> {
-        let url = format!("https://api.spotify.com/v1/tracks/{}", track_id); // 假設這是獲取音軌信息的URL模板
+    ) -> Result<Track> {  // 使用anyhow的Result
+        let url = format!("https://api.spotify.com/v1/tracks/{}", track_id);
         let response = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
-
+            .map_err(Error::from)?;  
+    
         let body = response
             .text()
             .await
-            .map_err(|e| -> Box<dyn std::error::Error> { From::from(e) })?;
+            .map_err(Error::from)?;  
         let track: Track = serde_json::from_str(&body)?;
-
+    
         Ok(track)
     }
+    
     pub async fn search_track(
         client: &reqwest::Client,
         track_name: &str,
         access_token: &str,
         page: u32,
         limit: u32,
-    ) -> Result<(Vec<Track>, u32)> {
+    ) -> Result<(Vec<Track>, u32)> {  
         let offset = (page - 1) * limit;
         let search_url = format!(
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
@@ -278,7 +262,7 @@
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await?;
-
+    
         let search_result: SearchResult = response.json().await?;
         let total_pages = (search_result.tracks.clone().unwrap().total + limit - 1) / limit;
         let track_infos = search_result
