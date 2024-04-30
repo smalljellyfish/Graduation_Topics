@@ -1,7 +1,11 @@
 /*use spotify_search_lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, print_album_info, print_track_infos,
     search_album_by_name, search_album_by_url, search_track,
-}; */
+}; */     
+//上方為lib1裡的相關函數
+
+
+// 引入所需模組
 use spotify_search_lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, print_track_info_gui, search_track,
     Track,
@@ -9,6 +13,8 @@ use spotify_search_lib::spotify_search::{
 use tokio;
 //use tokio::runtime::Runtime;
 //use ::egui::FontData;
+use anyhow::{Context, Result};
+use clipboard::{ClipboardContext, ClipboardProvider};
 use eframe;
 use epi;
 use reqwest::Client;
@@ -16,19 +22,20 @@ use std::default::Default;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
-use anyhow::{Result, Context};
 use tokio::task::JoinHandle;
 
+// 定義 SpotifySearchApp結構，儲存程式狀態和數據
 struct SpotifySearchApp {
     client: Arc<AsyncMutex<Client>>,
     access_token: Arc<AsyncMutex<String>>,
     search_query: String,
     search_results: Arc<AsyncMutex<Vec<Track>>>,
-    error_message: String,
+    error_message: Arc<AsyncMutex<String>>,
     initialized: bool,
     is_searching: Arc<AtomicBool>,
     need_repaint: Arc<AtomicBool>,
 }
+//為上方實現Default trait，創建默認狀態
 impl Default for SpotifySearchApp {
     fn default() -> Self {
         Self {
@@ -36,24 +43,26 @@ impl Default for SpotifySearchApp {
             access_token: Arc::new(AsyncMutex::new(String::new())),
             search_query: String::new(),
             search_results: Arc::new(AsyncMutex::new(Vec::new())),
-            error_message: String::new(),
+            error_message: Arc::new(AsyncMutex::new(String::new())),
             initialized: false,
             is_searching: Arc::new(AtomicBool::new(false)),
             need_repaint: Arc::new(AtomicBool::new(false)),
         }
     }
 }
-
+//定義GUI行為和邏輯
 impl epi::App for SpotifySearchApp {
-    fn name(&self) -> &str {
+    fn name(&self) -> &str {       //程式名稱
         "Spotify Search App"
     }
-
+    // 更新函數，處理GUI邏輯
     fn update(&mut self, ctx: &epi::egui::Context, _frame: &epi::Frame) {
+        //請求更新介面，用於刷新GUI
         if self.need_repaint.load(Ordering::SeqCst) {
             ctx.request_repaint();
             self.need_repaint.store(false, Ordering::SeqCst);
         }
+        // 初始化程式,和設置字體及獲取access token
         if !self.initialized {
             let client = self.client.clone();
             let access_token = self.access_token.clone();
@@ -93,19 +102,34 @@ impl epi::App for SpotifySearchApp {
             ui.horizontal(|ui| {
                 ui.label("Search for a song:");
                 let text_edit_response = ui.text_edit_singleline(&mut self.search_query);
+
                 
-                // 檢查Enter 鍵是否按下
+                let cloned_response = text_edit_response.clone();
+
+               //檢測右鍵是否按下
+                cloned_response.context_menu(|ui| {
+                    if ui.button("Paste").clicked() {
+                        let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
+                        if let Ok(clipboard_contents) = ctx.get_contents() {
+                            self.search_query = clipboard_contents;
+                            ui.close_menu();
+                        }
+                    }
+                });
+
+                // 檢測Enter是否按下
                 if text_edit_response.lost_focus() && ui.input().key_pressed(egui::Key::Enter) {
                     self.perform_search();
                 }
             });
-            if !self.error_message.is_empty() {
-                
-                egui::Window::new("Error")
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO) 
-                    .show(ui.ctx(), |ui| {
-                        ui.colored_label(egui::Color32::RED, &self.error_message);
-                    });
+            if let Ok(error_message_guard) = self.error_message.try_lock() {
+                if !error_message_guard.is_empty() {
+                    egui::Window::new("Error")
+                        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                        .show(ctx, |ui| {
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, &*error_message_guard);
+                        });
+                }
             }
             if ui.button("Search").clicked() {
                 self.perform_search();
@@ -130,9 +154,29 @@ impl epi::App for SpotifySearchApp {
                             ui.label(&formatted_result);
 
                             if let Some(url) = spotify_url {
-                                ui.hyperlink_to(url.clone(), &url);
+                                // 創建右鍵菜單
+                                ui.horizontal(|ui| {
+                                    ui.hyperlink_to(url.clone(), url.clone()).context_menu(|ui| {
+                                        if ui.button("Copy").clicked() {
+                                            let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
+                                            ctx.set_contents(url.clone()).unwrap();
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Open").clicked() {
+                                            let spotify_uri = url.replace("https://open.spotify.com/", "spotify:");
+                                            if let Err(_) = std::process::Command::new("spotify").arg(spotify_uri).spawn() {
+                                                // 如果打開Spotify App失敗 則打開網頁版
+                                                if webbrowser::open(&url).is_ok() {
+                                                    ui.close_menu();
+                                                }
+                                            } else {
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                });
                             }
-
+                        
                             ui.add_space(10.0); // 間距
                         }
                     }
@@ -142,41 +186,68 @@ impl epi::App for SpotifySearchApp {
     }
 }
 
-
 impl SpotifySearchApp {
     fn perform_search(&mut self) -> JoinHandle<Result<()>> {
         let client = self.client.clone();
         let access_token = self.access_token.clone();
         let query = self.search_query.clone();
         let search_results = self.search_results.clone();
-        let is_searching = Arc::clone(&self.is_searching); 
+        let is_searching = Arc::clone(&self.is_searching);
         let need_repaint = self.need_repaint.clone();
-        let error_message = Arc::new(AsyncMutex::new(self.error_message.clone()));
+        let error_message = self.error_message.clone();
 
-        is_searching.store(true, Ordering::SeqCst); 
+        is_searching.store(true, Ordering::SeqCst);
 
         tokio::spawn(async move {
+            // 清除之前的錯誤訊息
+            let mut error = error_message.lock().await;
+            error.clear();
+
             if query.starts_with("http://") || query.starts_with("https://") {
-                if is_valid_spotify_url(&query) {
-                    let track_id = query.split('/').last().unwrap_or("").split('?').next().unwrap_or("");
-                    let result = get_track_info(&*client.lock().await, track_id, &*access_token.lock().await).await
+                if query.starts_with("https://open.spotify")
+                    || query.starts_with("https://spotify")
+                {
+                    if is_valid_spotify_url(&query) {
+                        let track_id = query
+                            .split('/')
+                            .last()
+                            .unwrap_or("")
+                            .split('?')
+                            .next()
+                            .unwrap_or("");
+                        let result = get_track_info(
+                            &*client.lock().await,
+                            track_id,
+                            &*access_token.lock().await,
+                        )
+                        .await
                         .context("Failed to get track info")?;
-                    let mut results = search_results.lock().await;
-                    *results = vec![result];
+                        let mut results = search_results.lock().await;
+                        *results = vec![result];
+                    } else {
+                        *error = "您似乎輸入了一個Spotify URL，但它是不正確的。".to_string();
+                        search_results.lock().await.clear();
+                    }
                 } else {
-                    let mut em = error_message.lock().await;
-                    *em = "You seem to have entered a Spotify URL, but it is incorrect.".to_string();
-                    search_results.lock().await.clear(); 
+                    *error = "你疑似輸入URL，但它是不正確的。".to_string();
+                    search_results.lock().await.clear();
                 }
             } else {
-                let result = search_track(&*client.lock().await, &query, &*access_token.lock().await, 1, 20).await
-                    .context("Failed to search tracks")?;
+                let result = search_track(
+                    &*client.lock().await,
+                    &query,
+                    &*access_token.lock().await,
+                    1,
+                    20,
+                )
+                .await
+                .context("Failed to search tracks")?;
                 let mut results = search_results.lock().await;
                 *results = result.0;
             }
 
-            is_searching.store(false, Ordering::SeqCst); 
-            need_repaint.store(true, Ordering::SeqCst); 
+            is_searching.store(false, Ordering::SeqCst);
+            need_repaint.store(true, Ordering::SeqCst);
             Ok(())
         })
     }
@@ -187,7 +258,7 @@ fn main() {
     rt.block_on(async {
         let app = SpotifySearchApp::default();
         let mut native_options = eframe::NativeOptions::default();
-        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0));
+        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0));  //目前視窗預設大小
         eframe::run_native(Box::new(app), native_options);
     });
 }
