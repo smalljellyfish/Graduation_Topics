@@ -2,10 +2,10 @@
     get_access_token, get_track_info, is_valid_spotify_url, print_album_info, print_track_infos,
     search_album_by_name, search_album_by_url, search_track,
 }; */     
-//¤W¤è¬°lib1¸Ìªº¬ÛÃö¨ç¼Æ
+//ä¸Šæ–¹ç‚ºlib1è£¡çš„ç›¸é—œå‡½æ•¸
 
 
-// ¤Ş¤J©Ò»İ¼Ò²Õ
+// å¼•å…¥æ‰€éœ€æ¨¡çµ„
 use spotify_search_lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, print_track_info_gui, search_track,
     Track,
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-// ©w¸q SpotifySearchAppµ²ºc¡AÀx¦sµ{¦¡ª¬ºA©M¼Æ¾Ú
+// å®šç¾© SpotifySearchAppçµæ§‹ï¼Œå„²å­˜ç¨‹å¼ç‹€æ…‹å’Œæ•¸æ“š
 struct SpotifySearchApp {
     client: Arc<AsyncMutex<Client>>,
     access_token: Arc<AsyncMutex<String>>,
@@ -35,7 +35,7 @@ struct SpotifySearchApp {
     is_searching: Arc<AtomicBool>,
     need_repaint: Arc<AtomicBool>,
 }
-//¬°¤W¤è¹ê²{Default trait¡A³Ğ«ØÀq»{ª¬ºA
+//ç‚ºä¸Šæ–¹å¯¦ç¾Default traitï¼Œå‰µå»ºé»˜èªç‹€æ…‹
 impl Default for SpotifySearchApp {
     fn default() -> Self {
         Self {
@@ -50,19 +50,19 @@ impl Default for SpotifySearchApp {
         }
     }
 }
-//©w¸qGUI¦æ¬°©MÅŞ¿è
+//å®šç¾©GUIè¡Œç‚ºå’Œé‚è¼¯
 impl epi::App for SpotifySearchApp {
-    fn name(&self) -> &str {       //µ{¦¡¦WºÙ
+    fn name(&self) -> &str {       //ç¨‹å¼åç¨±
         "Spotify Search App"
     }
-    // §ó·s¨ç¼Æ¡A³B²zGUIÅŞ¿è
+    // æ›´æ–°å‡½æ•¸ï¼Œè™•ç†GUIé‚è¼¯
     fn update(&mut self, ctx: &epi::egui::Context, _frame: &epi::Frame) {
-        //½Ğ¨D§ó·s¤¶­±¡A¥Î©ó¨ê·sGUI
+        //è«‹æ±‚æ›´æ–°ä»‹é¢ï¼Œç”¨æ–¼åˆ·æ–°GUI
         if self.need_repaint.load(Ordering::SeqCst) {
             ctx.request_repaint();
             self.need_repaint.store(false, Ordering::SeqCst);
         }
-        // ªì©l¤Æµ{¦¡,©M³]¸m¦rÅé¤ÎÀò¨úaccess token
+        // åˆå§‹åŒ–ç¨‹å¼,å’Œè¨­ç½®å­—é«”åŠç²å–access token
         if !self.initialized {
             let client = self.client.clone();
             let access_token = self.access_token.clone();
@@ -95,7 +95,7 @@ impl epi::App for SpotifySearchApp {
 
             self.initialized = true;
         }
-        let window_size = ctx.input().screen_rect.size(); //Â^¨ú·í«eµøµ¡¤j¤p
+        let window_size = ctx.input().screen_rect.size(); //æ“·å–ç•¶å‰è¦–çª—å¤§å°
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Spotify Song Search");
@@ -106,7 +106,7 @@ impl epi::App for SpotifySearchApp {
                 
                 let cloned_response = text_edit_response.clone();
 
-               //ÀË´ú¥kÁä¬O§_«ö¤U
+               //æª¢æ¸¬å³éµæ˜¯å¦æŒ‰ä¸‹
                 cloned_response.context_menu(|ui| {
                     if ui.button("Paste").clicked() {
                         let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
@@ -117,7 +117,7 @@ impl epi::App for SpotifySearchApp {
                     }
                 });
 
-                // ÀË´úEnter¬O§_«ö¤U
+                // æª¢æ¸¬Enteræ˜¯å¦æŒ‰ä¸‹
                 if text_edit_response.lost_focus() && ui.input().key_pressed(egui::Key::Enter) {
                     self.perform_search();
                 }
@@ -154,7 +154,7 @@ impl epi::App for SpotifySearchApp {
                             ui.label(&formatted_result);
 
                             if let Some(url) = spotify_url {
-                                // ³Ğ«Ø¥kÁäµæ³æ
+                                // å‰µå»ºå³éµèœå–®
                                 ui.horizontal(|ui| {
                                     ui.hyperlink_to(url.clone(), url.clone()).context_menu(|ui| {
                                         if ui.button("Copy").clicked() {
@@ -165,7 +165,7 @@ impl epi::App for SpotifySearchApp {
                                         if ui.button("Open").clicked() {
                                             let spotify_uri = url.replace("https://open.spotify.com/", "spotify:");
                                             if let Err(_) = std::process::Command::new("spotify").arg(spotify_uri).spawn() {
-                                                // ¦pªG¥´¶}Spotify App¥¢±Ñ «h¥´¶}ºô­¶ª©
+                                                // å¦‚æœæ‰“é–‹Spotify Appå¤±æ•— å‰‡æ‰“é–‹ç¶²é ç‰ˆ
                                                 if webbrowser::open(&url).is_ok() {
                                                     ui.close_menu();
                                                 }
@@ -177,7 +177,7 @@ impl epi::App for SpotifySearchApp {
                                 });
                             }
                         
-                            ui.add_space(10.0); // ¶¡¶Z
+                            ui.add_space(10.0); // é–“è·
                         }
                     }
                 }
@@ -199,7 +199,7 @@ impl SpotifySearchApp {
         is_searching.store(true, Ordering::SeqCst);
 
         tokio::spawn(async move {
-            // ²M°£¤§«eªº¿ù»~°T®§
+            // æ¸…é™¤ä¹‹å‰çš„éŒ¯èª¤è¨Šæ¯
             let mut error = error_message.lock().await;
             error.clear();
 
@@ -225,11 +225,11 @@ impl SpotifySearchApp {
                         let mut results = search_results.lock().await;
                         *results = vec![result];
                     } else {
-                        *error = "±z¦ü¥G¿é¤J¤F¤@­ÓSpotify URL¡A¦ı¥¦¬O¤£¥¿½Tªº¡C".to_string();
+                        *error = "æ‚¨ä¼¼ä¹è¼¸å…¥äº†ä¸€å€‹Spotify URLï¼Œä½†å®ƒæ˜¯ä¸æ­£ç¢ºçš„ã€‚".to_string();
                         search_results.lock().await.clear();
                     }
                 } else {
-                    *error = "§AºÃ¦ü¿é¤JURL¡A¦ı¥¦¬O¤£¥¿½Tªº¡C".to_string();
+                    *error = "ä½ ç–‘ä¼¼è¼¸å…¥URLï¼Œä½†å®ƒæ˜¯ä¸æ­£ç¢ºçš„ã€‚".to_string();
                     search_results.lock().await.clear();
                 }
             } else {
@@ -258,7 +258,7 @@ fn main() {
     rt.block_on(async {
         let app = SpotifySearchApp::default();
         let mut native_options = eframe::NativeOptions::default();
-        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0));  //¥Ø«eµøµ¡¹w³]¤j¤p
+        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0));  //ç›®å‰è¦–çª—é è¨­å¤§å°
         eframe::run_native(Box::new(app), native_options);
     });
 }
