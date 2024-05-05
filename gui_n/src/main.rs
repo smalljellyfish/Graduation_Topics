@@ -1,9 +1,8 @@
 /*use spotify_search_lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, print_album_info, print_track_infos,
     search_album_by_name, search_album_by_url, search_track,
-}; */     
+}; */
 //上方為lib1裡的相關函數
-
 
 // 引入所需模組
 use spotify_search_lib::spotify_search::{
@@ -34,6 +33,9 @@ struct SpotifySearchApp {
     initialized: bool,
     is_searching: Arc<AtomicBool>,
     need_repaint: Arc<AtomicBool>,
+    font_size: f32,
+    relax_slider_value: i64, 
+    show_relax_window: bool,
 }
 //為上方實現Default trait，創建默認狀態
 impl Default for SpotifySearchApp {
@@ -47,16 +49,29 @@ impl Default for SpotifySearchApp {
             initialized: false,
             is_searching: Arc::new(AtomicBool::new(false)),
             need_repaint: Arc::new(AtomicBool::new(false)),
+            font_size: 14.0,
+            show_relax_window: false, // 初始化为 false
+            relax_slider_value: 0,
         }
     }
 }
 //定義GUI行為和邏輯
 impl epi::App for SpotifySearchApp {
-    fn name(&self) -> &str {       //程式名稱
-        "Spotify Search App"
+    fn name(&self) -> &str {
+        //程式名稱
+        "Search App"
     }
     // 更新函數，處理GUI邏輯
     fn update(&mut self, ctx: &epi::egui::Context, _frame: &epi::Frame) {
+
+        let window_size = ctx.input().screen_rect.size(); // 當前視窗大小
+        let base_window_size = egui::vec2(458.0, 323.0); // 基準視窗大小
+        let base_font_size = 14.0; // 基準字體大小
+
+        // 計算比例
+        let scale_factor = window_size.x / base_window_size.x;
+        self.font_size = base_font_size * scale_factor; 
+        
         //請求更新介面，用於刷新GUI
         if self.need_repaint.load(Ordering::SeqCst) {
             ctx.request_repaint();
@@ -95,18 +110,27 @@ impl epi::App for SpotifySearchApp {
 
             self.initialized = true;
         }
-        let window_size = ctx.input().screen_rect.size(); //擷取當前視窗大小
+        
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Spotify Song Search");
+            let text_style = egui::TextStyle::Body.resolve(ui.style());
+            let mut new_text_style = text_style.clone();
+            new_text_style.size = self.font_size;
+            ui.style_mut().text_styles.insert(egui::TextStyle::Body, new_text_style);
+            ui.heading("Search for a song:");
             ui.horizontal(|ui| {
-                ui.label("Search for a song:");
-                let text_edit_response = ui.text_edit_singleline(&mut self.search_query);
+                //ui.label("Search for a song:");
+                let text_edit_response = ui.add_sized(
+                    egui::vec2(ui.available_width() - 100.0, 20.0),
+                    egui::TextEdit::singleline(&mut self.search_query),
+                );
 
-                
                 let cloned_response = text_edit_response.clone();
 
-               //檢測右鍵是否按下
+                
+                
+
+                // 檢測右鍵是否按下
                 cloned_response.context_menu(|ui| {
                     if ui.button("Paste").clicked() {
                         let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
@@ -115,7 +139,17 @@ impl epi::App for SpotifySearchApp {
                             ui.close_menu();
                         }
                     }
+                    if ui.button("Relax").clicked() {
+                        
+                        // 觸發浪費時間
+                        self.show_relax_window = true; 
+                        ui.close_menu();
+                    } 
                 });
+
+                
+
+                
 
                 // 檢測Enter是否按下
                 if text_edit_response.lost_focus() && ui.input().key_pressed(egui::Key::Enter) {
@@ -139,50 +173,84 @@ impl epi::App for SpotifySearchApp {
                 ui.add(egui::ProgressBar::new(1.0));
                 ctx.request_repaint();
             }
-
             ui.label(format!(
                 "Window size: {:.0} x {:.0}",
                 window_size.x, window_size.y
             ));
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Ok(search_results) = self.search_results.try_lock() {
-                    if !search_results.is_empty() {
-                        ui.label("Search Results:");
-                        for track in search_results.iter() {
-                            let (formatted_result, spotify_url) = print_track_info_gui(track);
-                            ui.label(&formatted_result);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if let Ok(search_results_guard) = self.search_results.try_lock() {
+                        if !search_results_guard.is_empty() { 
+                            ui.label("Search Results:");
+                            for track in search_results_guard.iter() {
+                                let (formatted_result, spotify_url) = print_track_info_gui(track);
+                                
+                                ui.style_mut().override_text_style = Some(egui::TextStyle::Body);
+                                ui.label(&formatted_result);
+                                ui.style_mut().override_text_style = None; 
 
-                            if let Some(url) = spotify_url {
-                                // 創建右鍵菜單
-                                ui.horizontal(|ui| {
-                                    ui.hyperlink_to(url.clone(), url.clone()).context_menu(|ui| {
-                                        if ui.button("Copy").clicked() {
-                                            let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
-                                            ctx.set_contents(url.clone()).unwrap();
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Open").clicked() {
-                                            let spotify_uri = url.replace("https://open.spotify.com/", "spotify:");
-                                            if let Err(_) = std::process::Command::new("spotify").arg(spotify_uri).spawn() {
-                                                // 如果打開Spotify App失敗 則打開網頁版
-                                                if webbrowser::open(&url).is_ok() {
+                                if let Some(url) = spotify_url {
+                                    // 創建右鍵菜單
+                                    ui.horizontal(|ui| {
+                                        ui.hyperlink_to(url.clone(), url.clone()).context_menu(
+                                            |ui| {
+                                                if ui.button("Copy").clicked() {
+                                                    let mut ctx: ClipboardContext =
+                                                        ClipboardProvider::new().unwrap();
+                                                    ctx.set_contents(url.clone()).unwrap();
                                                     ui.close_menu();
                                                 }
-                                            } else {
-                                                ui.close_menu();
-                                            }
-                                        }
+                                                if ui.button("Open").clicked() {
+                                                    let spotify_uri = url.replace(
+                                                        "https://open.spotify.com/",
+                                                        "spotify:",
+                                                    );
+                                                    if let Err(_) =
+                                                        std::process::Command::new("spotify")
+                                                            .arg(spotify_uri)
+                                                            .spawn()
+                                                    {
+                                                        // 如果打開Spotify App失敗 則打開網頁版
+                                                        if webbrowser::open(&url).is_ok() {
+                                                            ui.close_menu();
+                                                        }
+                                                    } else {
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            },
+                                        );
                                     });
-                                });
+                                }
+
+                                ui.add_space(10.0); // 間距
                             }
-                        
-                            ui.add_space(10.0); // 間距
                         }
                     }
-                }
-            });
+                });
         });
+        if self.show_relax_window {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.set_min_size(ctx.input().screen_rect.size()); 
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0); // space
+                    ui.heading("Waste your time"); // title
+
+                    
+                    ui.horizontal(|ui| {
+                        let slider = egui::Slider::new(&mut self.relax_slider_value, 0..=999_999_999)
+                            .text("我不知道這是做啥");
+                        ui.add_sized([ui.available_width(), 20.0], slider); 
+                    });
+
+                    if ui.button("Close").clicked() {
+                        self.show_relax_window = false; 
+                    }
+                });
+            });
+        }
     }
 }
 
@@ -204,8 +272,7 @@ impl SpotifySearchApp {
             error.clear();
 
             if query.starts_with("http://") || query.starts_with("https://") {
-                if query.starts_with("https://open.spotify")
-                    || query.starts_with("https://spotify")
+                if query.starts_with("https://open.spotify") || query.starts_with("https://spotify")
                 {
                     if is_valid_spotify_url(&query) {
                         let track_id = query
@@ -258,7 +325,7 @@ fn main() {
     rt.block_on(async {
         let app = SpotifySearchApp::default();
         let mut native_options = eframe::NativeOptions::default();
-        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0));  //目前視窗預設大小
+        native_options.initial_window_size = Some(egui::vec2(458.0, 323.0)); // 设置初始窗口大小
         eframe::run_native(Box::new(app), native_options);
     });
 }
