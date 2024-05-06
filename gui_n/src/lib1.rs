@@ -183,7 +183,7 @@
             println!("------------------------");
         }
     }
-    pub fn print_track_info_gui(track: &Track) -> (String, Option<String>) {
+    pub fn print_track_info_gui(track: &Track) -> (String, Option<String>, String) {
         let track_name = &track.name;
         let album_name = &track.album.name;
         let artist_names = track
@@ -192,15 +192,15 @@
             .map(|artist| artist.name.as_str())
             .collect::<Vec<&str>>()
             .join(", ");
-
+    
         let spotify_url = track.external_urls.get("spotify").cloned();
-
+    
         let info = format!(
             "Track: {}\nArtists: {}\nAlbum: {}",
             track_name, artist_names, album_name
         );
-
-        (info, spotify_url)
+    
+        (info, spotify_url, track_name.clone())
     }
     
 
@@ -299,6 +299,7 @@
 
         Ok(auth_response.access_token)
     }
+    
 
 
 }
