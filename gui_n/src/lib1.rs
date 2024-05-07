@@ -1,5 +1,5 @@
 ﻿pub mod spotify_search {
-    use anyhow::{Error, Result};
+    use anyhow::{Error, Result,Context};
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use serde::{Deserialize, Serialize};
@@ -7,6 +7,9 @@
     use std::fs::File;
     use std::io::Read;
     use lazy_static::lazy_static;
+    use log::{info, error};
+    use webbrowser;
+    use std::process::Command;
 
     #[derive(Debug, Deserialize, Serialize, Clone)]
     pub struct Album {
@@ -77,10 +80,14 @@
     }
 
     async fn read_config() -> Result<Config> {
-        let mut file = File::open("config.json").map_err(Error::new)?;
+        let file_path = "config.json";
+        let mut file = File::open(file_path)
+            .with_context(|| format!("Failed to open config file: {}", file_path))?;
         let mut content = String::new();
-        file.read_to_string(&mut content).map_err(Error::new)?;
-        let config: Config = serde_json::from_str(&content).map_err(Error::new)?;
+        file.read_to_string(&mut content)
+            .with_context(|| "Failed to read from config file")?;
+        let config: Config = serde_json::from_str(&content)
+            .with_context(|| "Failed to parse config file, please check the JSON format")?;
         Ok(config)
     }
 
@@ -115,12 +122,11 @@
             None => Err("URL疑似錯誤，請重新輸入".into()),
         };
 
-        // 在尝试使用album_id之前处理Result
+       
         match album_id_result {
             Ok(album_id) => {
-                // 现在album_id是一个String，可以直接使用
+                
                 let api_url = format!("https://api.spotify.com/v1/albums/{}", album_id);
-                // 使用api_url进行后续操作...
                 let response = client
                     .get(&api_url)
                     .header(AUTHORIZATION, format!("Bearer {}", access_token))
@@ -139,7 +145,7 @@
             }
         }
     }
-    // 根据名称搜索专辑
+    
     pub async fn search_album_by_name(
         client: &reqwest::Client,
         album_name: &str,
@@ -284,7 +290,7 @@
         let config = read_config().await?;
         let client_id = config.client_id;
         let client_secret = config.client_secret;
-
+    
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
         let auth_header = base64::encode(format!("{}:{}", client_id, client_secret));
@@ -293,13 +299,36 @@
             .header("Authorization", format!("Basic {}", auth_header))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
-
-        let response = request.send().await?;
-        let auth_response: AuthResponse = response.json().await?;
-
-        Ok(auth_response.access_token)
-    }
     
+        let response = request.send().await;
+    
+        match response {
+            Ok(resp) => {
+                let auth_response: AuthResponse = resp.json().await?;
+                Ok(auth_response.access_token)
+            },
+            Err(e) => {
+                error!("Error sending request for token: {:?}", e);
+                Err(e.into())
+            }
+        }
+    }
+    pub fn open_spotify_url(url: &str) {
+        let track_id = url.split("/").last().unwrap_or_default();
+        let spotify_uri = format!("spotify:track:{}", track_id);
+    
+        
+        if Command::new("cmd").args(&["/C", "start", &spotify_uri]).status().is_err() {
+            //失敗則在瀏覽器打開
+            if webbrowser::open(url).is_ok() {
+                info!("Opened URL in browser: {}", url);
+            } else {
+                error!("Failed to open URL in browser: {}", url);
+            }
+        } else {
+            info!("Opened URL in Spotify App: {}", url);
+        }
+    }
 
 
 }
