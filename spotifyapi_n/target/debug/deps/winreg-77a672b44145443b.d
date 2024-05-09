@@ -1,0 +1,11 @@
+C:\Users\buywh\Documents\GitHub\Graduation_Topics\spotifyapi_n\target\debug\deps\libwinreg-77a672b44145443b.rmeta: C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\lib.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\common.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\enums.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_key.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_key_metadata.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_value.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\types.rs
+
+C:\Users\buywh\Documents\GitHub\Graduation_Topics\spotifyapi_n\target\debug\deps\winreg-77a672b44145443b.d: C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\lib.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\common.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\enums.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_key.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_key_metadata.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_value.rs C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\types.rs
+
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\lib.rs:
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\common.rs:
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\enums.rs:
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_key.rs:
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_key_metadata.rs:
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\reg_value.rs:
+C:\Users\buywh\.cargo\registry\src\index.crates.io-6f17d22bba15001f\winreg-0.50.0\src\types.rs:
