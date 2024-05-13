@@ -67,7 +67,7 @@ impl Default for SpotifySearchApp {
 //定義GUI行為和邏輯
 impl eframe::App for SpotifySearchApp {
     // 更新函數，處理GUI邏輯
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let window_size = ctx.input(|i| i.screen_rect.size()); // 当前窗口大小
         let base_window_size = egui::vec2(458.0, 323.0); // 基準視窗大小
         let base_font_size = 14.0; // 基準字體大小
@@ -236,7 +236,7 @@ impl eframe::App for SpotifySearchApp {
                                         }
                                     }
                                 });
-
+                                ui.label("-----------------------------------");
                                 ui.add_space(10.0); // 間距
                             }
                         }
@@ -384,7 +384,7 @@ fn main() {
         eframe::run_native(
             "Search App",
             native_options,
-            Box::new(move |cc| Box::new(app)),
+            Box::new(move |_cc| Box::new(app)),
         )
         .unwrap();
     });
