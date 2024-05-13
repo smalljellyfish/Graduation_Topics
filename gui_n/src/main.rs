@@ -6,8 +6,8 @@
 
 // 引入所需模組
 use spotify_search_lib::spotify_search::{
-    get_access_token, get_track_info, is_valid_spotify_url, print_track_info_gui, search_track,open_spotify_url,
-    Track,
+    get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url, print_track_info_gui,
+    search_track, Track,
 };
 use tokio;
 //use tokio::runtime::Runtime;
@@ -21,8 +21,10 @@ use egui::{FontData, FontDefinitions, FontFamily};
 
 use reqwest::Client;
 
-use log::{info, warn,error};
+
+use log::info;
 use simplelog::*;
+
 use std::default::Default;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,7 +92,7 @@ impl eframe::App for SpotifySearchApp {
                     Ok(token) => {
                         let mut access_token_guard = access_token.lock().await;
                         *access_token_guard = token;
-                    },
+                    }
                     Err(e) => {
                         let mut error_guard = error_message.lock().await;
                         *error_guard = format!("Failed to get access token: {}", e);
@@ -158,13 +160,15 @@ impl eframe::App for SpotifySearchApp {
                     self.perform_search();
                 }
             });
+
             if let Ok(error_message_guard) = self.error_message.try_lock() {
                 if !error_message_guard.is_empty() {
                     egui::Window::new("Error")
                         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                         .show(ctx, |ui| {
-                            ui.colored_label(egui::Color32::LIGHT_BLUE, &*error_message_guard);
+                            ui.colored_label(egui::Color32::RED, &*error_message_guard);
                         });
+                    log::error!("GUI Error: {}", *error_message_guard);
                 }
             }
             if ui.button("Search").clicked() {
@@ -199,7 +203,14 @@ impl eframe::App for SpotifySearchApp {
                                 // 雙擊
                                 if response.double_clicked() {
                                     if let Some(url) = &spotify_url {
-                                        open_spotify_url(url);
+                                        match open_spotify_url(url) {
+                                            Ok(_) => {
+                                                //nothing
+                                            }
+                                            Err(e) => {
+                                                log::error!("Failed to open URL: {}", e);
+                                            }
+                                        }
                                     }
                                 }
 
@@ -213,9 +224,15 @@ impl eframe::App for SpotifySearchApp {
                                             ui.close_menu();
                                         }
                                         if ui.button("Open").clicked() {
-                                            open_spotify_url(url);
+                                            match open_spotify_url(url) {
+                                                Ok(_) => {
+                                                    //nothing
+                                                }
+                                                Err(e) => {
+                                                    log::error!("Failed to open URL: {}", e);
+                                                }
+                                            }
                                             ui.close_menu();
-                                            
                                         }
                                     }
                                 });
@@ -265,31 +282,63 @@ impl SpotifySearchApp {
             error.clear();
 
             let result = if query.starts_with("http://") || query.starts_with("https://") {
-                if query.starts_with("https://open.spotify") || query.starts_with("https://spotify") {
+                if query.starts_with("https://open.spotify") || query.starts_with("https://spotify")
+                {
                     if is_valid_spotify_url(&query) {
-                        let track_id = query.split('/').last().unwrap_or("").split('?').next().unwrap_or("");
-                        let track = get_track_info(&*client.lock().await, track_id, &*access_token.lock().await).await?;
-                        Ok(vec![track])  
+                        let track_id = query
+                            .split('/')
+                            .last()
+                            .unwrap_or("")
+                            .split('?')
+                            .next()
+                            .unwrap_or("");
+                        let track = get_track_info(
+                            &*client.lock().await,
+                            track_id,
+                            &*access_token.lock().await,
+                        )
+                        .await?;
+                        Ok(vec![track])
                     } else {
-                        *error = "您似乎輸入了一個Spotify URL，但它是不正確的。".to_string();
-                        Err(anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid Spotify URL")))
+                        let error_msg = "您似乎輸入了一個Spotify URL，但它是不正確的。";
+                        *error = error_msg.to_string();
+                        log::error!("{}", error_msg);
+                        Err(anyhow::Error::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "Invalid Spotify URL",
+                        )))
                     }
                 } else {
-                    *error = "你疑似輸入URL，但它是不正確的。".to_string();
-                    Err(anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid URL")))
+                    let error_msg = "你疑似輸入URL，但它是不正確的。";
+                    *error = error_msg.to_string();
+                    log::error!("{}", error_msg);
+                    Err(anyhow::Error::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Invalid URL",
+                    )))
                 }
             } else {
-                let (tracks, _) = search_track(&*client.lock().await, &query, &*access_token.lock().await, 1, 20).await?;
-                Ok(tracks)  // 直接返回 Vec<Track>
+                let (tracks, _) = search_track(
+                    &*client.lock().await,
+                    &query,
+                    &*access_token.lock().await,
+                    1,
+                    20,
+                )
+                .await?;
+                Ok(tracks)
             };
 
             match result {
                 Ok(tracks) => {
                     let mut results = search_results.lock().await;
                     *results = tracks;
-                },
+                }
                 Err(e) => {
-                    error!("Error during search: {:?}", e);
+                    let error_msg = format!("Error during search: {:?}", e);
+                    log::error!("{}", error_msg);
+                    let mut error = error_message.lock().await;
+                    *error = error_msg;
                 }
             }
 
@@ -302,19 +351,25 @@ impl SpotifySearchApp {
 fn main() {
     let log_file = File::create("output.log").unwrap();
 
+    
     let mut config_builder = ConfigBuilder::new();
-    let result = config_builder.set_time_offset_to_local();
+    let result = config_builder.set_time_offset_to_local(); 
 
     if let Err(err) = result {
         eprintln!("Failed to set local time offset: {:?}", err);
     }
 
-    let config = config_builder.build(); 
+    let config = config_builder
+        .set_target_level(LevelFilter::Info) 
+        .set_level_padding(LevelPadding::Right) 
+        .build();
 
+    
     WriteLogger::init(LevelFilter::Info, config, log_file).unwrap();
 
-    info!("This is an info message.");
-    warn!("This is a warning message.");
+    
+    info!("Welcome");
+    
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async {

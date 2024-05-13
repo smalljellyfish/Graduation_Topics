@@ -1,15 +1,31 @@
 ﻿pub mod spotify_search {
-    use anyhow::{Error, Result,Context};
+    use anyhow::{Context, Error, Result};
+    use lazy_static::lazy_static;
+    use log::error;
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
-    use std::fs::File;
-    use std::io::Read;
-    use lazy_static::lazy_static;
-    use log::{info, error};
-    use webbrowser;
+
+    use std::ffi::OsString;
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::os::windows::ffi::OsStrExt;
+
     use std::process::Command;
+    use std::ptr;
+
+    use winapi::{
+        shared::{minwindef::HKEY, ntdef::LPCWSTR},
+        um::{
+            shellapi::ShellExecuteA,
+            //winnt::KEY_READ,
+            winreg::{RegCloseKey, RegOpenKeyExW, HKEY_CLASSES_ROOT},
+            winuser::SW_SHOW,
+        },
+    };
+
+    use chrono::Local;
 
     #[derive(Debug, Deserialize, Serialize, Clone)]
     pub struct Album {
@@ -74,7 +90,7 @@
         pub album: Album,
     }
     #[derive(Deserialize)]
-    pub struct Config {
+    struct Config {
         client_id: String,
         client_secret: String,
     }
@@ -92,10 +108,11 @@
     }
 
     lazy_static! {
-        static ref SPOTIFY_URL_REGEX: Regex = Regex::new(r"https?://open\.spotify\.com/(track|album)/([a-zA-Z0-9]{22})?")
-            .expect("Failed to compile Spotify URL regex");
+        static ref SPOTIFY_URL_REGEX: Regex =
+            Regex::new(r"https?://open\.spotify\.com/(track|album)/([a-zA-Z0-9]{22})?")
+                .expect("Failed to compile Spotify URL regex");
     }
-    
+
     pub fn is_valid_spotify_url(url: &str) -> bool {
         if let Some(captures) = SPOTIFY_URL_REGEX.captures(url) {
             if captures.get(1).map_or(false, |m| m.as_str() == "track") {
@@ -122,10 +139,8 @@
             None => Err("URL疑似錯誤，請重新輸入".into()),
         };
 
-       
         match album_id_result {
             Ok(album_id) => {
-                
                 let api_url = format!("https://api.spotify.com/v1/albums/{}", album_id);
                 let response = client
                     .get(&api_url)
@@ -145,7 +160,7 @@
             }
         }
     }
-    
+
     pub async fn search_album_by_name(
         client: &reqwest::Client,
         album_name: &str,
@@ -198,17 +213,16 @@
             .map(|artist| artist.name.as_str())
             .collect::<Vec<&str>>()
             .join(", ");
-    
+
         let spotify_url = track.external_urls.get("spotify").cloned();
-    
+
         let info = format!(
             "Track: {}\nArtists: {}\nAlbum: {}",
             track_name, artist_names, album_name
         );
-    
+
         (info, spotify_url, track_name.clone())
     }
-    
 
     pub fn print_album_info(album: &Album) {
         println!("---------------------------------------------");
@@ -233,31 +247,28 @@
         client: &reqwest::Client,
         track_id: &str,
         access_token: &str,
-    ) -> Result<Track> {  // 使用anyhow的Result
+    ) -> Result<Track> {
         let url = format!("https://api.spotify.com/v1/tracks/{}", track_id);
         let response = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(Error::from)?;  
-    
-        let body = response
-            .text()
-            .await
-            .map_err(Error::from)?;  
+            .map_err(Error::from)?;
+
+        let body = response.text().await.map_err(Error::from)?;
         let track: Track = serde_json::from_str(&body)?;
-    
+
         Ok(track)
     }
-    
+
     pub async fn search_track(
         client: &reqwest::Client,
         track_name: &str,
         access_token: &str,
         page: u32,
         limit: u32,
-    ) -> Result<(Vec<Track>, u32)> {  
+    ) -> Result<(Vec<Track>, u32)> {
         let offset = (page - 1) * limit;
         let search_url = format!(
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
@@ -268,7 +279,7 @@
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await?;
-    
+
         let search_result: SearchResult = response.json().await?;
         let total_pages = (search_result.tracks.clone().unwrap().total + limit - 1) / limit;
         let track_infos = search_result
@@ -290,7 +301,7 @@
         let config = read_config().await?;
         let client_id = config.client_id;
         let client_secret = config.client_secret;
-    
+
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
         let auth_header = base64::encode(format!("{}:{}", client_id, client_secret));
@@ -299,36 +310,156 @@
             .header("Authorization", format!("Basic {}", auth_header))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
-    
+
         let response = request.send().await;
-    
+
         match response {
             Ok(resp) => {
                 let auth_response: AuthResponse = resp.json().await?;
                 Ok(auth_response.access_token)
-            },
+            }
             Err(e) => {
                 error!("Error sending request for token: {:?}", e);
                 Err(e.into())
             }
         }
     }
-    pub fn open_spotify_url(url: &str) {
-        let track_id = url.split("/").last().unwrap_or_default();
+    pub fn open_spotify_url(url: &str) -> io::Result<()> {
+        let current_time = Local::now().format("%H:%M:%S").to_string();
+        let log_file_path = "output.log";
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log_file_path)?;
+    
+        if url.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "URL cannot be empty",
+            ));
+        }
+    
+        let track_id = url
+            .split("/")
+            .last()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        if track_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid URL format",
+            ));
+        }
+    
         let spotify_uri = format!("spotify:track:{}", track_id);
+        let web_url = format!("https://open.spotify.com/track/{}", track_id);
+    
+        if is_spotify_protocol_associated()? {
+            let result = unsafe {
+                ShellExecuteA(
+                    ptr::null_mut(),
+                    "open\0".as_ptr() as *const i8,
+                    spotify_uri.as_ptr() as *const i8,
+                    ptr::null(),
+                    ptr::null(),
+                    SW_SHOW,
+                )
+            };
+    
+            if result as usize > 32 {
+                writeln!(
+                    file,
+                    "{} [INFO ] Successfully opened Spotify APP with {}",
+                    current_time, spotify_uri
+                )?;
+                return Ok(());
+            } else {
+                writeln!(
+                    file,
+                    "{} [ERROR] Failed to open Spotify APP with {}",
+                    current_time, spotify_uri
+                )?;
+            }
+        }
     
         
-        if Command::new("cmd").args(&["/C", "start", &spotify_uri]).status().is_err() {
-            //失敗則在瀏覽器打開
-            if webbrowser::open(url).is_ok() {
-                info!("Opened URL in browser: {}", url);
-            } else {
-                error!("Failed to open URL in browser: {}", url);
+        match open_url_default_browser(&web_url) {
+            Ok(_) => {
+                writeln!(
+                    file,
+                    "{} [INFO ] Successfully opened web URL with default browser: {}",
+                    current_time, web_url
+                )?;
+                Ok(())
             }
-        } else {
-            info!("Opened URL in Spotify App: {}", url);
+            Err(e) => {
+                writeln!(
+                    file,
+                    "{} [ERROR] Failed to open web URL with default browser due to error: {}, URL: {}",
+                    current_time, e, web_url
+                )?;
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Failed to open Spotify URL",
+                ))
+            }
         }
     }
+    fn open_url_default_browser(url: &str) -> io::Result<()> {
+        if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(&["/C", "start", "", url])
+                .spawn()
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+                })?
+        } else if cfg!(target_os = "macos") {
+            Command::new("open").arg(url).spawn().map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+            })?
+        } else if cfg!(target_os = "linux") {
+            Command::new("xdg-open").arg(url).spawn().map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+            })?
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Unsupported operating system",
+            ));
+        };
 
+        Ok(())
+    }
+    fn is_spotify_protocol_associated() -> io::Result<bool> {
+        let sub_key_os_string = OsString::from("spotify");
+        let sub_key_vec: Vec<u16> = sub_key_os_string
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let sub_key: LPCWSTR = sub_key_vec.as_ptr();
 
+        let mut hkey: HKEY = ptr::null_mut();
+
+        match unsafe {
+            RegOpenKeyExW(
+                HKEY_CLASSES_ROOT,
+                sub_key,
+                0,
+                winapi::um::winnt::KEY_READ,
+                &mut hkey,
+            )
+        } {
+            0 => {
+                unsafe {
+                    RegCloseKey(hkey);
+                }
+                Ok(true)
+            }
+            2 => Ok(false), 
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Failed to check Spotify protocol association",
+            )),
+        }
+    }
 }
