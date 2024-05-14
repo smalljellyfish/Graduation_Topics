@@ -1,5 +1,34 @@
-﻿pub mod spotify_search {
-    use anyhow::{Context, Error, Result};
+﻿use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::fs::File;
+use std::io::Read;
+
+#[derive(Deserialize)]
+pub struct ServiceConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+#[derive(Deserialize)]
+pub struct Config {
+    pub spotify: ServiceConfig,
+    pub osu: ServiceConfig,
+}
+
+pub async fn read_config() -> Result<Config> {
+    let file_path = "config.json";
+    let mut file = File::open(file_path)
+        .with_context(|| format!("Failed to open config file: {}", file_path))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| "Failed to read from config file")?;
+    let config: Config = serde_json::from_str(&content)
+        .with_context(|| "Failed to parse config file, please check the JSON format")?;
+    Ok(config)
+}
+
+pub mod spotify_search {
+    use anyhow::{Error, Result};
     use lazy_static::lazy_static;
     use log::error;
     use regex::Regex;
@@ -8,8 +37,8 @@
     use std::collections::HashMap;
 
     use std::ffi::OsString;
-    use std::fs::{File, OpenOptions};
-    use std::io::{self, Read, Write};
+    use std::fs::OpenOptions;
+    use std::io::{self, Write};
     use std::os::windows::ffi::OsStrExt;
 
     use std::process::Command;
@@ -25,6 +54,7 @@
         },
     };
 
+    use crate::read_config;
     use chrono::Local;
 
     #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -88,23 +118,6 @@
         pub artists: Vec<Artist>,
         pub external_urls: HashMap<String, String>,
         pub album: Album,
-    }
-    #[derive(Deserialize)]
-    struct Config {
-        client_id: String,
-        client_secret: String,
-    }
-
-    async fn read_config() -> Result<Config> {
-        let file_path = "config.json";
-        let mut file = File::open(file_path)
-            .with_context(|| format!("Failed to open config file: {}", file_path))?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .with_context(|| "Failed to read from config file")?;
-        let config: Config = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse config file, please check the JSON format")?;
-        Ok(config)
     }
 
     lazy_static! {
@@ -299,8 +312,8 @@
 
     pub async fn get_access_token(client: &reqwest::Client) -> Result<String> {
         let config = read_config().await?;
-        let client_id = config.client_id;
-        let client_secret = config.client_secret;
+        let client_id = &config.spotify.client_id;
+        let client_secret = &config.spotify.client_secret;
 
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
@@ -331,14 +344,14 @@
             .append(true)
             .create(true)
             .open(log_file_path)?;
-    
+
         if url.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "URL cannot be empty",
             ));
         }
-    
+
         let track_id = url
             .split("/")
             .last()
@@ -350,10 +363,10 @@
                 "Invalid URL format",
             ));
         }
-    
+
         let spotify_uri = format!("spotify:track:{}", track_id);
         let web_url = format!("https://open.spotify.com/track/{}", track_id);
-    
+
         if is_spotify_protocol_associated()? {
             let result = unsafe {
                 ShellExecuteA(
@@ -365,7 +378,7 @@
                     SW_SHOW,
                 )
             };
-    
+
             if result as usize > 32 {
                 writeln!(
                     file,
@@ -381,8 +394,7 @@
                 )?;
             }
         }
-    
-        
+
         match open_url_default_browser(&web_url) {
             Ok(_) => {
                 writeln!(
@@ -455,11 +467,148 @@
                 }
                 Ok(true)
             }
-            2 => Ok(false), 
+            2 => Ok(false),
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Failed to check Spotify protocol association",
             )),
         }
     }
+}
+
+pub mod osu_search {
+    use crate::read_config;
+    use reqwest::Client;
+    use serde::Deserialize;
+    use std::io::{self, Write};
+    use anyhow::Result;
+
+    #[derive(Debug, Deserialize)]
+    pub struct Beatmap {
+        // title: String,
+        pub difficulty_rating: f32,
+        pub id: i32,
+        pub mode: String,
+        pub status: String,
+        pub total_length: i32,
+        pub user_id: i32,
+        pub version: String,
+    }
+    #[derive(Deserialize)]
+    pub struct TokenResponse {
+        access_token: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct SearchResponse {
+        beatmapsets: Vec<Beatmapset>,
+    }
+    #[derive(Debug, Deserialize)]
+    pub struct Beatmapset {
+        pub beatmaps: Vec<Beatmap>,
+        pub id: i32,
+    }
+
+    pub async fn get_beatmapsets(
+        client: &Client,
+        access_token: &str,
+        song_name: &str,
+    ) -> Result<Vec<Beatmapset>> {
+        let response = client
+            .get("https://osu.ppy.sh/api/v2/beatmapsets/search")
+            .query(&[("query", song_name)])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?
+            .json::<SearchResponse>()
+            .await
+            .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
+    
+        Ok(response.beatmapsets)
+    }
+    
+    pub async fn get_osu_token(client: &Client) -> Result<String> {
+        let config = read_config().await
+            .map_err(|e| anyhow::anyhow!("Error reading config: {}", e))?;
+        let client_id = &config.osu.client_id;
+        let client_secret = &config.osu.client_secret;
+    
+        let url = "https://osu.ppy.sh/oauth/token";
+        let params = [
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("grant_type", &"client_credentials".to_string()),
+            ("scope", &"public".to_string()),
+        ];
+        let response: TokenResponse = client.post(url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
+        Ok(response.access_token)
+    }
+    pub fn print_beatmap_info_gui(beatmap: &Beatmap) -> String {
+        format!(
+            "Beatmap ID: {}\nDifficulty: {:.2}\nMode: {}\nStatus: {}\nLength: {} mins\nVersion: {}",
+            beatmap.id,
+            beatmap.difficulty_rating,
+            beatmap.mode,
+            beatmap.status,
+            beatmap.total_length / 60,
+            beatmap.version
+        )
+    }
+    /*#[tokio::main]
+    pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::new();
+        print!("Please enter a song name: ");
+        io::stdout().flush()?; // 確保提示符立即顯示
+
+        let mut song_name = String::new();
+        io::stdin().read_line(&mut song_name)?;
+        let song_name = song_name.trim(); // 移除尾隨換行符
+
+        // 從配置中讀取 client_id 和 client_secret
+
+        let access_token = get_osu_token(&client).await?;
+        let beatmapsets = get_beatmapsets(&client, &access_token, song_name).await?;
+
+        // 打印每個 beatmapset 的 ID
+        for (index, beatmapset) in beatmapsets.iter().enumerate() {
+            println!("{}: Beatmap Set ID: {}", index + 1, beatmapset.id);
+            println!("Links: https://osu.ppy.sh/beatmapsets/{}", beatmapset.id);
+            println!("-------------------------");
+        }
+
+        // 詢問用戶選擇一個 beatmapset
+        println!("If you want to check the detail");
+        print!("Please enter the item number: ");
+        io::stdout().flush()?; // 確保提示符立即顯示
+
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        let chosen_index: usize = answer.trim().parse()?;
+
+        // 獲取選定的 beatmapset
+        let chosen_beatmapset = &beatmapsets[chosen_index - 1];
+
+        // 打印選定 beatmapset 中的 beatmaps
+        for beatmap in &chosen_beatmapset.beatmaps {
+            println!("Beatmap ID: {}", beatmap.id);
+            println!("Difficulty Rating: {}", beatmap.difficulty_rating);
+            println!("Mode: {}", beatmap.mode);
+            println!("Status: {}", beatmap.status);
+            println!("Total Length: {}", beatmap.total_length / 60);
+            println!("User ID: {}", beatmap.user_id);
+            println!("Version: {}", beatmap.version);
+            println!("-------------------------");
+        }
+
+        Ok(())
+    }
+    */
 }
