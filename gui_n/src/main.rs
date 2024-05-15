@@ -4,7 +4,9 @@
 }; */
 //上方為lib1裡的相關函數
 // 引入所需模組
-use lib::osu_search::{get_beatmapsets, get_osu_token, print_beatmap_info_gui, Beatmapset};
+use lib::osu_search::{
+    fetch_beatmapset_details, get_beatmapsets, get_osu_token, print_beatmap_info_gui, Beatmapset,
+};
 use lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url, print_track_info_gui,
     search_track, Track,
@@ -38,6 +40,7 @@ struct SpotifySearchApp {
     search_query: String,
     search_results: Arc<AsyncMutex<Vec<Track>>>,
     osu_search_results: Arc<AsyncMutex<Vec<Beatmapset>>>,
+    selected_beatmapset_details: Arc<AsyncMutex<Option<Beatmapset>>>,
     error_message: Arc<AsyncMutex<String>>,
     initialized: bool,
     is_searching: Arc<AtomicBool>,
@@ -45,7 +48,9 @@ struct SpotifySearchApp {
     font_size: f32,
     relax_slider_value: i64,
     show_relax_window: bool,
+    selected_beatmapset: Option<usize>,
 }
+
 //為上方實現Default trait，創建默認狀態
 impl Default for SpotifySearchApp {
     fn default() -> Self {
@@ -55,6 +60,7 @@ impl Default for SpotifySearchApp {
             search_query: String::new(),
             search_results: Arc::new(AsyncMutex::new(Vec::new())),
             osu_search_results: Arc::new(AsyncMutex::new(Vec::new())),
+            selected_beatmapset_details: Arc::new(AsyncMutex::new(None)),
             error_message: Arc::new(AsyncMutex::new(String::new())),
             initialized: false,
             is_searching: Arc::new(AtomicBool::new(false)),
@@ -62,12 +68,12 @@ impl Default for SpotifySearchApp {
             font_size: 14.0,
             show_relax_window: false,
             relax_slider_value: 0,
+            selected_beatmapset: None,
         }
     }
 }
-//定義GUI行為和邏輯
+
 impl eframe::App for SpotifySearchApp {
-    // 更新函數，處理GUI邏輯
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let window_size = ctx.input(|i| i.screen_rect.size()); // 当前窗口大小
         let base_window_size = egui::vec2(458.0, 323.0); // 基準視窗大小
@@ -77,11 +83,12 @@ impl eframe::App for SpotifySearchApp {
         let scale_factor = window_size.x / base_window_size.x;
         self.font_size = base_font_size * scale_factor;
 
-        //請求更新介面，用於刷新GUI
+        // 請求更新介面，用於刷新GUI
         if self.need_repaint.load(Ordering::SeqCst) {
             ctx.request_repaint();
             self.need_repaint.store(false, Ordering::SeqCst);
         }
+
         // 初始化程式,和設置字體及獲取access token
         if !self.initialized {
             let client = self.client.clone();
@@ -155,8 +162,7 @@ impl eframe::App for SpotifySearchApp {
                 });
 
                 // 檢測Enter是否按下
-                if text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                {
+                if text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.perform_search();
                 }
             });
@@ -171,84 +177,98 @@ impl eframe::App for SpotifySearchApp {
                                 if !search_results_guard.is_empty() {
                                     for track in search_results_guard.iter() {
                                         let (formatted_result, spotify_url, _track_name) =
-                                            print_track_info_gui(track);
+                                        print_track_info_gui(track);
 
-                                        // 顯示結果
-                                        let response = ui.add(
-                                            egui::Label::new(formatted_result.clone())
-                                                .sense(egui::Sense::click_and_drag()),
-                                        );
+                                    // 顯示結果
+                                    let response = ui.add(
+                                        egui::Label::new(formatted_result.clone())
+                                            .sense(egui::Sense::click_and_drag()),
+                                    );
 
-                                        // 雙擊
-                                        if response.double_clicked() {
-                                            if let Some(url) = &spotify_url {
+                                    // 雙擊
+                                    if response.double_clicked() {
+                                        if let Some(url) = &spotify_url {
+                                            match open_spotify_url(url) {
+                                                Ok(_) => {
+                                                    //nothing
+                                                }
+                                                Err(e) => {
+                                                    log::error!("Failed to open URL: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 右鍵菜單
+                                    response.context_menu(|ui| {
+                                        if let Some(url) = &spotify_url {
+                                            if ui.button("Copy URL").clicked() {
+                                                let mut ctx: ClipboardContext =
+                                                    ClipboardProvider::new().unwrap();
+                                                ctx.set_contents(url.clone()).unwrap();
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Open").clicked() {
                                                 match open_spotify_url(url) {
                                                     Ok(_) => {
                                                         //nothing
                                                     }
                                                     Err(e) => {
-                                                        log::error!("Failed to open URL: {}", e);
+                                                        log::error!(
+                                                            "Failed to open URL: {}",
+                                                            e
+                                                        );
                                                     }
                                                 }
+                                                ui.close_menu();
                                             }
                                         }
+                                    });
 
-                                        // 右鍵菜單
-                                        response.context_menu(|ui| {
-                                            if let Some(url) = &spotify_url {
-                                                if ui.button("Copy URL").clicked() {
-                                                    let mut ctx: ClipboardContext =
-                                                        ClipboardProvider::new().unwrap();
-                                                    ctx.set_contents(url.clone()).unwrap();
-                                                    ui.close_menu();
-                                                }
-                                                if ui.button("Open").clicked() {
-                                                    match open_spotify_url(url) {
-                                                        Ok(_) => {
-                                                            //nothing
-                                                        }
-                                                        Err(e) => {
-                                                            log::error!(
-                                                                "Failed to open URL: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                    ui.close_menu();
-                                                }
-                                            }
-                                        });
-
-                                        ui.add_space(10.0); // 間距
-                                    }
+                                    ui.add_space(10.0); // 間距
                                 }
                             }
-                        });
-                    });
-                });
-
-                // 右邊顯示Osu的結果
-                columns[1].vertical(|ui| {
-                    ui.heading("Osu Results");
-                    ui.push_id("osu_results", |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock()
-                            {
-                                if !osu_search_results_guard.is_empty() {
-                                    for beatmapset in osu_search_results_guard.iter() {
-                                        for beatmap in &beatmapset.beatmaps {
-                                            let beatmap_info = print_beatmap_info_gui(beatmap);
-                                            ui.label(beatmap_info);
-                                            ui.add_space(10.0);
-                                        }
-                                    }
-                                }
-                            }
-                        });
+                        }
                     });
                 });
             });
-        });
+
+                            // 右邊顯示Osu的結果
+                            columns[1].vertical(|ui| {
+                                ui.heading("Osu Results");
+                                ui.push_id("osu_results", |ui| {
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
+                                            if !osu_search_results_guard.is_empty() {
+                                                if let Some(selected_index) = self.selected_beatmapset {
+                                                    let selected_beatmapset = &osu_search_results_guard[selected_index];
+                                                    for beatmap in &selected_beatmapset.beatmaps {
+                                                        let beatmap_info = format!(
+                                                            "Difficulty: {}\nMode: {}\nStatus: {}\nLength: {} minutes\nVersion: {}",
+                                                            beatmap.difficulty_rating,
+                                                            beatmap.mode,
+                                                            beatmap.status,
+                                                            beatmap.total_length / 60,
+                                                            beatmap.version
+                                                        );
+                                                        ui.label(beatmap_info);
+                                                        ui.add_space(10.0);
+                                                    }
+                                                } else {
+                                                    for (index, beatmapset) in osu_search_results_guard.iter().enumerate() {
+                                                        if ui.button(format!("{} - {} (by {})", beatmapset.title, beatmapset.artist, beatmapset.creator)).clicked() {
+                                                            self.selected_beatmapset = Some(index);
+                                                        }
+                                                        ui.separator();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                        });
+                    });
 
         if self.show_relax_window {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -270,6 +290,7 @@ impl eframe::App for SpotifySearchApp {
         }
     }
 }
+
 impl SpotifySearchApp {
     fn perform_search(&mut self) -> JoinHandle<Result<()>> {
         let client = self.client.clone();
@@ -317,7 +338,8 @@ impl SpotifySearchApp {
 
             // Spotify search
             let spotify_result = if query.starts_with("http://") || query.starts_with("https://") {
-                if query.starts_with("https://open.spotify") || query.starts_with("https://spotify") {
+                if query.starts_with("https://open.spotify") || query.starts_with("https://spotify")
+                {
                     if is_valid_spotify_url(&query) {
                         let track_id = query
                             .split('/')
