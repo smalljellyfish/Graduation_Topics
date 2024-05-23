@@ -2,6 +2,14 @@
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+
+lazy_static! {
+    static ref ERR_MSG: Mutex<String> = Mutex::new(String::new());
+}
+
+
 
 #[derive(Deserialize)]
 pub struct ServiceConfig {
@@ -35,6 +43,7 @@ pub mod spotify_search {
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use crate::ERR_MSG;
 
     use std::ffi::OsString;
     use std::fs::OpenOptions;
@@ -43,6 +52,7 @@ pub mod spotify_search {
 
     use std::process::Command;
     use std::ptr;
+    
 
     use winapi::{
         shared::{minwindef::HKEY, ntdef::LPCWSTR},
@@ -143,13 +153,21 @@ pub mod spotify_search {
         access_token: &str,
     ) -> Result<Album, Box<dyn std::error::Error>> {
         let re = Regex::new(r"https?://open\.spotify\.com/album/([a-zA-Z0-9]+)").unwrap();
-
+        
         let album_id_result = match re.captures(url) {
             Some(caps) => match caps.get(1) {
                 Some(m) => Ok(m.as_str().to_string()),
-                None => Err("URL疑似錯誤，請重新輸入".into()),
+                None =>{
+                    let mut err_msg = ERR_MSG.lock().unwrap();
+                    *err_msg = "URL疑似錯誤，請重新輸入".to_string();
+                    Err("URL疑似錯誤，請重新輸入".into())
+                },
             },
-            None => Err("URL疑似錯誤，請重新輸入".into()),
+            None => {
+                let mut err_msg = ERR_MSG.lock().unwrap();
+                *err_msg = "URL疑似錯誤，請重新輸入".to_string();
+                Err("URL疑似錯誤，請重新輸入".into())
+            },
         };
 
         match album_id_result {
@@ -484,15 +502,12 @@ pub mod osu_search {
     use anyhow::Result;
 
     #[derive(Debug, Deserialize)]
-    pub struct Beatmap {
-        // title: String,
-        pub difficulty_rating: f32,
+    pub struct Beatmapset {
+        pub beatmaps: Vec<Beatmap>,
         pub id: i32,
-        pub mode: String,
-        pub status: String,
-        pub total_length: i32,
-        pub user_id: i32,
-        pub version: String,
+        pub artist: String,
+        pub title: String,
+        pub creator: String,
     }
     #[derive(Deserialize)]
     pub struct TokenResponse {
@@ -503,15 +518,17 @@ pub mod osu_search {
     pub struct SearchResponse {
         beatmapsets: Vec<Beatmapset>,
     }
-    #[derive(Debug, Deserialize)]
-    pub struct Beatmapset {
-        pub beatmaps: Vec<Beatmap>,
+    #[derive(Debug, Deserialize, Clone)] // 添加 Clone 特徵
+    pub struct Beatmap {
+        pub difficulty_rating: f32,
         pub id: i32,
-        pub artist: String,
-        pub title: String,
-        pub creator: String,
+        pub mode: String,
+        pub status: String,
+        pub total_length: i32,
+        pub user_id: i32,
+        pub version: String,
     }
-
+    
     pub async fn get_beatmapsets(
         client: &Client,
         access_token: &str,

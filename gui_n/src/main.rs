@@ -49,6 +49,7 @@ struct SpotifySearchApp {
     relax_slider_value: i64,
     show_relax_window: bool,
     selected_beatmapset: Option<usize>,
+    err_msg: Arc<AsyncMutex<String>>,
 }
 
 //為上方實現Default trait，創建默認狀態
@@ -69,6 +70,7 @@ impl Default for SpotifySearchApp {
             show_relax_window: false,
             relax_slider_value: 0,
             selected_beatmapset: None,
+            err_msg: Arc::new(AsyncMutex::new(String::new())),
         }
     }
 }
@@ -126,6 +128,27 @@ impl eframe::App for SpotifySearchApp {
             ctx.set_fonts(fonts);
 
             self.initialized = true;
+
+            let err_msg = {
+                let err_msg_lock = self.err_msg.clone();
+                let err_msg = tokio::spawn(async move {
+                    err_msg_lock.lock().await.clone()
+                });
+                err_msg
+            };
+
+            let ctx_clone = ctx.clone();
+            let err_msg_clone = self.err_msg.clone();
+            tokio::spawn(async move {
+                let err_msg = err_msg_clone.lock().await;
+                if !err_msg.is_empty() {
+                    ctx_clone.request_repaint();
+                    egui::Window::new("Error").show(&ctx_clone, |ui| {
+                        ui.label(&err_msg.to_string());
+                    });
+                }
+            });
+
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -136,6 +159,9 @@ impl eframe::App for SpotifySearchApp {
                 .text_styles
                 .insert(egui::TextStyle::Body, new_text_style);
             ui.heading("Search for a song:");
+            if let Ok(err_msg_guard) = self.err_msg.try_lock() {
+                ui.label(format!("{}", *err_msg_guard));
+            }
             ui.horizontal(|ui| {
                 let text_edit_width = ui.available_width() * 0.5;
                 let text_edit_response = ui.add_sized(
@@ -226,6 +252,8 @@ impl eframe::App for SpotifySearchApp {
                                     });
 
                                     ui.add_space(10.0); // 間距
+                                    ui.label("------------------------------------");
+                                    ui.add_space(10.0);
                                 }
                             }
                         }
@@ -242,18 +270,26 @@ impl eframe::App for SpotifySearchApp {
                                             if !osu_search_results_guard.is_empty() {
                                                 if let Some(selected_index) = self.selected_beatmapset {
                                                     let selected_beatmapset = &osu_search_results_guard[selected_index];
-                                                    for beatmap in &selected_beatmapset.beatmaps {
+                                                    let mut sorted_beatmaps = selected_beatmapset.beatmaps.clone();
+                                                    sorted_beatmaps.sort_by(|easier, harder| harder.difficulty_rating.partial_cmp(&easier.difficulty_rating).unwrap());
+                                                    for beatmap in &sorted_beatmaps {
                                                         let beatmap_info = format!(
-                                                            "Difficulty: {}\nMode: {}\nStatus: {}\nLength: {} minutes\nVersion: {}",
+                                                            "Difficulty: {}\nMode: {}\nStatus: {}\nLength: {} min {}s \nVersion: {}",
                                                             beatmap.difficulty_rating,
                                                             beatmap.mode,
                                                             beatmap.status,
-                                                            beatmap.total_length / 60,
+                                                            beatmap.total_length/60,
+                                                            beatmap.total_length%60,
                                                             beatmap.version
                                                         );
                                                         ui.label(beatmap_info);
                                                         ui.add_space(10.0);
+                                                        ui.label("------------------------------------");
+                                                        ui.add_space(10.0);
                                                     }
+                                                    if ui.button("back").clicked(){
+                                                        self.selected_beatmapset = None;
+                                                    };
                                                 } else {
                                                     for (index, beatmapset) in osu_search_results_guard.iter().enumerate() {
                                                         if ui.button(format!("{} - {} (by {})", beatmapset.title, beatmapset.artist, beatmapset.creator)).clicked() {
@@ -300,6 +336,7 @@ impl SpotifySearchApp {
         let is_searching = Arc::clone(&self.is_searching);
         let need_repaint = self.need_repaint.clone();
         let error_message = self.error_message.clone();
+        let err_msg = self.err_msg.clone();
 
         // 記錄搜尋查詢
         log::info!("User searched for: {}", query);
@@ -355,12 +392,14 @@ impl SpotifySearchApp {
                     } else {
                         let error_msg = "您似乎輸入了一個Spotify URL,但它是不正確的。";
                         *error = error_msg.to_string();
+                        *err_msg.lock().await = error_msg.to_string();
                         log::error!("{}", error_msg);
                         Err(anyhow::anyhow!(error_msg))
                     }
                 } else {
                     let error_msg = "你疑似輸入URL,但它是不正確的。";
                     *error = error_msg.to_string();
+                    *err_msg.lock().await = error_msg.to_string();
                     log::error!("{}", error_msg);
                     Err(anyhow::anyhow!(error_msg))
                 }
@@ -381,6 +420,7 @@ impl SpotifySearchApp {
                     log::error!("{}", error);
                     let mut error_msg = error_message.lock().await;
                     *error_msg = error.to_string();
+                    // *err_msg.lock().await = error.to_string();
                 }
             }
 
@@ -396,6 +436,7 @@ impl SpotifySearchApp {
                     log::error!("{}", error);
                     let mut error_msg = error_message.lock().await;
                     *error_msg = error.to_string();
+                    // *err_msg.lock().await = error.to_string();
                 }
             }
 
