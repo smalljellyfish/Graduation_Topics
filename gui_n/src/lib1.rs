@@ -1,7 +1,13 @@
 ﻿use anyhow::{Context, Result};
+use lazy_static::lazy_static;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Mutex;
+
+lazy_static! {
+    static ref ERR_MSG: Mutex<String> = Mutex::new(String::new());
+}
 
 #[derive(Deserialize)]
 pub struct ServiceConfig {
@@ -28,11 +34,13 @@ pub async fn read_config() -> Result<Config> {
 }
 
 pub mod spotify_search {
+    use crate::ERR_MSG;
     use anyhow::{Error, Result};
     use lazy_static::lazy_static;
     use log::error;
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+    use reqwest::Client;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
@@ -147,9 +155,17 @@ pub mod spotify_search {
         let album_id_result = match re.captures(url) {
             Some(caps) => match caps.get(1) {
                 Some(m) => Ok(m.as_str().to_string()),
-                None => Err("URL疑似錯誤，請重新輸入".into()),
+                None => {
+                    let mut err_msg = ERR_MSG.lock().unwrap();
+                    *err_msg = "URL疑似錯誤，請重新輸入".to_string();
+                    Err("URL疑似錯誤，請重新輸入".into())
+                }
             },
-            None => Err("URL疑似錯誤，請重新輸入".into()),
+            None => {
+                let mut err_msg = ERR_MSG.lock().unwrap();
+                *err_msg = "URL疑似錯誤，請重新輸入".to_string();
+                Err("URL疑似錯誤，請重新輸入".into())
+            }
         };
 
         match album_id_result {
@@ -276,38 +292,41 @@ pub mod spotify_search {
     }
 
     pub async fn search_track(
-        client: &reqwest::Client,
-        track_name: &str,
-        access_token: &str,
-        page: u32,
+        client: &Client,
+        query: &str,
+        token: &str,
         limit: u32,
-    ) -> Result<(Vec<Track>, u32)> {
-        let offset = (page - 1) * limit;
-        let search_url = format!(
+        offset: u32,
+    ) -> Result<(Vec<Track>, u32), anyhow::Error> {
+        let url = format!(
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
-            track_name, limit, offset
+            query, limit, offset
         );
         let response = client
-            .get(&search_url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .get(&url)
+            .bearer_auth(token)
             .send()
+            .await?
+            .json::<SearchResult>()
             .await?;
-
-        let search_result: SearchResult = response.json().await?;
-        let total_pages = (search_result.tracks.clone().unwrap().total + limit - 1) / limit;
-        let track_infos = search_result
-            .tracks
-            .unwrap()
-            .items
-            .into_iter()
-            .map(|track| Track {
-                name: track.name,
-                artists: track.artists,
-                external_urls: track.external_urls,
-                album: track.album,
-            })
-            .collect();
-        Ok((track_infos, total_pages))
+    
+        match response.tracks {
+            Some(tracks) => {
+                let total_pages = (tracks.total + limit - 1) / limit;
+                let track_infos = tracks
+                    .items
+                    .into_iter()
+                    .map(|track| Track {
+                        name: track.name,
+                        artists: track.artists,
+                        external_urls: track.external_urls,
+                        album: track.album,
+                    })
+                    .collect();
+                Ok((track_infos, total_pages))
+            }
+            None => Err(anyhow::anyhow!("No tracks found in the search result")),
+        }
     }
 
     pub async fn get_access_token(client: &reqwest::Client) -> Result<String> {
@@ -478,21 +497,31 @@ pub mod spotify_search {
 
 pub mod osu_search {
     use crate::read_config;
+    use anyhow::{anyhow, Result};
     use reqwest::Client;
     use serde::Deserialize;
     use std::io::{self, Write};
-    use anyhow::Result;
+    use log::{info, error};
 
     #[derive(Debug, Deserialize)]
-    pub struct Beatmap {
-        // title: String,
-        pub difficulty_rating: f32,
+    pub struct Covers {
+        pub cover: Option<String>,
+        pub cover_2x: Option<String>,
+        pub card: Option<String>,
+        pub card_2x: Option<String>,
+        pub list: Option<String>,
+        pub list_2x: Option<String>,
+        pub slimcover: Option<String>,
+        pub slimcover_2x: Option<String>,
+    }
+    #[derive(Debug, Deserialize)]
+    pub struct Beatmapset {
+        pub beatmaps: Vec<Beatmap>,
         pub id: i32,
-        pub mode: String,
-        pub status: String,
-        pub total_length: i32,
-        pub user_id: i32,
-        pub version: String,
+        pub artist: String,
+        pub title: String,
+        pub creator: String,
+        pub covers: Covers,
     }
     #[derive(Deserialize)]
     pub struct TokenResponse {
@@ -503,13 +532,15 @@ pub mod osu_search {
     pub struct SearchResponse {
         beatmapsets: Vec<Beatmapset>,
     }
-    #[derive(Debug, Deserialize)]
-    pub struct Beatmapset {
-        pub beatmaps: Vec<Beatmap>,
+    #[derive(Debug, Deserialize, Clone)] // 添加 Clone 特徵
+    pub struct Beatmap {
+        pub difficulty_rating: f32,
         pub id: i32,
-        pub artist: String,
-        pub title: String,
-        pub creator: String,
+        pub mode: String,
+        pub status: String,
+        pub total_length: i32,
+        pub user_id: i32,
+        pub version: String,
     }
 
     pub async fn get_beatmapsets(
@@ -527,16 +558,17 @@ pub mod osu_search {
             .json::<SearchResponse>()
             .await
             .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
-    
+
         Ok(response.beatmapsets)
     }
-    
+
     pub async fn get_osu_token(client: &Client) -> Result<String> {
-        let config = read_config().await
+        let config = read_config()
+            .await
             .map_err(|e| anyhow::anyhow!("Error reading config: {}", e))?;
         let client_id = &config.osu.client_id;
         let client_secret = &config.osu.client_secret;
-    
+
         let url = "https://osu.ppy.sh/oauth/token";
         let params = [
             ("client_id", client_id),
@@ -544,7 +576,8 @@ pub mod osu_search {
             ("grant_type", &"client_credentials".to_string()),
             ("scope", &"public".to_string()),
         ];
-        let response: TokenResponse = client.post(url)
+        let response: TokenResponse = client
+            .post(url)
             .form(&params)
             .send()
             .await
@@ -554,17 +587,32 @@ pub mod osu_search {
             .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
         Ok(response.access_token)
     }
-    pub async fn fetch_beatmapset_details(beatmapset_id: u32, access_token: &str) -> Result<Beatmapset, reqwest::Error> {
+    pub async fn fetch_beatmapset_details(beatmapset_id: u32, access_token: &str) -> Result<Beatmapset> {
+        info!("Fetching details for beatmapset: {}", beatmapset_id);
         let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
-        let client = reqwest::Client::new();
+        let client = Client::new();
         let response = client
             .get(&url)
             .bearer_auth(access_token)
             .send()
-            .await?
-            .json::<Beatmapset>()
-            .await?;
-        Ok(response)
+            .await;
+    
+        match response {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let beatmapset: Beatmapset = resp.json().await?;
+                    info!("Successfully fetched details for beatmapset: {}", beatmapset_id);
+                    Ok(beatmapset)
+                } else {
+                    error!("Failed to fetch beatmapset details: HTTP {}", resp.status());
+                    Err(anyhow!("Failed to fetch beatmapset details: HTTP {}", resp.status()))
+                }
+            }
+            Err(e) => {
+                error!("Error sending request: {}", e);
+                Err(anyhow!(e))
+            }
+        }
     }
     pub fn print_beatmap_info_gui(beatmap: &Beatmap) -> String {
         format!(
