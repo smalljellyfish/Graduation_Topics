@@ -180,17 +180,16 @@ impl eframe::App for SearchApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+
+            
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            ui.spacing_mut().window_margin = egui::Margin::symmetric(0.0, 0.0);
+            let window_size = ctx.input(|i| i.screen_rect.size()); // 獲取當前視窗大小
             ui.label(format!("Window size: {} x {}", window_size.x, window_size.y));
-            let text_style = egui::TextStyle::Body.resolve(ui.style());
-            let mut new_text_style = text_style.clone();
-            new_text_style.size = self.font_size;
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Body, new_text_style);
+
+            // 緊接著顯示 "Search for a song:" 標籤，無額外間距
             ui.heading("Search for a song:");
-            if let Ok(err_msg_guard) = self.err_msg.try_lock() {
-                ui.label(format!("{}", *err_msg_guard));
-            }
+            ui.add_space(5.0); // 控制標籤和搜尋框之間的間距
             ui.horizontal(|ui| {
                 let text_edit_width = ui.available_width() * 0.5;
                 let text_edit_response = ui.add_sized(
@@ -221,6 +220,16 @@ impl eframe::App for SearchApp {
                     self.perform_search(ctx.clone());
                 }
             });
+            let text_style = egui::TextStyle::Body.resolve(ui.style());
+            let mut new_text_style = text_style.clone();
+            new_text_style.size = self.font_size;
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Body, new_text_style);
+            
+            if let Ok(err_msg_guard) = self.err_msg.try_lock() {
+                ui.label(format!("{}", *err_msg_guard));
+            }
         
             ui.columns(2, |columns| {
                 // 左邊顯示Spotify的結果
