@@ -87,14 +87,15 @@ struct SearchApp {
 
 impl eframe::App for SearchApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let window_size = ctx.input(|i| i.screen_rect.size()); //當前視窗大小
-        let base_window_size = egui::vec2(764.0,412.0); // 基準視窗大小
-        let base_font_size = 14.0; // 基準字體大小
+        let window_size = ctx.screen_rect().size();
+        let base_window_size = egui::vec2(600.0, 300.0); // 基準視窗大小
+        //let base_font_size = 14.0; // 基準字體大小
         let ctx_clone = ctx.clone();
 
-        // 計算比例
-        let scale_factor = window_size.x / base_window_size.x;
-        self.font_size = base_font_size * scale_factor;
+        ctx.set_pixels_per_point(1.0);
+
+        let scale_factor = (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
+        self.font_size = 14.0 * (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
 
         // 請求更新介面，用於刷新GUI
         if self.need_repaint.load(Ordering::SeqCst) {
@@ -159,6 +160,7 @@ impl eframe::App for SearchApp {
             }
 
             ctx.set_fonts(fonts);
+            ctx.set_pixels_per_point(scale_factor);
 
             let err_msg = {
                 let err_msg_lock = self.err_msg.clone();
@@ -185,16 +187,19 @@ impl eframe::App for SearchApp {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
             ui.spacing_mut().window_margin = egui::Margin::symmetric(0.0, 0.0);
             let window_size = ctx.input(|i| i.screen_rect.size()); // 獲取當前視窗大小
-            ui.label(format!("Window size: {} x {}", window_size.x, window_size.y));
+            ui.label(format!("Window size: {:.0} x {:.0}", window_size.x, window_size.y));
 
             // 緊接著顯示 "Search for a song:" 標籤，無額外間距
-            ui.heading("Search for a song:");
+            ui.heading(egui::RichText::new("Search for a song:").font(egui::FontId::proportional(self.font_size * 1.5)));
             ui.add_space(5.0); // 控制標籤和搜尋框之間的間距
             ui.horizontal(|ui| {
-                let text_edit_width = ui.available_width() * 0.5;
+                let available_width = ui.available_width();
+                let text_edit_width = available_width * 0.8; // 使用可用寬度的 80%
+                let text_edit_height = self.font_size * 2.0; // 調整高度
                 let text_edit_response = ui.add_sized(
-                    egui::vec2(text_edit_width, 20.0 * self.font_size / base_font_size), // 調整高度以保持與基準字體大小的比例
-                    egui::TextEdit::singleline(&mut self.search_query),
+                    egui::vec2(text_edit_width, text_edit_height),
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .font(egui::FontId::proportional(self.font_size * 1.2))
                 );
         
                 let cloned_response = text_edit_response.clone();
@@ -234,7 +239,7 @@ impl eframe::App for SearchApp {
             ui.columns(2, |columns| {
                 // 左邊顯示Spotify的結果
                 columns[0].vertical(|ui| {
-                    ui.heading("Spotify Results");
+                    ui.heading(egui::RichText::new("Spotify Results").font(egui::FontId::proportional(self.font_size * 1.2)));
                     ui.push_id("spotify_results", |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             if let Ok(search_results_guard) = self.search_results.try_lock() {
@@ -301,7 +306,7 @@ impl eframe::App for SearchApp {
         
                 // 右邊顯示Osu的結果
                 columns[1].vertical(|ui| {
-                    ui.heading("Osu Results");
+                    ui.heading(egui::RichText::new("Osu Results").font(egui::FontId::proportional(self.font_size * 1.1)));
                     ui.push_id("osu_results", |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
@@ -310,9 +315,16 @@ impl eframe::App for SearchApp {
                                         let selected_beatmapset = &osu_search_results_guard[selected_index];
                                         let mut sorted_beatmaps = selected_beatmapset.beatmaps.clone();
                                         sorted_beatmaps.sort_by(|easier, harder| harder.difficulty_rating.partial_cmp(&easier.difficulty_rating).unwrap());
+                                        
+                                        ui.heading(egui::RichText::new(format!("{} - {}", selected_beatmapset.title, selected_beatmapset.artist))
+                                            .font(egui::FontId::proportional(self.font_size * 1.1)));
+                                        ui.label(egui::RichText::new(format!("by {}", selected_beatmapset.creator))
+                                            .font(egui::FontId::proportional(self.font_size * 0.9)));
+                                        ui.add_space(10.0);
+                
                                         for beatmap in &sorted_beatmaps {
                                             let beatmap_info = format!(
-                                                "Difficulty: {}\nMode: {}\nStatus: {}\nLength: {} min {}s \nVersion: {}",
+                                                "Difficulty: {:.2} | Mode: {} | Status: {}\nLength: {} min {}s | Version: {}",
                                                 beatmap.difficulty_rating,
                                                 beatmap.mode,
                                                 beatmap.status,
@@ -320,52 +332,62 @@ impl eframe::App for SearchApp {
                                                 beatmap.total_length%60,
                                                 beatmap.version
                                             );
-                                            ui.label(beatmap_info);
-                                            ui.add_space(10.0);
-                                            ui.label("------------------------------------");
-                                            ui.add_space(10.0);
+                                            ui.label(egui::RichText::new(beatmap_info).font(egui::FontId::proportional(self.font_size * 0.9)));
+                                            ui.add_space(5.0);
+                                            ui.separator();
                                         }
-                                        if ui.button("back").clicked(){
+                                        if ui.button("Back").clicked() {
                                             self.selected_beatmapset = None;
-                                        };
+                                        }
                                     } else {
                                         for (index, beatmapset) in osu_search_results_guard.iter().enumerate() {
-                                            ui.horizontal(|ui| {
-                                                // 嘗試非阻塞地獲取鎖
-                                                if let Ok(textures) = self.cover_textures.try_read() {
-                                                    // 處理兩層 Option
-                                                    if let Some(Some((texture, size))) = textures.get(&index) {
-                                                        let max_size = 100.0; // 設置最大尺寸
-                                                        let aspect_ratio = size.0 as f32 / size.1 as f32; // 計算圖片的寬高比
-                                                        let mut image_size = egui::Vec2::new(max_size, max_size / aspect_ratio); // 根據寬高比計算適當的尺寸
-                                                        
-                                                        // 確保圖片不超出最大尺寸
-                                                        if image_size.x > max_size {
-                                                            image_size.x = max_size;
-                                                            image_size.y = max_size / aspect_ratio;
-                                                        }
-                                                        if image_size.y > max_size {
-                                                            image_size.y = max_size;
-                                                            image_size.x = max_size * aspect_ratio;
-                                                        }
-                                                        
-                                                        let image_source = (texture.id(), image_size);
-                                                        ui.image(image_source);
-                                                        info!("Displaying image for index: {}", index);
-                                                    } else {
-                                                        ui.label("Loading cover...");
-                                                    }
-                                                } else {
-                                                    ui.label("Waiting for lock...");
-                                                }
-                                                ui.add_space(10.0);
+                                            let response = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(ui.available_width(), 100.0)));
                                             
-                                                ui.vertical(|ui| {
-                                                    if ui.button(format!("{} - {} (by {})", beatmapset.title, beatmapset.artist, beatmapset.creator)).clicked() {
-                                                        self.selected_beatmapset = Some(index);
-                                                    }
+                                            if response.clicked() {
+                                                self.selected_beatmapset = Some(index);
+                                            }
+                
+                                            
+                
+                                            ui.allocate_ui_at_rect(response.rect, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.vertical(|ui| {
+                                                        if let Ok(textures) = self.cover_textures.try_read() {
+                                                            if let Some(Some((texture, size))) = textures.get(&index) {
+                                                                let max_height = 100.0;
+                                                                let aspect_ratio = size.0 / size.1;
+                                                                let image_size = egui::Vec2::new(
+                                                                    max_height * aspect_ratio,
+                                                                    max_height
+                                                                );
+                                                                ui.image((texture.id(), image_size));
+                                                            } else {
+                                                                ui.label("Loading...");
+                                                            }
+                                                        }
+                                                    });
+                                                    
+                                                    ui.add_space(10.0);
+                                                
+                                                    ui.vertical(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(&beatmapset.title)
+                                                                .font(egui::FontId::proportional(self.font_size * 1.0))
+                                                                .strong()
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(&beatmapset.artist)
+                                                                .font(egui::FontId::proportional(self.font_size * 0.9))
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(format!("by {}", beatmapset.creator))
+                                                                .font(egui::FontId::proportional(self.font_size * 0.8))
+                                                        );
+                                                    });
                                                 });
-                                            });                                            
+                                            });
+                                            
+                                            ui.add_space(5.0);
                                             ui.separator();
                                         }
                                     }
@@ -642,13 +664,13 @@ async fn main() {
     // 創建 SearchApp 實例
     let app = SearchApp::new(client.clone(), sender, receiver, cover_textures.clone(), need_repaint.clone());
 
-    // 設定初始視窗大小
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = ViewportBuilder {
         title: Some(String::from("Search App")),
-    inner_size: Some(egui::Vec2::new(600.0, 300.0)), 
-    ..Default::default()
-};
+        inner_size: Some(egui::Vec2::new(600.0, 300.0)),
+        ..Default::default()
+    };
+    
 
 
     // 運行應用
