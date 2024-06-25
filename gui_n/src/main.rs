@@ -323,6 +323,7 @@ impl eframe::App for SearchApp {
                                         ui.add_space(10.0);
                 
                                         for beatmap in &sorted_beatmaps {
+                                            ui.add_space(10.0);
                                             let beatmap_info = format!(
                                                 "Difficulty: {:.2} | Mode: {} | Status: {}\nLength: {} min {}s | Version: {}",
                                                 beatmap.difficulty_rating,
@@ -332,11 +333,11 @@ impl eframe::App for SearchApp {
                                                 beatmap.total_length%60,
                                                 beatmap.version
                                             );
-                                            ui.label(egui::RichText::new(beatmap_info).font(egui::FontId::proportional(self.font_size * 0.9)));
-                                            ui.add_space(5.0);
+                                            ui.label(egui::RichText::new(beatmap_info).font(egui::FontId::proportional(self.font_size * 1.0)));
+                                            ui.add_space(10.0);
                                             ui.separator();
                                         }
-                                        if ui.button("Back").clicked() {
+                                        if ui.add_sized([100.0, 40.0], egui::Button::new(egui::RichText::new("Back").font(egui::FontId::proportional(self.font_size * 1.0)))).clicked() {
                                             self.selected_beatmapset = None;
                                         }
                                     } else {
