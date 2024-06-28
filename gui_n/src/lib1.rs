@@ -1,12 +1,19 @@
-﻿use anyhow::{Context, Result};
+﻿use anyhow::{Context, Result, anyhow};
+use serde_json::Value;
+use regex::Regex;
 use lazy_static::lazy_static;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
+use log::error;
+use log::info;
 
 lazy_static! {
     static ref ERR_MSG: Mutex<String> = Mutex::new(String::new());
+}
+lazy_static! {
+    static ref LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 }
 
 #[derive(Deserialize)]
@@ -24,13 +31,132 @@ pub struct Config {
 pub async fn read_config() -> Result<Config> {
     let file_path = "config.json";
     let mut file = File::open(file_path)
-        .with_context(|| format!("Failed to open config file: {}", file_path))?;
+        .with_context(|| format!("無法開啟配置文件: {}", file_path))?;
     let mut content = String::new();
     file.read_to_string(&mut content)
-        .with_context(|| "Failed to read from config file")?;
-    let config: Config = serde_json::from_str(&content)
-        .with_context(|| "Failed to parse config file, please check the JSON format")?;
+        .with_context(|| "無法讀取配置文件內容")?;
+    
+    let config_value: Value = serde_json::from_str(&content)
+        .with_context(|| "配置文件格式錯誤，請檢查 JSON 格式")?;
+
+    let mut errors = Vec::new();
+
+    // Spotify 配置檢查
+    if let Err(e) = check_spotify_config(&config_value) {
+        errors.extend(e);
+    }
+
+    // Osu 配置檢查
+    if let Err(e) = check_osu_config(&config_value) {
+        errors.extend(e);
+    }
+
+    if !errors.is_empty() {
+        let error_msg = format!("配置檢查失敗:\n{}", errors.join("\n"));
+        
+        // 檢查錯誤是否有變化
+        let mut last_error = LAST_ERROR.lock().unwrap();
+        if last_error.as_ref() != Some(&error_msg) {
+            error!("{}", error_msg);
+            *last_error = Some(error_msg.clone());
+        }
+        
+        return Err(anyhow!(error_msg));
+    } else {
+        // 如果沒有錯誤，清除上一次的錯誤記錄
+        let mut last_error = LAST_ERROR.lock().unwrap();
+        if last_error.is_some() {
+            info!("配置檢查通過");
+            *last_error = None;
+        }
+    }
+
+    // 如果檢查通過，解析為 Config 結構
+    let config: Config = serde_json::from_value(config_value)
+        .with_context(|| "無法將配置文件解析為 Config 結構")?;
+    
     Ok(config)
+}
+
+fn check_spotify_config(config_value: &Value) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    let spotify = match config_value.get("spotify") {
+        Some(s) => s,
+        None => {
+            errors.push("缺少 Spotify 配置".to_string());
+            return Err(errors);
+        }
+    };
+
+    let client_id = spotify.get("client_id").and_then(Value::as_str);
+    let client_secret = spotify.get("client_secret").and_then(Value::as_str);
+
+    if let Some(id) = client_id {
+        if id.len() != 32 {
+            errors.push("Spotify client_id 長度不正確，應為 32 個字符".to_string());
+        }
+        let hex_regex = Regex::new(r"^[0-9a-f]{32}$").unwrap();
+        if !hex_regex.is_match(id) {
+            errors.push("Spotify client_id 格式錯誤，應為 32 位十六進制字符".to_string());
+        }
+    } else {
+        errors.push("Spotify client_id 缺失或格式錯誤".to_string());
+    }
+
+    if let Some(secret) = client_secret {
+        if secret.len() != 32 {
+            errors.push("Spotify client_secret 長度不正確，應為 32 個字符".to_string());
+        }
+        let hex_regex = Regex::new(r"^[0-9a-f]{32}$").unwrap();
+        if !hex_regex.is_match(secret) {
+            errors.push("Spotify client_secret 格式錯誤，應為 32 位十六進制字符".to_string());
+        }
+    } else {
+        errors.push("Spotify client_secret 缺失或格式錯誤".to_string());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+fn check_osu_config(config_value: &Value) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    let osu = match config_value.get("osu") {
+        Some(o) => o,
+        None => {
+            errors.push("缺少 Osu 配置".to_string());
+            return Err(errors);
+        }
+    };
+
+    let client_id = osu.get("client_id").and_then(Value::as_str);
+    let client_secret = osu.get("client_secret").and_then(Value::as_str);
+
+    if let Some(id) = client_id {
+        if !id.chars().all(char::is_numeric) || id.len() < 5 {
+            errors.push("Osu client_id 格式錯誤，應為至少 5 位的數字".to_string());
+        }
+    } else {
+        errors.push("Osu client_id 缺失或格式錯誤".to_string());
+    }
+
+    if let Some(secret) = client_secret {
+        if secret.len() < 40 {
+            errors.push("Osu client_secret 長度不足，應至少為 40 個字符".to_string());
+        }
+    } else {
+        errors.push("Osu client_secret 缺失或格式錯誤".to_string());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 pub mod spotify_search {
@@ -126,6 +252,19 @@ pub mod spotify_search {
         pub artists: Vec<Artist>,
         pub external_urls: HashMap<String, String>,
         pub album: Album,
+    }
+    pub struct TrackWithCover {
+        pub name: String,
+        pub artists: Vec<Artist>,
+        pub external_urls: HashMap<String, String>,
+        pub album_name: String,
+        pub cover_url: Option<String>,
+    }
+
+    pub struct TrackInfo {
+        pub name: String,
+        pub artists: String,
+        pub album: String,
     }
 
     lazy_static! {
@@ -233,24 +372,25 @@ pub mod spotify_search {
             println!("------------------------");
         }
     }
-    pub fn print_track_info_gui(track: &Track) -> (String, Option<String>, String) {
-        let track_name = &track.name;
-        let album_name = &track.album.name;
+    pub fn print_track_info_gui(track: &Track) -> (TrackInfo, Option<String>) {
+        let track_name = track.name.clone();
+        let album_name = track.album.name.clone();
         let artist_names = track
             .artists
             .iter()
-            .map(|artist| artist.name.as_str())
-            .collect::<Vec<&str>>()
+            .map(|artist| artist.name.clone())
+            .collect::<Vec<String>>()
             .join(", ");
-
+    
         let spotify_url = track.external_urls.get("spotify").cloned();
-
-        let info = format!(
-            "Track: {}\nArtists: {}\nAlbum: {}",
-            track_name, artist_names, album_name
-        );
-
-        (info, spotify_url, track_name.clone())
+    
+        let track_info = TrackInfo {
+            name: track_name,
+            artists: artist_names,
+            album: album_name,
+        };
+    
+        (track_info, spotify_url)
     }
 
     pub fn print_album_info(album: &Album) {
@@ -297,7 +437,7 @@ pub mod spotify_search {
         token: &str,
         limit: u32,
         offset: u32,
-    ) -> Result<(Vec<Track>, u32), anyhow::Error> {
+    ) -> Result<(Vec<TrackWithCover>, u32), anyhow::Error> {
         let url = format!(
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
             query, limit, offset
@@ -309,18 +449,19 @@ pub mod spotify_search {
             .await?
             .json::<SearchResult>()
             .await?;
-    
+
         match response.tracks {
             Some(tracks) => {
                 let total_pages = (tracks.total + limit - 1) / limit;
-                let track_infos = tracks
+                let track_infos: Vec<TrackWithCover> = tracks
                     .items
                     .into_iter()
-                    .map(|track| Track {
+                    .map(|track| TrackWithCover {
                         name: track.name,
                         artists: track.artists,
                         external_urls: track.external_urls,
-                        album: track.album,
+                        album_name: track.album.name,
+                        cover_url: track.album.images.first().map(|img| img.url.clone()),
                     })
                     .collect();
                 Ok((track_infos, total_pages))
@@ -498,10 +639,10 @@ pub mod spotify_search {
 pub mod osu_search {
     use crate::read_config;
     use anyhow::{anyhow, Result};
+    use log::{error, info};
     use reqwest::Client;
     use serde::Deserialize;
     use std::io::{self, Write};
-    use log::{info, error};
 
     #[derive(Debug, Deserialize)]
     pub struct Covers {
@@ -587,25 +728,30 @@ pub mod osu_search {
             .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
         Ok(response.access_token)
     }
-    pub async fn fetch_beatmapset_details(beatmapset_id: u32, access_token: &str) -> Result<Beatmapset> {
+    pub async fn fetch_beatmapset_details(
+        beatmapset_id: u32,
+        access_token: &str,
+    ) -> Result<Beatmapset> {
         info!("Fetching details for beatmapset: {}", beatmapset_id);
         let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
         let client = Client::new();
-        let response = client
-            .get(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await;
-    
+        let response = client.get(&url).bearer_auth(access_token).send().await;
+
         match response {
             Ok(resp) => {
                 if resp.status().is_success() {
                     let beatmapset: Beatmapset = resp.json().await?;
-                    info!("Successfully fetched details for beatmapset: {}", beatmapset_id);
+                    info!(
+                        "Successfully fetched details for beatmapset: {}",
+                        beatmapset_id
+                    );
                     Ok(beatmapset)
                 } else {
                     error!("Failed to fetch beatmapset details: HTTP {}", resp.status());
-                    Err(anyhow!("Failed to fetch beatmapset details: HTTP {}", resp.status()))
+                    Err(anyhow!(
+                        "Failed to fetch beatmapset details: HTTP {}",
+                        resp.status()
+                    ))
                 }
             }
             Err(e) => {
