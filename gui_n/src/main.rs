@@ -5,7 +5,7 @@
 //上方為lib1裡的相關函數
 // 引入所需模組
 use lib::osu_search::{
-    fetch_beatmapset_details, get_beatmapsets, get_osu_token, print_beatmap_info_gui, Beatmapset,
+    get_beatmapsets, get_osu_token, print_beatmap_info_gui, Beatmapset,BeatmapInfo
 };
 use lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url, print_track_info_gui,
@@ -65,7 +65,7 @@ struct SearchApp {
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
     texture_load_queue: Arc<Mutex<Vec<String>>>,
     config_errors: Arc<Mutex<Vec<String>>>,
-    
+    debug_mode: bool,
 }
 
 //為上方實現Default trait，創建默認狀態
@@ -300,9 +300,19 @@ impl eframe::App for SearchApp {
                             }
                         });
                 
-                        // 檢測Enter是否按下
+                        // 檢測Enter是否按下，並處理調試模式
                         if text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            self.perform_search(ctx.clone());
+                            if self.search_query.trim().to_lowercase() == "debug" {
+                                self.debug_mode = !self.debug_mode; // 切換調試模式
+                                self.search_query.clear(); // 清空搜索框
+                            } else {
+                                self.perform_search(ctx.clone());
+                            }
+                        }
+                            // 顯示調試模式狀態
+                        if self.debug_mode {
+                            ui.add_space(5.0);
+                            ui.label(egui::RichText::new("調試模式已啟用").color(egui::Color32::YELLOW).size(self.font_size));
                         }
                     });
                 });
@@ -461,26 +471,16 @@ impl eframe::App for SearchApp {
                                 if !osu_search_results_guard.is_empty() {
                                     if let Some(selected_index) = self.selected_beatmapset {
                                         let selected_beatmapset = &osu_search_results_guard[selected_index];
-                                        let mut sorted_beatmaps = selected_beatmapset.beatmaps.clone();
-                                        sorted_beatmaps.sort_by(|easier, harder| harder.difficulty_rating.partial_cmp(&easier.difficulty_rating).unwrap());
+                                        let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
                                         
-                                        ui.heading(egui::RichText::new(format!("{} - {}", selected_beatmapset.title, selected_beatmapset.artist))
+                                        ui.heading(egui::RichText::new(format!("{} - {}", beatmap_info.title, beatmap_info.artist))
                                             .font(egui::FontId::proportional(self.font_size * 1.1)));
-                                        ui.label(egui::RichText::new(format!("by {}", selected_beatmapset.creator))
+                                        ui.label(egui::RichText::new(format!("by {}", beatmap_info.creator))
                                             .font(egui::FontId::proportional(self.font_size * 0.9)));
                                         ui.add_space(10.0);
                 
-                                        for beatmap in &sorted_beatmaps {
+                                        for beatmap_info in beatmap_info.beatmaps {
                                             ui.add_space(10.0);
-                                            let beatmap_info = format!(
-                                                "Difficulty: {:.2} | Mode: {} | Status: {}\nLength: {} min {}s | Version: {}",
-                                                beatmap.difficulty_rating,
-                                                beatmap.mode,
-                                                beatmap.status,
-                                                beatmap.total_length/60,
-                                                beatmap.total_length%60,
-                                                beatmap.version
-                                            );
                                             ui.label(egui::RichText::new(beatmap_info).font(egui::FontId::proportional(self.font_size * 1.0)));
                                             ui.add_space(10.0);
                                             ui.separator();
@@ -686,6 +686,7 @@ impl SearchApp {
                 texture_cache,
                 texture_load_queue,
                 config_errors,
+                debug_mode: false,
             }
         }
     async fn load_texture_async(ctx: &egui::Context, url: &str) -> Option<TextureHandle> {
@@ -705,6 +706,7 @@ impl SearchApp {
 
     fn perform_search(&mut self, ctx: egui::Context) -> JoinHandle<Result<()>> {
         let client = self.client.clone();
+        let debug_mode = self.debug_mode;
         let query = self.search_query.clone();
         let search_results = self.search_results.clone();
         let osu_search_results = self.osu_search_results.clone();
@@ -722,6 +724,9 @@ impl SearchApp {
         tokio::spawn(async move {
             let mut error = error_message.lock().await;
             error.clear();
+            if debug_mode {
+                info!("調試模式已啟用");
+            }
 
             // 獲取 Spotify token
             let spotify_token = match get_access_token(&*client.lock().await).await {
@@ -789,17 +794,20 @@ impl SearchApp {
                 log::error!("{}", error_msg);
                 Err(anyhow::anyhow!(error_msg))
             }
-        } else {
-            // 假設 limit 和 offset 是您需要提供的參數
+        } else if !query.is_empty() {
             let limit = 10;
             let offset = 0;
-            search_track(&*client.lock().await, &query, &spotify_token, limit, offset)
+            info!("搜索 Spotify: {}", query);
+            search_track(&*client.lock().await, &query, &spotify_token, limit, offset, debug_mode)
                 .await
                 .map(|(tracks_with_cover, _)| tracks_with_cover)
+        } else {
+            Ok(Vec::new()) // 如果查詢為空，返回空結果
         };
-        
+            
         match spotify_result {
             Ok(tracks_with_cover) => {
+                info!("Spotify search results: {} tracks found", tracks_with_cover.len());
                 let mut search_results = search_results.lock().await;
                 *search_results = tracks_with_cover.into_iter().map(|twc| Track {
                     name: twc.name,
@@ -832,6 +840,11 @@ impl SearchApp {
             // Osu search
             match get_beatmapsets(&*client.lock().await, &osu_token, &query).await {
                 Ok(results) => {
+                    if debug_mode {
+                        info!("Osu 搜索結果: {:?}", results);
+                    } else {
+                        info!("Osu 搜索結果: {} 個 beatmapsets", results.len());
+                    }
                     info!("osu_search_results: {:?}", results);
                     let mut osu_urls = Vec::new();
                     for beatmapset in &results {

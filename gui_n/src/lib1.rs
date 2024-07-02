@@ -163,7 +163,7 @@ pub mod spotify_search {
     use crate::ERR_MSG;
     use anyhow::{Error, Result};
     use lazy_static::lazy_static;
-    use log::error;
+    use log::{info, error};
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use reqwest::Client;
@@ -437,36 +437,80 @@ pub mod spotify_search {
         token: &str,
         limit: u32,
         offset: u32,
+        debug_mode: bool,
     ) -> Result<(Vec<TrackWithCover>, u32), anyhow::Error> {
+        
+    
         let url = format!(
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
             query, limit, offset
         );
+        
         let response = client
             .get(&url)
             .bearer_auth(token)
             .send()
-            .await?
-            .json::<SearchResult>()
             .await?;
 
-        match response.tracks {
+        if debug_mode {
+            info!("Spotify API 請求詳情:");
+            info!("  URL: {}", url);
+        }
+        
+        info!("收到回應狀態碼: {}", response.status());
+
+        // 獲取回應的文本內容
+        let response_text = response.text().await?;
+    
+        // 記錄 Spotify API 的完整 JSON 回應
+        if debug_mode {
+            info!("Spotify API 回應 JSON: {}", response_text);
+        }
+        
+        
+
+        // 將文本解析為 SearchResult
+        let search_result: SearchResult = serde_json::from_str(&response_text)?;
+    
+        match search_result.tracks {
             Some(tracks) => {
                 let total_pages = (tracks.total + limit - 1) / limit;
+                info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
+    
                 let track_infos: Vec<TrackWithCover> = tracks
                     .items
                     .into_iter()
-                    .map(|track| TrackWithCover {
-                        name: track.name,
-                        artists: track.artists,
-                        external_urls: track.external_urls,
-                        album_name: track.album.name,
-                        cover_url: track.album.images.first().map(|img| img.url.clone()),
+                    .map(|track| {
+                        let cover_url = track.album.images.first().map(|img| img.url.clone());
+                        let artists_names = track.artists.iter()
+                        .fold(String::new(), |acc, artist| {
+                            if acc.is_empty() {
+                                artist.name.clone()
+                            } else {
+                                format!("{}, {}", acc, artist.name)
+                            }
+                        });
+                        info!("處理曲目: \"{}\" by {}", track.name, artists_names);
+                        if let Some(url) = &cover_url {
+                            info!("  專輯封面 URL: {}", url);
+                        }
+                        TrackWithCover {
+                            name: track.name,
+                            artists: track.artists,
+                            external_urls: track.external_urls,
+                            album_name: track.album.name,
+                            cover_url,
+                        }
                     })
                     .collect();
+    
+                info!("成功處理 {} 首曲目", track_infos.len());
                 Ok((track_infos, total_pages))
             }
-            None => Err(anyhow::anyhow!("No tracks found in the search result")),
+            None => {
+                error!("搜索結果中沒有找到曲目");
+                Err(anyhow::anyhow!("搜索結果中沒有找到曲目"))
+            }
         }
     }
 
@@ -638,8 +682,8 @@ pub mod spotify_search {
 
 pub mod osu_search {
     use crate::read_config;
-    use anyhow::{anyhow, Result};
-    use log::{error, info};
+    use anyhow::Result;
+    //use log::{error, info};
     use reqwest::Client;
     use serde::Deserialize;
     use std::io::{self, Write};
@@ -673,7 +717,7 @@ pub mod osu_search {
     pub struct SearchResponse {
         beatmapsets: Vec<Beatmapset>,
     }
-    #[derive(Debug, Deserialize, Clone)] // 添加 Clone 特徵
+    #[derive(Debug, Deserialize, Clone)] 
     pub struct Beatmap {
         pub difficulty_rating: f32,
         pub id: i32,
@@ -683,6 +727,13 @@ pub mod osu_search {
         pub user_id: i32,
         pub version: String,
     }
+    pub struct BeatmapInfo {
+        pub title: String,
+        pub artist: String,
+        pub creator: String,
+        pub beatmaps: Vec<String>,
+    }
+    
 
     pub async fn get_beatmapsets(
         client: &Client,
@@ -728,48 +779,27 @@ pub mod osu_search {
             .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
         Ok(response.access_token)
     }
-    pub async fn fetch_beatmapset_details(
-        beatmapset_id: u32,
-        access_token: &str,
-    ) -> Result<Beatmapset> {
-        info!("Fetching details for beatmapset: {}", beatmapset_id);
-        let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
-        let client = Client::new();
-        let response = client.get(&url).bearer_auth(access_token).send().await;
 
-        match response {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    let beatmapset: Beatmapset = resp.json().await?;
-                    info!(
-                        "Successfully fetched details for beatmapset: {}",
-                        beatmapset_id
-                    );
-                    Ok(beatmapset)
-                } else {
-                    error!("Failed to fetch beatmapset details: HTTP {}", resp.status());
-                    Err(anyhow!(
-                        "Failed to fetch beatmapset details: HTTP {}",
-                        resp.status()
-                    ))
-                }
-            }
-            Err(e) => {
-                error!("Error sending request: {}", e);
-                Err(anyhow!(e))
-            }
+    pub fn print_beatmap_info_gui(beatmapset: &Beatmapset) -> BeatmapInfo {
+        let mut beatmaps = Vec::new();
+        for beatmap in &beatmapset.beatmaps {
+            beatmaps.push(format!(
+                "Difficulty: {:.2} | Mode: {} | Status: {}\nLength: {} min {}s | Version: {}",
+                beatmap.difficulty_rating,
+                beatmap.mode,
+                beatmap.status,
+                beatmap.total_length / 60,
+                beatmap.total_length % 60,
+                beatmap.version
+            ));
         }
-    }
-    pub fn print_beatmap_info_gui(beatmap: &Beatmap) -> String {
-        format!(
-            "Beatmap ID: {}\nDifficulty: {:.2}\nMode: {}\nStatus: {}\nLength: {} mins\nVersion: {}",
-            beatmap.id,
-            beatmap.difficulty_rating,
-            beatmap.mode,
-            beatmap.status,
-            beatmap.total_length / 60,
-            beatmap.version
-        )
+    
+        BeatmapInfo {
+            title: beatmapset.title.clone(),
+            artist: beatmapset.artist.clone(),
+            creator: beatmapset.creator.clone(),
+            beatmaps,
+        }
     }
     #[tokio::main]
     pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
