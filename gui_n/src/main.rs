@@ -98,11 +98,10 @@ impl eframe::App for SearchApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         
         
-        let base_window_size = egui::vec2(600.0, 300.0); // 基準視窗大小
-        
-        let ctx_clone = ctx.clone();
-
-        ctx.set_pixels_per_point(1.0);
+        let base_window_size = egui::vec2(1384.0, 784.0); // 基準視窗大小
+        let window_size = ctx.available_rect().size();
+        let scale_factor = (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
+        self.font_size = 14.0 * scale_factor;
 
         
         // 請求更新介面，用於刷新GUI
@@ -117,8 +116,9 @@ impl eframe::App for SearchApp {
             let client = self.client.clone();
             let osu_urls = vec![];
             let sender_clone = self.sender.clone();
+            let ctx_clone = ctx.clone();
             tokio::spawn(async move {
-                load_all_covers(osu_urls.clone(), ctx_clone.into(), sender_clone).await;
+                load_all_covers(osu_urls.clone(), ctx_clone, sender_clone).await;
             });
 
             let mut receiver = self.receiver.take().expect("Receiver already taken");
@@ -228,6 +228,8 @@ impl eframe::App for SearchApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.set_max_width(ui.available_width());
+            ui.set_max_height(ui.available_height());
 
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
             ui.spacing_mut().window_margin = egui::Margin::symmetric(0.0, 0.0);
@@ -241,11 +243,11 @@ impl eframe::App for SearchApp {
 
             // 緊接著顯示 "Search for a song:" 標籤，無額外間距
             ui.heading(egui::RichText::new("Search for a song:").font(egui::FontId::proportional(self.font_size * 1.5)));
-            ui.add_space(5.0); // 控制標籤和搜尋框之間的間距
+            ui.add_space(5.0 * scale_factor); // 控制標籤和搜尋框之間的間距
             ui.horizontal(|ui| {
                 let available_width = ui.available_width();
-                let text_edit_width = available_width * 0.8; // 使用可用寬度的 80%
-                let text_edit_height = self.font_size * 2.0; // 增加高度
+                let text_edit_width = available_width * 0.8;
+                let text_edit_height = self.font_size * 2.0;
                 
                 let frame = egui::Frame::none()
                     .fill(ui.visuals().extreme_bg_color)
@@ -331,8 +333,9 @@ impl eframe::App for SearchApp {
             ui.columns(2, |columns| {
                 // 左邊顯示Spotify的結果
                 columns[0].vertical(|ui| {
-                    ui.heading(egui::RichText::new("Spotify Results").size(24.0));
-                    ui.add_space(5.0);
+                    ui.set_min_width(0.45 * window_size.x);
+                    ui.heading(egui::RichText::new("Spotify Results").size(self.font_size * 1.2));
+                    ui.add_space(5.0 * scale_factor);
                     ui.push_id("spotify_results", |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             if let Ok(search_results_guard) = self.search_results.try_lock() {
@@ -464,6 +467,7 @@ impl eframe::App for SearchApp {
         
                 // 右邊顯示Osu的結果
                 columns[1].vertical(|ui| {
+                    ui.set_min_width(0.45 * window_size.x);
                     ui.heading(egui::RichText::new("Osu Results").font(egui::FontId::proportional(self.font_size * 1.1)));
                     ui.push_id("osu_results", |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -911,9 +915,10 @@ async fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = ViewportBuilder {
         title: Some(String::from("Search App")),
-        inner_size: Some(egui::Vec2::new(700.0, 400.0)),
+        inner_size: Some(egui::Vec2::new(1384.0, 784.0)),
+        min_inner_size: Some(egui::Vec2::new(700.0, 400.0)), 
         ..Default::default()
-    };    
+    };     
 
     // 將所有需要的變量移動到閉包內
     let client = client.clone();
