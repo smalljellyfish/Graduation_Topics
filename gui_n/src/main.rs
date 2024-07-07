@@ -4,14 +4,12 @@
 }; */
 //上方為lib1裡的相關函數
 // 引入所需模組
-use lib::osu_search::{
-    get_beatmapsets, get_osu_token, print_beatmap_info_gui, Beatmapset,BeatmapInfo
-};
+use lib::osu_search::{get_beatmapsets, get_osu_token, print_beatmap_info_gui, Beatmapset};
+use lib::read_config;
 use lib::spotify_search::{
     get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url, print_track_info_gui,
-    search_track, Track,TrackWithCover,Album,Image
+    search_track, Album, Image, Track, TrackWithCover,
 };
-use lib::read_config;
 
 use tokio;
 //use tokio::runtime::Runtime;
@@ -19,10 +17,11 @@ use tokio;
 use anyhow::Result;
 use clipboard::{ClipboardContext, ClipboardProvider};
 use eframe::{self, egui};
-use egui::{ColorImage, Context, TextureHandle};
-use egui::{FontData, FontDefinitions, FontFamily};
-use egui::ViewportBuilder;
 use egui::TextureWrapMode;
+use egui::ViewportBuilder;
+use egui::{ColorImage, TextureHandle};
+use egui::{FontData, FontDefinitions, FontFamily};
+
 
 use reqwest::Client;
 
@@ -34,14 +33,14 @@ use std::default::Default;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+
+
 use std::collections::HashMap;
-use tokio::sync::Mutex as AsyncMutex;
+//use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use tokio::sync::mpsc::Sender;
-
-
 
 // 定義 SpotifySearchApp結構，儲存程式狀態和數據
 struct SearchApp {
@@ -66,6 +65,7 @@ struct SearchApp {
     texture_load_queue: Arc<Mutex<Vec<String>>>,
     config_errors: Arc<Mutex<Vec<String>>>,
     debug_mode: bool,
+    spotify_icon: Option<egui::TextureHandle>,
 }
 
 //為上方實現Default trait，創建默認狀態
@@ -96,14 +96,12 @@ struct SearchApp {
 
 impl eframe::App for SearchApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        
-        
         let base_window_size = egui::vec2(1384.0, 784.0); // 基準視窗大小
         let window_size = ctx.available_rect().size();
-        let scale_factor = (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
+        let scale_factor =
+            (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
         self.font_size = 14.0 * scale_factor;
 
-        
         // 請求更新介面，用於刷新GUI
         if self.need_repaint.load(Ordering::SeqCst) {
             ctx.request_repaint();
@@ -112,7 +110,6 @@ impl eframe::App for SearchApp {
 
         // 初始化程式,和設置字體及獲取access token
         if !self.initialized {
-
             let client = self.client.clone();
             let osu_urls = vec![];
             let sender_clone = self.sender.clone();
@@ -132,7 +129,7 @@ impl eframe::App for SearchApp {
                     need_repaint_clone.store(true, Ordering::SeqCst);
                 }
             });
-    
+
             self.initialized = true;
 
             let access_token = self.access_token.clone();
@@ -168,7 +165,6 @@ impl eframe::App for SearchApp {
             }
 
             ctx.set_fonts(fonts);
-            
 
             let ctx_clone = ctx.clone();
             let err_msg_clone = self.err_msg.clone();
@@ -182,9 +178,9 @@ impl eframe::App for SearchApp {
                 }
             });
         }
-        
+
         let mut should_close_error = false;
-        
+
         if let Ok(errors) = self.config_errors.lock() {
             if !errors.is_empty() {
                 egui::Window::new("")
@@ -197,29 +193,39 @@ impl eframe::App for SearchApp {
                             ui.add_space(20.0);
                             ui.heading(egui::RichText::new("配置檢查錯誤：").size(32.0));
                             ui.add_space(20.0);
-                            
+
                             for error_msg in errors.iter() {
                                 for error_line in error_msg.split('\n') {
                                     egui::Frame::none()
                                         .fill(egui::Color32::from_rgb(255, 200, 200))
                                         .show(ui, |ui| {
                                             ui.add_space(10.0);
-                                            ui.label(egui::RichText::new(error_line).size(24.0).color(egui::Color32::RED));
+                                            ui.label(
+                                                egui::RichText::new(error_line)
+                                                    .size(24.0)
+                                                    .color(egui::Color32::RED),
+                                            );
                                             ui.add_space(10.0);
                                         });
                                     ui.add_space(5.0);
                                 }
                             }
-                            
+
                             ui.add_space(20.0);
-                            if ui.add_sized([200.0, 60.0], egui::Button::new(egui::RichText::new("確定").size(40.0))).clicked() {
+                            if ui
+                                .add_sized(
+                                    [200.0, 60.0],
+                                    egui::Button::new(egui::RichText::new("確定").size(40.0)),
+                                )
+                                .clicked()
+                            {
                                 should_close_error = true;
                             }
                         });
                     });
             }
         }
-    
+
         // 在閉包外部處理錯誤視窗的關閉
         if should_close_error {
             if let Ok(mut errors) = self.config_errors.lock() {
@@ -231,63 +237,101 @@ impl eframe::App for SearchApp {
             ui.set_max_width(ui.available_width());
             ui.set_max_height(ui.available_height());
 
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 5.0);
             ui.spacing_mut().window_margin = egui::Margin::symmetric(0.0, 0.0);
             let window_size = ui.available_size();
-            let scale_factor = (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
-            self.font_size = 14.0 * scale_factor;
+            let base_window_size = egui::vec2(1384.0, 784.0); // 保持原本的基準視窗大小
+            let min_window_size = egui::vec2(700.0, 400.0); // 目標最小視窗大小
+            let absolute_min_size = egui::vec2(500.0, 300.0); // 絕對最小視窗大小
 
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            ui.spacing_mut().window_margin = egui::Margin::symmetric(0.0, 0.0);
-            ui.label(format!("視窗大小: {:.0} x {:.0}", window_size.x, window_size.y));
+            // 改進的縮放因子計算邏輯
+            let scale_factor = {
+                let base_scale =
+                    (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
+                let min_scale = (min_window_size.x / base_window_size.x)
+                    .min(min_window_size.y / base_window_size.y);
+                let absolute_min_scale = (absolute_min_size.x / base_window_size.x)
+                    .min(absolute_min_size.y / base_window_size.y);
 
-            // 緊接著顯示 "Search for a song:" 標籤，無額外間距
-            ui.heading(egui::RichText::new("Search for a song:").font(egui::FontId::proportional(self.font_size * 1.5)));
-            ui.add_space(5.0 * scale_factor); // 控制標籤和搜尋框之間的間距
+                if base_scale >= min_scale {
+                    // 大於或等於 700x400 時，使用正常縮放
+                    base_scale
+                } else if base_scale <= absolute_min_scale {
+                    // 小於絕對最小尺寸時，使用較大的縮放因子
+                    2.0
+                } else {
+                    // 在 700x400 和絕對最小尺寸之間，使用更激進的平滑過渡
+                    let t = (base_scale - absolute_min_scale) / (min_scale - absolute_min_scale);
+                    let min_scale_adjusted = min_scale * 1.3; // 增加最小縮放因子
+                    min_scale_adjusted + (1.8 - min_scale_adjusted) * (1.1 - t.powf(0.4))
+                    // 使用更小的指數使曲線更陡
+                }
+            };
+
+            self.font_size = 16.0 * scale_factor;
+
+            ui.label(
+                egui::RichText::new(format!(
+                    "Window size: {:.0} x {:.0}",
+                    window_size.x, window_size.y
+                ))
+                .size(self.font_size * 0.8),
+            );
+
+            ui.heading(egui::RichText::new("Search for a song:").size(self.font_size * 1.3));
+            ui.add_space(5.0 * scale_factor);
+
             ui.horizontal(|ui| {
                 let available_width = ui.available_width();
-                let text_edit_width = available_width * 0.8;
-                let text_edit_height = self.font_size * 2.0;
-                
+                let text_edit_width = available_width * 0.95;
+                let text_edit_height = self.font_size * 2.2;
+
                 let frame = egui::Frame::none()
                     .fill(ui.visuals().extreme_bg_color)
                     .inner_margin(egui::Margin::same(4.0))
                     .rounding(egui::Rounding::same(2.0));
-            
+
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let text_edit = egui::TextEdit::singleline(&mut self.search_query)
-                            .font(egui::FontId::proportional(self.font_size * 1.2))
-                            .margin(egui::vec2(5.0, 0.0)) // 移除垂直邊距
-                            .desired_width(text_edit_width - self.font_size * 2.0)
-                            .vertical_align(egui::Align::Center); // 設置垂直對齊為居中
-        
+                            .font(egui::FontId::proportional(self.font_size * 1.1))
+                            .margin(egui::vec2(5.0, 0.0))
+                            .desired_width(text_edit_width - self.font_size * 2.2)
+                            .vertical_align(egui::Align::Center);
+
                         let text_edit_response = ui.add_sized(
-                            egui::vec2(text_edit_width - self.font_size * 2.0, text_edit_height),
-                            text_edit
+                            egui::vec2(text_edit_width - self.font_size * 2.2, text_edit_height),
+                            text_edit,
                         );
-            
-                        // 只有當搜尋框有內容時才顯示清除按鈕
+
                         if !self.search_query.is_empty() {
-                            if ui.add_sized(
-                                egui::vec2(self.font_size * 2.0, text_edit_height),
-                                egui::Button::new(egui::RichText::new("×").size(self.font_size * 1.5))
-                                    .frame(false)
-                            ).clicked() {
+                            if ui
+                                .add_sized(
+                                    egui::vec2(self.font_size * 2.2, text_edit_height),
+                                    egui::Button::new(
+                                        egui::RichText::new("×").size(self.font_size * 1.3),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
                                 self.search_query.clear();
                             }
                         }
-            
+
                         let cloned_response = text_edit_response.clone();
-                        
+
                         // 檢測右鍵是否按下
                         cloned_response.context_menu(|ui| {
-                            ui.style_mut().text_styles.iter_mut().for_each(|(__, font_id)| {
-                                font_id.size = self.font_size * 1.2; // 增加字體大小
-                            });
-                            
+                            ui.style_mut()
+                                .text_styles
+                                .iter_mut()
+                                .for_each(|(__, font_id)| {
+                                    font_id.size = self.font_size * 1.2; // 增加字體大小
+                                });
+
                             ui.style_mut().spacing.item_spacing.y = 10.0; // 增加項目間的垂直間距
-            
+
                             if ui.button("Paste").clicked() {
                                 let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
                                 if let Ok(clipboard_contents) = ctx.get_contents() {
@@ -301,9 +345,11 @@ impl eframe::App for SearchApp {
                                 ui.close_menu();
                             }
                         });
-                
+
                         // 檢測Enter是否按下，並處理調試模式
-                        if text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if text_edit_response.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
                             if self.search_query.trim().to_lowercase() == "debug" {
                                 self.debug_mode = !self.debug_mode; // 切換調試模式
                                 self.search_query.clear(); // 清空搜索框
@@ -311,10 +357,14 @@ impl eframe::App for SearchApp {
                                 self.perform_search(ctx.clone());
                             }
                         }
-                            // 顯示調試模式狀態
+                        // 顯示調試模式狀態
                         if self.debug_mode {
                             ui.add_space(5.0);
-                            ui.label(egui::RichText::new("調試模式已啟用").color(egui::Color32::YELLOW).size(self.font_size));
+                            ui.label(
+                                egui::RichText::new("debug mode on")
+                                    .color(egui::Color32::YELLOW)
+                                    .size(self.font_size),
+                            );
                         }
                     });
                 });
@@ -325,231 +375,55 @@ impl eframe::App for SearchApp {
             ui.style_mut()
                 .text_styles
                 .insert(egui::TextStyle::Body, new_text_style);
-            
+
             if let Ok(err_msg_guard) = self.err_msg.try_lock() {
                 ui.label(format!("{}", *err_msg_guard));
             }
-        
-            ui.columns(2, |columns| {
-                // 左邊顯示Spotify的結果
-                columns[0].vertical(|ui| {
-                    ui.set_min_width(0.45 * window_size.x);
-                    ui.heading(egui::RichText::new("Spotify Results").size(self.font_size * 1.2));
-                    ui.add_space(5.0 * scale_factor);
-                    ui.push_id("spotify_results", |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            if let Ok(search_results_guard) = self.search_results.try_lock() {
-                                if !search_results_guard.is_empty() {
-                                    for track in search_results_guard.iter() {
-                                        ui.horizontal(|ui| {
-                                            ui.set_min_height(100.0);  // 增加最小高度
-                                            // 顯示專輯封面
-                                            if let Some(cover_url) = &track.album.images.first().map(|img| &img.url) {
-                                                let texture_cache = self.texture_cache.clone();
-                                                let texture_load_queue = self.texture_load_queue.clone();
-                                                
-                                                if let Ok(cache) = texture_cache.try_read() {
-                                                    if let Some(texture) = cache.get(*cover_url) {
-                                                        let size = egui::Vec2::new(100.0, 100.0);  // 增加圖片大小
-                                                        ui.add(egui::Image::new(egui::load::SizedTexture::new(texture.id(), size)));
-                                                    } else {
-                                                        if let Ok(mut queue) = texture_load_queue.lock() {
-                                                            if !queue.contains(cover_url) {
-                                                                queue.push(cover_url.to_string());
-                                                            }
-                                                        }
-                                                        ui.add_sized(
-                                                            [100.0, 100.0],
-                                                            egui::Label::new(
-                                                                egui::RichText::new("Loading...")
-                                                                    .size(self.font_size)
-                                                                    .text_style(egui::TextStyle::Monospace)
-                                                                    .color(egui::Color32::LIGHT_GRAY)
-                                                            )
-                                                        ).on_hover_text("Loading album cover");
-                                                    }
-                                                };
-                                                ui.add_space(10.0);
-                                            }
-                            
-                                            ui.vertical(|ui| {
-                                                let (track_info, spotify_url) = print_track_info_gui(track);
-
-                                                // 顯示曲目名稱
-                                                ui.label(
-                                                    egui::RichText::new(&track_info.name)
-                                                        .strong()
-                                                        .size(self.font_size * 1.2)
-                                                );
-                                            
-                                                // 顯示藝術家
-                                                ui.label(
-                                                    egui::RichText::new(&track_info.artists)
-                                                        .size(self.font_size)
-                                                );
-                                            
-                                                // 顯示專輯名稱
-                                                ui.label(
-                                                    egui::RichText::new(&track_info.album)
-                                                        .size(self.font_size)
-                                                );
-                                            
-                                                // 添加點擊和拖動的響應
-                                                let response = ui.allocate_rect(ui.min_rect(), egui::Sense::click_and_drag());
-                                            
-                                                // 雙擊
-                                                if response.double_clicked() {
-                                                    if let Some(url) = &spotify_url {
-                                                        if let Err(e) = open_spotify_url(url) {
-                                                            log::error!("Failed to open URL: {}", e);
-                                                        }
-                                                    }
-                                                }
-                                            
-                                                // 右鍵菜單
-                                                response.context_menu(|ui| {
-                                                    ui.style_mut().text_styles.iter_mut().for_each(|(__, font_id)| {
-                                                        font_id.size = self.font_size * 1.2; // 增加字體大小
-                                                    });
-                                                    
-                                                    ui.style_mut().spacing.item_spacing.y = 5.0; // 減少項目間的垂直間距
-                                                
-                                                    if let Some(url) = &spotify_url {
-                                                        ui.vertical_centered(|ui| {
-                                                            ui.add_space(5.0);
-                                                            
-                                                            let button_width = ui.available_width().max(100.0); // 確保最小寬度
-                                                            
-                                                            if ui.add_sized(
-                                                                [button_width, 30.0],
-                                                                egui::Button::new(
-                                                                    egui::RichText::new("🔗 Copy") 
-                                                                        .size(self.font_size * 1.2)
-                                                                        .text_style(egui::TextStyle::Button)
-                                                                )
-                                                            ).clicked() {
-                                                                let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
-                                                                ctx.set_contents(url.clone()).unwrap();
-                                                                ui.close_menu();
-                                                            }
-                                                            
-                                                            if ui.add_sized(
-                                                                [button_width, 30.0],
-                                                                egui::Button::new(
-                                                                    egui::RichText::new("Open")
-                                                                        .size(self.font_size * 1.2)
-                                                                        .text_style(egui::TextStyle::Button)
-                                                                )
-                                                            ).clicked() {
-                                                                match open_spotify_url(url) {
-                                                                    Ok(_) => {},
-                                                                    Err(e) => log::error!("Failed to open URL: {}", e),
-                                                                }
-                                                                ui.close_menu();
-                                                            }
-                                                            
-                                                            ui.add_space(5.0);
-                                                        });
-                                                    }
-                                                });
-                                            });
-                                        });
-                            
-                                        ui.add_space(15.0);  // 增加間距
-                                        ui.separator();
-                                        ui.add_space(15.0);
-                                    }
-                                }
-                            }
-                        });
+            // 根據視窗大小決定佈局
+            if window_size.x >= 1000.0 {
+                // 大視窗佈局
+                ui.columns(2, |columns| {
+                    // Spotify 結果
+                    columns[0].vertical(|ui| {
+                        ui.set_min_width(0.45 * window_size.x);
+                        if let Some(icon) = &self.spotify_icon {
+                            let size = egui::vec2(50.0, 50.0);
+                            ui.add(egui::Image::new(egui::load::SizedTexture::new(icon.id(), size))
+                                .tint(egui::Color32::WHITE)
+                                .bg_fill(egui::Color32::TRANSPARENT));
+                        }
+                        ui.add_space(5.0 * scale_factor);
+                        self.display_spotify_results(ui);
+                    });
+            
+                    // Osu 結果
+                    columns[1].vertical(|ui| {
+                        ui.set_min_width(0.45 * window_size.x);
+                        ui.heading(
+                            egui::RichText::new("Osu Results")
+                                .size(self.font_size * 1.2),
+                        );
+                        self.display_osu_results(ui);
                     });
                 });
-        
-                // 右邊顯示Osu的結果
-                columns[1].vertical(|ui| {
-                    ui.set_min_width(0.45 * window_size.x);
-                    ui.heading(egui::RichText::new("Osu Results").font(egui::FontId::proportional(self.font_size * 1.1)));
-                    ui.push_id("osu_results", |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
-                                if !osu_search_results_guard.is_empty() {
-                                    if let Some(selected_index) = self.selected_beatmapset {
-                                        let selected_beatmapset = &osu_search_results_guard[selected_index];
-                                        let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
-                                        
-                                        ui.heading(egui::RichText::new(format!("{} - {}", beatmap_info.title, beatmap_info.artist))
-                                            .font(egui::FontId::proportional(self.font_size * 1.1)));
-                                        ui.label(egui::RichText::new(format!("by {}", beatmap_info.creator))
-                                            .font(egui::FontId::proportional(self.font_size * 0.9)));
-                                        ui.add_space(10.0);
-                
-                                        for beatmap_info in beatmap_info.beatmaps {
-                                            ui.add_space(10.0);
-                                            ui.label(egui::RichText::new(beatmap_info).font(egui::FontId::proportional(self.font_size * 1.0)));
-                                            ui.add_space(10.0);
-                                            ui.separator();
-                                        }
-                                        if ui.add_sized([100.0, 40.0], egui::Button::new(egui::RichText::new("Back").font(egui::FontId::proportional(self.font_size * 1.0)))).clicked() {
-                                            self.selected_beatmapset = None;
-                                        }
-                                    } else {
-                                        for (index, beatmapset) in osu_search_results_guard.iter().enumerate() {
-                                            let response = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(ui.available_width(), 100.0)));
-                                            
-                                            if response.clicked() {
-                                                self.selected_beatmapset = Some(index);
-                                            }
-                
-                                            
-                
-                                            ui.allocate_ui_at_rect(response.rect, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.vertical(|ui| {
-                                                        if let Ok(textures) = self.cover_textures.try_read() {
-                                                            if let Some(Some((texture, size))) = textures.get(&index) {
-                                                                let max_height = 100.0;
-                                                                let aspect_ratio = size.0 / size.1;
-                                                                let image_size = egui::Vec2::new(
-                                                                    max_height * aspect_ratio,
-                                                                    max_height
-                                                                );
-                                                                ui.image((texture.id(), image_size));
-                                                            } else {
-                                                                ui.label("Loading...");
-                                                            }
-                                                        }
-                                                    });
-                                                    
-                                                    ui.add_space(10.0);
-                                                
-                                                    ui.vertical(|ui| {
-                                                        ui.label(
-                                                            egui::RichText::new(&beatmapset.title)
-                                                                .font(egui::FontId::proportional(self.font_size * 1.0))
-                                                                .strong()
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(&beatmapset.artist)
-                                                                .font(egui::FontId::proportional(self.font_size * 0.9))
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(format!("by {}", beatmapset.creator))
-                                                                .font(egui::FontId::proportional(self.font_size * 0.8))
-                                                        );
-                                                    });
-                                                });
-                                            });
-                                            
-                                            ui.add_space(5.0);
-                                            ui.separator();
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    });
+            } else {
+                // 小視窗佈局（折疊式）
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Spotify Results").size(self.font_size * 1.1)
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    self.display_spotify_results(ui);
                 });
-            });
+        
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Osu Results").size(self.font_size * 1.1)
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    self.display_osu_results(ui);
+                });
+            }
         });
 
         if self.show_relax_window {
@@ -629,7 +503,6 @@ async fn load_all_covers(
     }
 }
 
-
 impl SearchApp {
     fn new(
         client: Arc<tokio::sync::Mutex<Client>>,
@@ -637,62 +510,145 @@ impl SearchApp {
         receiver: tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>,
         cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
         need_repaint: Arc<AtomicBool>,
-        ctx: egui::Context, // 新增這個參數
+        ctx: egui::Context, 
         config_errors: Arc<Mutex<Vec<String>>>,
-        ) -> Self {
-            let texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>> = Arc::new(RwLock::new(HashMap::new()));
-            let texture_load_queue = Arc::new(Mutex::new(Vec::<String>::new()));
-            
-            let texture_cache_clone = Arc::clone(&texture_cache);
-            let texture_load_queue_clone = Arc::clone(&texture_load_queue);
-            let need_repaint_clone = Arc::clone(&need_repaint);
-            let ctx_clone = ctx.clone();
-            
-            // 啟動異步加載任務
-            tokio::spawn(async move {
-                loop {
-                    let url = {
-                        let mut queue = texture_load_queue_clone.lock().unwrap();
-                        queue.pop()
-                    };
-                    
-                    if let Some(url) = url {
-                        if !texture_cache_clone.read().await.contains_key(&url) {
-                            if let Some(texture) = Self::load_texture_async(&ctx_clone, &url).await {
-                                texture_cache_clone.write().await.insert(url, Arc::new(texture));
-                                need_repaint_clone.store(true, Ordering::SeqCst);
-                            }
+    ) -> Self {
+        let texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let texture_load_queue = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let texture_cache_clone = Arc::clone(&texture_cache);
+        let texture_load_queue_clone = Arc::clone(&texture_load_queue);
+        let need_repaint_clone = Arc::clone(&need_repaint);
+        let ctx_clone = ctx.clone();
+
+        let spotify_icon = Self::load_spotify_icon(&ctx);
+
+        // 啟動異步加載任務
+        tokio::spawn(async move {
+            loop {
+                let url = {
+                    let mut queue = texture_load_queue_clone.lock().unwrap();
+                    queue.pop()
+                };
+
+                if let Some(url) = url {
+                    if !texture_cache_clone.read().await.contains_key(&url) {
+                        if let Some(texture) = Self::load_texture_async(&ctx_clone, &url).await {
+                            texture_cache_clone
+                                .write()
+                                .await
+                                .insert(url, Arc::new(texture));
+                            need_repaint_clone.store(true, Ordering::SeqCst);
                         }
                     }
-                    
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-            });
+
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+
+        Self {
+            client,
+            access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
+            search_query: String::new(),
+            search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            error_message: Arc::new(tokio::sync::Mutex::new(String::new())),
+            initialized: false,
+            is_searching: Arc::new(AtomicBool::new(false)),
+            need_repaint,
+            font_size: 14.0,
+            show_relax_window: false,
+            relax_slider_value: 0,
+            selected_beatmapset: None,
+            err_msg: Arc::new(tokio::sync::Mutex::new(String::new())),
+            cover_textures,
+            sender,
+            receiver: Some(receiver),
+            texture_cache,
+            texture_load_queue,
+            config_errors,
+            debug_mode: false,
+            spotify_icon
+        }
+    }
+
+
+    fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let is_dark = ctx.style().visuals.dark_mode;
     
-            Self {
-                client,
-                access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
-                search_query: String::new(),
-                search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                error_message: Arc::new(tokio::sync::Mutex::new(String::new())),
-                initialized: false,
-                is_searching: Arc::new(AtomicBool::new(false)),
-                need_repaint,
-                font_size: 14.0,
-                show_relax_window: false,
-                relax_slider_value: 0,
-                selected_beatmapset: None,
-                err_msg: Arc::new(tokio::sync::Mutex::new(String::new())),
-                cover_textures,
-                sender,
-                receiver: Some(receiver),
-                texture_cache,
-                texture_load_queue,
-                config_errors,
-                debug_mode: false,
+
+        let icon_name = if is_dark { "spotify_icon_black.png" } else { "spotify_icon_black.png" };
+
+        
+        // 獲取可執行文件的目錄
+        let exe_dir = std::env::current_exe().ok()?;
+        let exe_dir = exe_dir.parent()?;
+        
+        // icon 資料夾與 exe 檔在同一目錄
+        let icon_dir = exe_dir.join("icon");
+        
+        // 構建圖標的絕對路徑
+        let icon_path = icon_dir.join(icon_name);
+        
+        println!("Trying to load icon from: {:?}", icon_path);
+        
+        match Self::load_image_from_path(&icon_path) {
+            Ok(image) => {
+                let texture_options = egui::TextureOptions {
+                    magnification: egui::TextureFilter::Linear,
+                    minification: egui::TextureFilter::Linear,
+                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                };
+                Some(ctx.load_texture(
+                    "spotify_icon",
+                    image,
+                    texture_options,
+                ))
+            },
+            Err(e) => {
+                eprintln!("Failed to load Spotify icon ({}): {:?}", icon_name, e);
+                // 嘗試加載另一個圖標作為備用
+                let fallback_icon_name = if is_dark { "spotify_icon_black.png" } else { "spotify_icon.png" };
+                let fallback_icon_path = icon_dir.join(fallback_icon_name);
+                
+                println!("Trying to load fallback icon from: {:?}", fallback_icon_path);
+                
+                match Self::load_image_from_path(&fallback_icon_path) {
+                    Ok(fallback_image) => {
+                        Some(ctx.load_texture(
+                            "spotify_icon",
+                            fallback_image,
+                            Default::default(),
+                        ))
+                    },
+                    Err(e) => {
+                        eprintln!("無法載入備用 Spotify 圖標：{:?}", e);
+                        None
+                    }
+                }
             }
         }
+    }
+    // 輔助函數來加載圖片
+    fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
+        let image = image::io::Reader::open(path)?.decode()?;
+        let size = [image.width() as _, image.height() as _];
+        let image_buffer = image.into_rgba8();
+        let pixels = image_buffer.as_flat_samples();
+        
+        // 手動處理透明度
+        let mut color_image = egui::ColorImage::new(size, egui::Color32::TRANSPARENT);
+        for (i, pixel) in pixels.as_slice().chunks_exact(4).enumerate() {
+            let [r, g, b, a] = pixel else { continue };
+            if *a > 0 {
+                color_image.pixels[i] = egui::Color32::from_rgba_unmultiplied(*r, *g, *b, *a);
+            }
+        }
+        
+        Ok(color_image)
+    }
     async fn load_texture_async(ctx: &egui::Context, url: &str) -> Option<TextureHandle> {
         let bytes = reqwest::get(url).await.ok()?.bytes().await.ok()?;
         let image = image::load_from_memory(&bytes).ok()?;
@@ -729,7 +685,7 @@ impl SearchApp {
             let mut error = error_message.lock().await;
             error.clear();
             if debug_mode {
-                info!("調試模式已啟用");
+                info!("debug mode on");
             }
 
             // 獲取 Spotify token
@@ -760,86 +716,104 @@ impl SearchApp {
 
             // Spotify search
             let spotify_result: Result<Vec<TrackWithCover>, _> = if query.starts_with("http://")
-            || query.starts_with("https://")
-        {
-            if query.starts_with("https://open.spotify") || query.starts_with("https://spotify")
+                || query.starts_with("https://")
             {
-                if is_valid_spotify_url(&query) {
-                    let track_id = query
-                        .split('/')
-                        .last()
-                        .unwrap_or("")
-                        .split('?')
-                        .next()
-                        .unwrap_or("");
-                    let track = get_track_info(&*client.lock().await, track_id, &spotify_token)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Error getting track info: {:?}", e))?;
-                    
-                    // 將 Track 轉換為 TrackWithCover
-                    Ok(vec![TrackWithCover {
-                        name: track.name,
-                        artists: track.artists,
-                        external_urls: track.external_urls,
-                        album_name: track.album.name,
-                        cover_url: track.album.images.first().map(|img| img.url.clone()),
-                    }])
+                if query.starts_with("https://open.spotify") || query.starts_with("https://spotify")
+                {
+                    if is_valid_spotify_url(&query) {
+                        let track_id = query
+                            .split('/')
+                            .last()
+                            .unwrap_or("")
+                            .split('?')
+                            .next()
+                            .unwrap_or("");
+                        let track = get_track_info(&*client.lock().await, track_id, &spotify_token)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Error getting track info: {:?}", e))?;
+
+                        // 將 Track 轉換為 TrackWithCover
+                        Ok(vec![TrackWithCover {
+                            name: track.name,
+                            artists: track.artists,
+                            external_urls: track.external_urls,
+                            album_name: track.album.name,
+                            cover_url: track.album.images.first().map(|img| img.url.clone()),
+                        }])
+                    } else {
+                        let error_msg = "您似乎輸入了一個Spotify URL,但它是不正確的。";
+                        *error = error_msg.to_string();
+                        *err_msg.lock().await = error_msg.to_string();
+                        log::error!("{}", error_msg);
+                        Err(anyhow::anyhow!(error_msg))
+                    }
                 } else {
-                    let error_msg = "您似乎輸入了一個Spotify URL,但它是不正確的。";
+                    let error_msg = "你疑似輸入URL,但它是不正確的。";
                     *error = error_msg.to_string();
                     *err_msg.lock().await = error_msg.to_string();
                     log::error!("{}", error_msg);
                     Err(anyhow::anyhow!(error_msg))
                 }
-            } else {
-                let error_msg = "你疑似輸入URL,但它是不正確的。";
-                *error = error_msg.to_string();
-                *err_msg.lock().await = error_msg.to_string();
-                log::error!("{}", error_msg);
-                Err(anyhow::anyhow!(error_msg))
-            }
-        } else if !query.is_empty() {
-            let limit = 10;
-            let offset = 0;
-            info!("搜索 Spotify: {}", query);
-            search_track(&*client.lock().await, &query, &spotify_token, limit, offset, debug_mode)
+            } else if !query.is_empty() {
+                let limit = 10;
+                let offset = 0;
+                info!("搜索 Spotify: {}", query);
+                search_track(
+                    &*client.lock().await,
+                    &query,
+                    &spotify_token,
+                    limit,
+                    offset,
+                    debug_mode,
+                )
                 .await
                 .map(|(tracks_with_cover, _)| tracks_with_cover)
-        } else {
-            Ok(Vec::new()) // 如果查詢為空，返回空結果
-        };
-            
-        match spotify_result {
-            Ok(tracks_with_cover) => {
-                info!("Spotify search results: {} tracks found", tracks_with_cover.len());
-                let mut search_results = search_results.lock().await;
-                *search_results = tracks_with_cover.into_iter().map(|twc| Track {
-                    name: twc.name,
-                    artists: twc.artists.clone(),
-                    album: Album {
-                        name: twc.album_name,
-                        album_type: String::new(),  // 或者從 TrackWithCover 獲取，如果有的話
-                        artists: Vec::new(),  // 或者從 TrackWithCover 獲取，如果有的話
-                        external_urls: HashMap::new(),  // 或者從 TrackWithCover 獲取，如果有的話
-                        images: twc.cover_url.map(|url| vec![Image { 
-                            url, 
-                            width: 0,
-                            height: 0
-                        }]).unwrap_or_default(),
-                        id: String::new(),  // 或者從 TrackWithCover 獲取，如果有的話
-                        release_date: String::new(),  // 或者從 TrackWithCover 獲取，如果有的話
-                        total_tracks: 0,  // 新增這個字段，使用適當的值或從 TrackWithCover 獲取
-                        // 如果還有其他必要的字段，請在這裡添加
-                    },
-                    external_urls: twc.external_urls,
-                }).collect();
+            } else {
+                Ok(Vec::new()) // 如果查詢為空，返回空結果
+            };
+
+            match spotify_result {
+                Ok(tracks_with_cover) => {
+                    info!(
+                        "Spotify search results: {} tracks found",
+                        tracks_with_cover.len()
+                    );
+                    let mut search_results = search_results.lock().await;
+                    *search_results = tracks_with_cover
+                        .into_iter()
+                        .map(|twc| Track {
+                            name: twc.name,
+                            artists: twc.artists.clone(),
+                            album: Album {
+                                name: twc.album_name,
+                                album_type: String::new(), // 或者從 TrackWithCover 獲取，如果有的話
+                                artists: Vec::new(),       // 或者從 TrackWithCover 獲取，如果有的話
+                                external_urls: HashMap::new(), // 或者從 TrackWithCover 獲取，如果有的話
+                                images: twc
+                                    .cover_url
+                                    .map(|url| {
+                                        vec![Image {
+                                            url,
+                                            width: 0,
+                                            height: 0,
+                                        }]
+                                    })
+                                    .unwrap_or_default(),
+                                id: String::new(), // 或者從 TrackWithCover 獲取，如果有的話
+                                release_date: String::new(), // 或者從 TrackWithCover 獲取，如果有的話
+                                total_tracks: 0, // 新增這個字段，使用適當的值或從 TrackWithCover 獲取
+                                                 // 如果還有其他必要的字段，請在這裡添加
+                            },
+                            external_urls: twc.external_urls,
+                        })
+                        .collect();
+                }
+                Err(e) => {
+                    let error_msg = format!("Error searching Spotify: {:?}", e);
+                    *error = error_msg.clone();
+                    log::error!("{}", error_msg);
+                }
             }
-            Err(e) => {
-                let error_msg = format!("Error searching Spotify: {:?}", e);
-                *error = error_msg.clone();
-                log::error!("{}", error_msg);
-            }
-        }  
 
             // Osu search
             match get_beatmapsets(&*client.lock().await, &osu_token, &query).await {
@@ -875,6 +849,269 @@ impl SearchApp {
             Ok(())
         })
     }
+    fn display_spotify_results(&self, ui: &mut egui::Ui) {
+        ui.push_id("spotify_results", |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Ok(search_results_guard) = self.search_results.try_lock() {
+                    if !search_results_guard.is_empty() {
+                        for track in search_results_guard.iter() {
+                            ui.horizontal(|ui| {
+                                ui.set_min_height(100.0); // 增加最小高度
+                                                          // 顯示專輯封面
+                                if let Some(cover_url) =
+                                    &track.album.images.first().map(|img| &img.url)
+                                {
+                                    let texture_cache = self.texture_cache.clone();
+                                    let texture_load_queue = self.texture_load_queue.clone();
+
+                                    if let Ok(cache) = texture_cache.try_read() {
+                                        if let Some(texture) = cache.get(*cover_url) {
+                                            let size = egui::Vec2::new(100.0, 100.0); // 增加圖片大小
+                                            ui.add(egui::Image::new(
+                                                egui::load::SizedTexture::new(texture.id(), size),
+                                            ));
+                                        } else {
+                                            if let Ok(mut queue) = texture_load_queue.lock() {
+                                                if !queue.contains(cover_url) {
+                                                    queue.push(cover_url.to_string());
+                                                }
+                                            }
+                                            ui.add_sized(
+                                                [100.0, 100.0],
+                                                egui::Label::new(
+                                                    egui::RichText::new("Loading...")
+                                                        .size(self.font_size)
+                                                        .text_style(egui::TextStyle::Monospace)
+                                                        .color(egui::Color32::LIGHT_GRAY),
+                                                ),
+                                            )
+                                            .on_hover_text("Loading album cover");
+                                        }
+                                    };
+                                    ui.add_space(10.0);
+                                }
+
+                                ui.vertical(|ui| {
+                                    let (track_info, spotify_url) = print_track_info_gui(track);
+
+                                    // 顯示曲目名稱
+                                    ui.label(
+                                        egui::RichText::new(&track_info.name)
+                                            .strong()
+                                            .size(self.font_size * 1.2),
+                                    );
+
+                                    // 顯示藝術家
+                                    ui.label(
+                                        egui::RichText::new(&track_info.artists)
+                                            .size(self.font_size),
+                                    );
+
+                                    // 顯示專輯名稱
+                                    ui.label(
+                                        egui::RichText::new(&track_info.album)
+                                            .size(self.font_size * 0.9),
+                                    );
+
+                                    // 添加點擊和拖動的響應
+                                    let response = ui.allocate_rect(
+                                        ui.min_rect(),
+                                        egui::Sense::click_and_drag(),
+                                    );
+
+                                    // 雙擊
+                                    if response.double_clicked() {
+                                        if let Some(url) = &spotify_url {
+                                            if let Err(e) = open_spotify_url(url) {
+                                                log::error!("Failed to open URL: {}", e);
+                                            }
+                                        }
+                                    }
+
+                                    // 右鍵菜單
+                                    response.context_menu(|ui| {
+                                        ui.style_mut().text_styles.iter_mut().for_each(
+                                            |(__, font_id)| {
+                                                font_id.size = self.font_size * 1.2;
+                                                // 增加字體大小
+                                            },
+                                        );
+
+                                        ui.style_mut().spacing.item_spacing.y = 5.0; // 減少項目間的垂直間距
+
+                                        if let Some(url) = &spotify_url {
+                                            ui.vertical_centered(|ui| {
+                                                ui.add_space(5.0);
+
+                                                let button_width = ui.available_width().max(100.0); // 確保最小寬度
+
+                                                if ui
+                                                    .add_sized(
+                                                        [button_width, 30.0],
+                                                        egui::Button::new(
+                                                            egui::RichText::new("🔗 Copy")
+                                                                .size(self.font_size * 1.2)
+                                                                .text_style(
+                                                                    egui::TextStyle::Button,
+                                                                ),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    let mut ctx: ClipboardContext =
+                                                        ClipboardProvider::new().unwrap();
+                                                    ctx.set_contents(url.clone()).unwrap();
+                                                    ui.close_menu();
+                                                }
+
+                                                if ui
+                                                    .add_sized(
+                                                        [button_width, 30.0],
+                                                        egui::Button::new(
+                                                            egui::RichText::new("Open")
+                                                                .size(self.font_size * 1.2)
+                                                                .text_style(
+                                                                    egui::TextStyle::Button,
+                                                                ),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    match open_spotify_url(url) {
+                                                        Ok(_) => {}
+                                                        Err(e) => {
+                                                            log::error!("Failed to open URL: {}", e)
+                                                        }
+                                                    }
+                                                    ui.close_menu();
+                                                }
+
+                                                ui.add_space(5.0);
+                                            });
+                                        }
+                                    });
+                                });
+                            });
+
+                            ui.add_space(15.0); // 增加間距
+                            ui.separator();
+                            ui.add_space(15.0);
+                        }
+                    }
+                }
+            });
+        });
+    }
+    fn display_osu_results(&mut self, ui: &mut egui::Ui) {
+        ui.push_id("osu_results", |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
+                    if !osu_search_results_guard.is_empty() {
+                        if let Some(selected_index) = self.selected_beatmapset {
+                            let selected_beatmapset = &osu_search_results_guard[selected_index];
+                            let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
+
+                            ui.heading(
+                                egui::RichText::new(format!(
+                                    "{} - {}",
+                                    beatmap_info.title, beatmap_info.artist
+                                ))
+                                .font(egui::FontId::proportional(self.font_size * 1.1)),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("by {}", beatmap_info.creator))
+                                    .font(egui::FontId::proportional(self.font_size * 0.9)),
+                            );
+                            ui.add_space(10.0);
+
+                            for beatmap_info in beatmap_info.beatmaps {
+                                ui.add_space(10.0);
+                                ui.label(
+                                    egui::RichText::new(beatmap_info)
+                                        .font(egui::FontId::proportional(self.font_size * 1.0)),
+                                );
+                                ui.add_space(10.0);
+                                ui.separator();
+                            }
+                            if ui
+                                .add_sized(
+                                    [100.0, 40.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Back")
+                                            .font(egui::FontId::proportional(self.font_size * 1.0)),
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.selected_beatmapset = None;
+                            }
+                        } else {
+                            for (index, beatmapset) in osu_search_results_guard.iter().enumerate() {
+                                let response = ui.add(
+                                    egui::Button::new("")
+                                        .frame(false)
+                                        .min_size(egui::vec2(ui.available_width(), 100.0)),
+                                );
+
+                                if response.clicked() {
+                                    self.selected_beatmapset = Some(index);
+                                }
+
+                                ui.allocate_ui_at_rect(response.rect, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            if let Ok(textures) = self.cover_textures.try_read() {
+                                                if let Some(Some((texture, size))) =
+                                                    textures.get(&index)
+                                                {
+                                                    let max_height = 100.0;
+                                                    let aspect_ratio = size.0 / size.1;
+                                                    let image_size = egui::Vec2::new(
+                                                        max_height * aspect_ratio,
+                                                        max_height,
+                                                    );
+                                                    ui.image((texture.id(), image_size));
+                                                } else {
+                                                    ui.label("Loading...");
+                                                }
+                                            }
+                                        });
+
+                                        ui.add_space(10.0);
+
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(&beatmapset.title)
+                                                    .font(egui::FontId::proportional(
+                                                        self.font_size * 1.0,
+                                                    ))
+                                                    .strong(),
+                                            );
+                                            ui.label(egui::RichText::new(&beatmapset.artist).font(
+                                                egui::FontId::proportional(self.font_size * 0.9),
+                                            ));
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "by {}",
+                                                    beatmapset.creator
+                                                ))
+                                                .font(egui::FontId::proportional(
+                                                    self.font_size * 0.8,
+                                                )),
+                                            );
+                                        });
+                                    });
+                                });
+
+                                ui.add_space(5.0);
+                                ui.separator();
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    }
 }
 #[tokio::main]
 async fn main() {
@@ -898,7 +1135,7 @@ async fn main() {
     let config_result = read_config().await;
     let config_errors = match config_result {
         Ok(_) => Vec::new(),
-        Err(e) => vec![e.to_string()]
+        Err(e) => vec![e.to_string()],
     };
 
     // 將錯誤信息存儲，以便在 GUI 中顯示
@@ -909,16 +1146,19 @@ async fn main() {
     let (sender, receiver) = tokio::sync::mpsc::channel(100);
 
     // 定義 cover_textures
-    let cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>> = Arc::new(RwLock::new(HashMap::new()));
+    let cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
     let need_repaint = Arc::new(AtomicBool::new(false));
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = ViewportBuilder {
         title: Some(String::from("Search App")),
         inner_size: Some(egui::Vec2::new(1384.0, 784.0)),
-        min_inner_size: Some(egui::Vec2::new(700.0, 400.0)), 
+        min_inner_size: Some(egui::Vec2::new(700.0, 400.0)),
+        resizable: Some(true),       // 允許調整視窗大小
+        maximize_button: Some(true), // 顯示最大化按鈕
         ..Default::default()
-    };     
+    };
 
     // 將所有需要的變量移動到閉包內
     let client = client.clone();
@@ -926,13 +1166,19 @@ async fn main() {
     let cover_textures = cover_textures.clone();
     let need_repaint = need_repaint.clone();
 
-
     // 運行應用
     eframe::run_native(
         "Search App",
         native_options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
+            // 跟隨系統主題
+            ctx.set_visuals(if dark_light::detect() == dark_light::Mode::Dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            ctx.set_pixels_per_point(1.0);
             Box::new(SearchApp::new(
                 client.clone(),
                 sender,
@@ -943,6 +1189,6 @@ async fn main() {
                 config_errors.clone(),
             ))
         }),
-    ).unwrap_or_else(|e| eprintln!("Error running native app: {}", e));
+    )
+    .unwrap_or_else(|e| eprintln!("Error running native app: {}", e));
 }
-
