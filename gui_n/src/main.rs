@@ -53,7 +53,8 @@ struct SearchApp {
     initialized: bool,
     is_searching: Arc<AtomicBool>,
     need_repaint: Arc<AtomicBool>,
-    font_size: f32,
+    global_font_size: f32,
+    show_settings: bool,
     show_relax_window: bool,
     relax_slider_value: i32,
     selected_beatmapset: Option<usize>,
@@ -68,39 +69,9 @@ struct SearchApp {
     spotify_icon: Option<egui::TextureHandle>,
 }
 
-//為上方實現Default trait，創建默認狀態
-/*impl Default for SearchApp {
-    fn default() -> Self {
-        Self {
-            client: Arc::new(AsyncMutex::new(Client::new())),
-            access_token: Arc::new(AsyncMutex::new(String::new())),
-            search_query: String::new(),
-            search_results: Arc::new(AsyncMutex::new(Vec::new())),
-            osu_search_results: Arc::new(AsyncMutex::new(Vec::new())),
-            error_message: Arc::new(AsyncMutex::new(String::new())),
-            initialized: false,
-            is_searching: Arc::new(AtomicBool::new(false)),
-            need_repaint: Arc::new(AtomicBool::new(false)),
-            font_size: 14.0,
-            show_relax_window: false,
-            relax_slider_value: 0,
-            selected_beatmapset: None,
-            err_msg: Arc::new(AsyncMutex::new(String::new())),
-            cover_textures: Arc::new(AsyncMutex::new(HashMap::new())),
-            global_cover_textures: Arc::new(Mutex::new(HashMap::new())),
-            osu_urls: Vec::new(),
-        }
-    }
-}
-*/
 
 impl eframe::App for SearchApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let base_window_size = egui::vec2(1384.0, 784.0); // 基準視窗大小
-        let window_size = ctx.available_rect().size();
-        let scale_factor =
-            (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
-        self.font_size = 14.0 * scale_factor;
 
         // 請求更新介面，用於刷新GUI
         if self.need_repaint.load(Ordering::SeqCst) {
@@ -236,55 +207,29 @@ impl eframe::App for SearchApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.set_max_width(ui.available_width());
             ui.set_max_height(ui.available_height());
-
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 5.0);
-            ui.spacing_mut().window_margin = egui::Margin::symmetric(0.0, 0.0);
+        
             let window_size = ui.available_size();
-            let base_window_size = egui::vec2(1384.0, 784.0); // 保持原本的基準視窗大小
-            let min_window_size = egui::vec2(700.0, 400.0); // 目標最小視窗大小
-            let absolute_min_size = egui::vec2(500.0, 300.0); // 絕對最小視窗大小
+        
 
-            // 改進的縮放因子計算邏輯
-            let scale_factor = {
-                let base_scale =
-                    (window_size.x / base_window_size.x).min(window_size.y / base_window_size.y);
-                let min_scale = (min_window_size.x / base_window_size.x)
-                    .min(min_window_size.y / base_window_size.y);
-                let absolute_min_scale = (absolute_min_size.x / base_window_size.x)
-                    .min(absolute_min_size.y / base_window_size.y);
-
-                if base_scale >= min_scale {
-                    // 大於或等於 700x400 時，使用正常縮放
-                    base_scale
-                } else if base_scale <= absolute_min_scale {
-                    // 小於絕對最小尺寸時，使用較大的縮放因子
-                    2.0
-                } else {
-                    // 在 700x400 和絕對最小尺寸之間，使用更激進的平滑過渡
-                    let t = (base_scale - absolute_min_scale) / (min_scale - absolute_min_scale);
-                    let min_scale_adjusted = min_scale * 1.3; // 增加最小縮放因子
-                    min_scale_adjusted + (1.8 - min_scale_adjusted) * (1.1 - t.powf(0.4))
-                    // 使用更小的指數使曲線更陡
+            ui.horizontal(|ui| {
+                if ui.button("⚙").clicked() {
+                    self.show_settings = !self.show_settings;
                 }
-            };
+                ui.label(format!("Window size: {} x {}", window_size.x as i32, window_size.y as i32));
+                ui.heading(egui::RichText::new("Search for a song:").size(self.global_font_size * 1.3));
+                ui.add_space(5.0 );
+    
+            });
 
-            self.font_size = 16.0 * scale_factor;
+            if self.show_settings {
+                self.show_settings(ui);
+            }
 
-            ui.label(
-                egui::RichText::new(format!(
-                    "Window size: {:.0} x {:.0}",
-                    window_size.x, window_size.y
-                ))
-                .size(self.font_size * 0.8),
-            );
-
-            ui.heading(egui::RichText::new("Search for a song:").size(self.font_size * 1.3));
-            ui.add_space(5.0 * scale_factor);
 
             ui.horizontal(|ui| {
                 let available_width = ui.available_width();
                 let text_edit_width = available_width * 0.95;
-                let text_edit_height = self.font_size * 2.2;
+                let text_edit_height = self.global_font_size * 2.2;
 
                 let frame = egui::Frame::none()
                     .fill(ui.visuals().extreme_bg_color)
@@ -294,22 +239,22 @@ impl eframe::App for SearchApp {
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let text_edit = egui::TextEdit::singleline(&mut self.search_query)
-                            .font(egui::FontId::proportional(self.font_size * 1.1))
+                        .font(egui::FontId::proportional(self.global_font_size * 1.1))
                             .margin(egui::vec2(5.0, 0.0))
-                            .desired_width(text_edit_width - self.font_size * 2.2)
+                            .desired_width(text_edit_width - self.global_font_size * 2.2)
                             .vertical_align(egui::Align::Center);
 
                         let text_edit_response = ui.add_sized(
-                            egui::vec2(text_edit_width - self.font_size * 2.2, text_edit_height),
+                            egui::vec2(text_edit_width - self.global_font_size * 2.2, text_edit_height),
                             text_edit,
                         );
 
                         if !self.search_query.is_empty() {
                             if ui
                                 .add_sized(
-                                    egui::vec2(self.font_size * 2.2, text_edit_height),
+                                    egui::vec2(self.global_font_size * 2.2, text_edit_height),
                                     egui::Button::new(
-                                        egui::RichText::new("×").size(self.font_size * 1.3),
+                                        egui::RichText::new("×").size(self.global_font_size * 1.3),
                                     )
                                     .frame(false),
                                 )
@@ -327,7 +272,7 @@ impl eframe::App for SearchApp {
                                 .text_styles
                                 .iter_mut()
                                 .for_each(|(__, font_id)| {
-                                    font_id.size = self.font_size * 1.2; // 增加字體大小
+                                    font_id.size = self.global_font_size * 1.2; // 增加字體大小
                                 });
 
                             ui.style_mut().spacing.item_spacing.y = 10.0; // 增加項目間的垂直間距
@@ -363,7 +308,7 @@ impl eframe::App for SearchApp {
                             ui.label(
                                 egui::RichText::new("debug mode on")
                                     .color(egui::Color32::YELLOW)
-                                    .size(self.font_size),
+                                    .size(self.global_font_size),
                             );
                         }
                     });
@@ -371,7 +316,7 @@ impl eframe::App for SearchApp {
             });
             let text_style = egui::TextStyle::Body.resolve(ui.style());
             let mut new_text_style = text_style.clone();
-            new_text_style.size = self.font_size;
+            new_text_style.size = self.global_font_size;
             ui.style_mut()
                 .text_styles
                 .insert(egui::TextStyle::Body, new_text_style);
@@ -392,7 +337,7 @@ impl eframe::App for SearchApp {
                                 .tint(egui::Color32::WHITE)
                                 .bg_fill(egui::Color32::TRANSPARENT));
                         }
-                        ui.add_space(5.0 * scale_factor);
+                        ui.add_space(5.0);
                         self.display_spotify_results(ui);
                     });
             
@@ -401,7 +346,7 @@ impl eframe::App for SearchApp {
                         ui.set_min_width(0.45 * window_size.x);
                         ui.heading(
                             egui::RichText::new("Osu Results")
-                                .size(self.font_size * 1.2),
+                                .size(self.global_font_size * 1.2),
                         );
                         self.display_osu_results(ui);
                     });
@@ -409,7 +354,7 @@ impl eframe::App for SearchApp {
             } else {
                 // 小視窗佈局（折疊式）
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("Spotify Results").size(self.font_size * 1.1)
+                    egui::RichText::new("Spotify Results").size(self.global_font_size * 1.1)
                 )
                 .default_open(true)
                 .show(ui, |ui| {
@@ -417,7 +362,7 @@ impl eframe::App for SearchApp {
                 });
         
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("Osu Results").size(self.font_size * 1.1)
+                    egui::RichText::new("Osu Results").size(self.global_font_size * 1.1)
                 )
                 .default_open(true)
                 .show(ui, |ui| {
@@ -558,7 +503,7 @@ impl SearchApp {
             initialized: false,
             is_searching: Arc::new(AtomicBool::new(false)),
             need_repaint,
-            font_size: 14.0,
+            global_font_size: 16.0, 
             show_relax_window: false,
             relax_slider_value: 0,
             selected_beatmapset: None,
@@ -570,8 +515,22 @@ impl SearchApp {
             texture_load_queue,
             config_errors,
             debug_mode: false,
-            spotify_icon
+            spotify_icon,
+            show_settings: false,
         }
+    }
+
+    fn show_settings(&mut self, ui: &mut egui::Ui) {
+        let settings_window = egui::Window::new("Settings")
+            .fixed_pos(egui::pos2(10.0, 40.0)) // 設置固定位置
+            .resizable(false) // 禁止調整大小
+            .collapsible(true) // 禁止摺疊
+            .movable(false) // 禁止移動
+            .open(&mut self.show_settings);
+
+        settings_window.show(ui.ctx(), |ui| {
+            ui.add(egui::Slider::new(&mut self.global_font_size, 8.0..=32.0).text("Font Size"));
+        });
     }
 
 
@@ -880,7 +839,7 @@ impl SearchApp {
                                                 [100.0, 100.0],
                                                 egui::Label::new(
                                                     egui::RichText::new("Loading...")
-                                                        .size(self.font_size)
+                                                        .size(self.global_font_size)
                                                         .text_style(egui::TextStyle::Monospace)
                                                         .color(egui::Color32::LIGHT_GRAY),
                                                 ),
@@ -898,19 +857,19 @@ impl SearchApp {
                                     ui.label(
                                         egui::RichText::new(&track_info.name)
                                             .strong()
-                                            .size(self.font_size * 1.2),
+                                            .size(self.global_font_size * 1.2),
                                     );
 
                                     // 顯示藝術家
                                     ui.label(
                                         egui::RichText::new(&track_info.artists)
-                                            .size(self.font_size),
+                                            .size(self.global_font_size),
                                     );
 
                                     // 顯示專輯名稱
                                     ui.label(
                                         egui::RichText::new(&track_info.album)
-                                            .size(self.font_size * 0.9),
+                                            .size(self.global_font_size * 0.9),
                                     );
 
                                     // 添加點擊和拖動的響應
@@ -932,7 +891,7 @@ impl SearchApp {
                                     response.context_menu(|ui| {
                                         ui.style_mut().text_styles.iter_mut().for_each(
                                             |(__, font_id)| {
-                                                font_id.size = self.font_size * 1.2;
+                                                font_id.size = self.global_font_size * 1.2;
                                                 // 增加字體大小
                                             },
                                         );
@@ -950,7 +909,7 @@ impl SearchApp {
                                                         [button_width, 30.0],
                                                         egui::Button::new(
                                                             egui::RichText::new("🔗 Copy")
-                                                                .size(self.font_size * 1.2)
+                                                                .size(self.global_font_size * 1.2)
                                                                 .text_style(
                                                                     egui::TextStyle::Button,
                                                                 ),
@@ -969,7 +928,7 @@ impl SearchApp {
                                                         [button_width, 30.0],
                                                         egui::Button::new(
                                                             egui::RichText::new("Open")
-                                                                .size(self.font_size * 1.2)
+                                                                .size(self.global_font_size * 1.2)
                                                                 .text_style(
                                                                     egui::TextStyle::Button,
                                                                 ),
@@ -1016,11 +975,11 @@ impl SearchApp {
                                     "{} - {}",
                                     beatmap_info.title, beatmap_info.artist
                                 ))
-                                .font(egui::FontId::proportional(self.font_size * 1.1)),
+                                .font(egui::FontId::proportional(self.global_font_size * 1.1)),
                             );
                             ui.label(
                                 egui::RichText::new(format!("by {}", beatmap_info.creator))
-                                    .font(egui::FontId::proportional(self.font_size * 0.9)),
+                                    .font(egui::FontId::proportional(self.global_font_size * 0.9)),
                             );
                             ui.add_space(10.0);
 
@@ -1028,7 +987,7 @@ impl SearchApp {
                                 ui.add_space(10.0);
                                 ui.label(
                                     egui::RichText::new(beatmap_info)
-                                        .font(egui::FontId::proportional(self.font_size * 1.0)),
+                                        .font(egui::FontId::proportional(self.global_font_size * 1.0)),
                                 );
                                 ui.add_space(10.0);
                                 ui.separator();
@@ -1038,7 +997,7 @@ impl SearchApp {
                                     [100.0, 40.0],
                                     egui::Button::new(
                                         egui::RichText::new("Back")
-                                            .font(egui::FontId::proportional(self.font_size * 1.0)),
+                                            .font(egui::FontId::proportional(self.global_font_size * 1.0)),
                                     ),
                                 )
                                 .clicked()
@@ -1083,12 +1042,12 @@ impl SearchApp {
                                             ui.label(
                                                 egui::RichText::new(&beatmapset.title)
                                                     .font(egui::FontId::proportional(
-                                                        self.font_size * 1.0,
+                                                        self.global_font_size * 1.0,
                                                     ))
                                                     .strong(),
                                             );
                                             ui.label(egui::RichText::new(&beatmapset.artist).font(
-                                                egui::FontId::proportional(self.font_size * 0.9),
+                                                egui::FontId::proportional(self.global_font_size * 0.9),
                                             ));
                                             ui.label(
                                                 egui::RichText::new(format!(
@@ -1096,7 +1055,7 @@ impl SearchApp {
                                                     beatmapset.creator
                                                 ))
                                                 .font(egui::FontId::proportional(
-                                                    self.font_size * 0.8,
+                                                    self.global_font_size * 0.8,
                                                 )),
                                             );
                                         });
@@ -1153,8 +1112,8 @@ async fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = ViewportBuilder {
         title: Some(String::from("Search App")),
-        inner_size: Some(egui::Vec2::new(1384.0, 784.0)),
-        min_inner_size: Some(egui::Vec2::new(700.0, 400.0)),
+        inner_size: Some(egui::Vec2::new(730.0, 430.0)),
+        min_inner_size: Some(egui::Vec2::new(730.0, 430.0)),
         resizable: Some(true),       // 允許調整視窗大小
         maximize_button: Some(true), // 顯示最大化按鈕
         ..Default::default()
