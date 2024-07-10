@@ -6,8 +6,7 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
-use log::error;
-use log::info;
+use log::{debug, info, error};
 
 lazy_static! {
     static ref ERR_MSG: Mutex<String> = Mutex::new(String::new());
@@ -28,16 +27,33 @@ pub struct Config {
     pub osu: ServiceConfig,
 }
 
-pub async fn read_config() -> Result<Config> {
+pub async fn read_config(debug_mode: bool) -> Result<Config> {
+    if debug_mode {
+        debug!("開始讀取配置文件");
+    }
+
     let file_path = "config.json";
     let mut file = File::open(file_path)
         .with_context(|| format!("無法開啟配置文件: {}", file_path))?;
+    
+    if debug_mode {
+        debug!("成功開啟配置文件: {}", file_path);
+    }
+
     let mut content = String::new();
     file.read_to_string(&mut content)
         .with_context(|| "無法讀取配置文件內容")?;
     
+    if debug_mode {
+        debug!("成功讀取配置文件內容");
+    }
+
     let config_value: Value = serde_json::from_str(&content)
         .with_context(|| "配置文件格式錯誤，請檢查 JSON 格式")?;
+
+    if debug_mode {
+        debug!("成功解析 JSON 格式");
+    }
 
     let mut errors = Vec::new();
 
@@ -75,6 +91,10 @@ pub async fn read_config() -> Result<Config> {
     let config: Config = serde_json::from_value(config_value)
         .with_context(|| "無法將配置文件解析為 Config 結構")?;
     
+    if debug_mode {
+        debug!("成功將配置解析為 Config 結構");
+    }
+
     Ok(config)
 }
 
@@ -163,7 +183,7 @@ pub mod spotify_search {
     use crate::ERR_MSG;
     use anyhow::{Error, Result};
     use lazy_static::lazy_static;
-    use log::{info, error};
+    use log::{debug, info, error};
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use reqwest::Client;
@@ -514,11 +534,15 @@ pub mod spotify_search {
         }
     }
 
-    pub async fn get_access_token(client: &reqwest::Client) -> Result<String> {
-        let config = read_config().await?;
+    pub async fn get_access_token(client: &reqwest::Client, debug_mode: bool) -> Result<String> {
+        let config = read_config(debug_mode).await?;
         let client_id = &config.spotify.client_id;
         let client_secret = &config.spotify.client_secret;
-
+    
+        if debug_mode {
+            debug!("正在獲取 Spotify access token");
+        }
+    
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
         let auth_header = base64::encode(format!("{}:{}", client_id, client_secret));
@@ -527,12 +551,15 @@ pub mod spotify_search {
             .header("Authorization", format!("Basic {}", auth_header))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
-
+    
         let response = request.send().await;
-
+    
         match response {
             Ok(resp) => {
                 let auth_response: AuthResponse = resp.json().await?;
+                if debug_mode {
+                    debug!("成功獲取 Spotify access token");
+                }
                 Ok(auth_response.access_token)
             }
             Err(e) => {
@@ -541,6 +568,7 @@ pub mod spotify_search {
             }
         }
     }
+
     pub fn open_spotify_url(url: &str) -> io::Result<()> {
         let current_time = Local::now().format("%H:%M:%S").to_string();
         let log_file_path = "output.log";
@@ -683,10 +711,10 @@ pub mod spotify_search {
 pub mod osu_search {
     use crate::read_config;
     use anyhow::Result;
-    //use log::{error, info};
+    use log::{debug, error};
     use reqwest::Client;
     use serde::Deserialize;
-    use std::io::{self, Write};
+
 
     #[derive(Debug, Deserialize)]
     pub struct Covers {
@@ -754,13 +782,25 @@ pub mod osu_search {
         Ok(response.beatmapsets)
     }
 
-    pub async fn get_osu_token(client: &Client) -> Result<String> {
-        let config = read_config()
+    pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String> {
+        if debug_mode {
+            debug!("開始獲取 Osu token");
+        }
+    
+        let config = read_config(debug_mode)
             .await
-            .map_err(|e| anyhow::anyhow!("Error reading config: {}", e))?;
+            .map_err(|e| {
+                error!("讀取配置文件時出錯: {}", e);
+                anyhow::anyhow!("Error reading config: {}", e)
+            })?;
+    
         let client_id = &config.osu.client_id;
         let client_secret = &config.osu.client_secret;
-
+    
+        if debug_mode {
+            debug!("成功讀取 Osu client_id 和 client_secret");
+        }
+    
         let url = "https://osu.ppy.sh/oauth/token";
         let params = [
             ("client_id", client_id),
@@ -768,15 +808,31 @@ pub mod osu_search {
             ("grant_type", &"client_credentials".to_string()),
             ("scope", &"public".to_string()),
         ];
+    
+        if debug_mode {
+            debug!("準備發送 Osu token 請求");
+        }
+    
         let response: TokenResponse = client
             .post(url)
             .form(&params)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?
+            .map_err(|e| {
+                error!("發送 Osu token 請求時出錯: {}", e);
+                anyhow::anyhow!("Error sending request: {}", e)
+            })?
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
+            .map_err(|e| {
+                error!("解析 Osu token 回應時出錯: {}", e);
+                anyhow::anyhow!("Error parsing response: {}", e)
+            })?;
+    
+        if debug_mode {
+            debug!("成功獲取 Osu token");
+        }
+    
         Ok(response.access_token)
     }
 
@@ -801,52 +857,5 @@ pub mod osu_search {
             beatmaps,
         }
     }
-    #[tokio::main]
-    pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
-        let client = Client::new();
-        print!("Please enter a song name: ");
-        io::stdout().flush()?; // 確保提示符立即顯示
 
-        let mut song_name = String::new();
-        io::stdin().read_line(&mut song_name)?;
-        let song_name = song_name.trim(); // 移除尾隨換行符
-
-        // 從配置中讀取 client_id 和 client_secret
-
-        let access_token = get_osu_token(&client).await?;
-        let beatmapsets = get_beatmapsets(&client, &access_token, song_name).await?;
-
-        // 打印每個 beatmapset 的 ID
-        for (index, beatmapset) in beatmapsets.iter().enumerate() {
-            println!("{}: Beatmap Set ID: {}", index + 1, beatmapset.id);
-            println!("Links: https://osu.ppy.sh/beatmapsets/{}", beatmapset.id);
-            println!("-------------------------");
-        }
-
-        // 詢問用戶選擇一個 beatmapset
-        println!("If you want to check the detail");
-        print!("Please enter the item number: ");
-        io::stdout().flush()?; // 確保提示符立即顯示
-
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        let chosen_index: usize = answer.trim().parse()?;
-
-        // 獲取選定的 beatmapset
-        let chosen_beatmapset = &beatmapsets[chosen_index - 1];
-
-        // 打印選定 beatmapset 中的 beatmaps
-        for beatmap in &chosen_beatmapset.beatmaps {
-            println!("Beatmap ID: {}", beatmap.id);
-            println!("Difficulty Rating: {}", beatmap.difficulty_rating);
-            println!("Mode: {}", beatmap.mode);
-            println!("Status: {}", beatmap.status);
-            println!("Total Length: {}", beatmap.total_length / 60);
-            println!("User ID: {}", beatmap.user_id);
-            println!("Version: {}", beatmap.version);
-            println!("-------------------------");
-        }
-
-        Ok(())
-    }
 }
