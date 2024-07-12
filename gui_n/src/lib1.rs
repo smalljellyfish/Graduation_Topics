@@ -1,12 +1,12 @@
-﻿use anyhow::{Context, Result, anyhow};
-use serde_json::Value;
-use regex::Regex;
+﻿use anyhow::{anyhow, Context, Result};
 use lazy_static::lazy_static;
+use log::{debug, error, info};
+use regex::Regex;
 use serde::Deserialize;
+use serde_json::Value;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
-use log::{debug, info, error};
 
 lazy_static! {
     static ref ERR_MSG: Mutex<String> = Mutex::new(String::new());
@@ -33,9 +33,9 @@ pub async fn read_config(debug_mode: bool) -> Result<Config> {
     }
 
     let file_path = "config.json";
-    let mut file = File::open(file_path)
-        .with_context(|| format!("無法開啟配置文件: {}", file_path))?;
-    
+    let mut file =
+        File::open(file_path).with_context(|| format!("無法開啟配置文件: {}", file_path))?;
+
     if debug_mode {
         debug!("成功開啟配置文件: {}", file_path);
     }
@@ -43,13 +43,13 @@ pub async fn read_config(debug_mode: bool) -> Result<Config> {
     let mut content = String::new();
     file.read_to_string(&mut content)
         .with_context(|| "無法讀取配置文件內容")?;
-    
+
     if debug_mode {
         debug!("成功讀取配置文件內容");
     }
 
-    let config_value: Value = serde_json::from_str(&content)
-        .with_context(|| "配置文件格式錯誤，請檢查 JSON 格式")?;
+    let config_value: Value =
+        serde_json::from_str(&content).with_context(|| "配置文件格式錯誤，請檢查 JSON 格式")?;
 
     if debug_mode {
         debug!("成功解析 JSON 格式");
@@ -69,14 +69,14 @@ pub async fn read_config(debug_mode: bool) -> Result<Config> {
 
     if !errors.is_empty() {
         let error_msg = format!("配置檢查失敗:\n{}", errors.join("\n"));
-        
+
         // 檢查錯誤是否有變化
         let mut last_error = LAST_ERROR.lock().unwrap();
         if last_error.as_ref() != Some(&error_msg) {
             error!("{}", error_msg);
             *last_error = Some(error_msg.clone());
         }
-        
+
         return Err(anyhow!(error_msg));
     } else {
         // 如果沒有錯誤，清除上一次的錯誤記錄
@@ -88,9 +88,9 @@ pub async fn read_config(debug_mode: bool) -> Result<Config> {
     }
 
     // 如果檢查通過，解析為 Config 結構
-    let config: Config = serde_json::from_value(config_value)
-        .with_context(|| "無法將配置文件解析為 Config 結構")?;
-    
+    let config: Config =
+        serde_json::from_value(config_value).with_context(|| "無法將配置文件解析為 Config 結構")?;
+
     if debug_mode {
         debug!("成功將配置解析為 Config 結構");
     }
@@ -187,7 +187,7 @@ pub mod spotify_search {
     use crate::ERR_MSG;
     use anyhow::{Error, Result};
     use lazy_static::lazy_static;
-    use log::{debug, info, error};
+    use log::{debug, error, info};
     use regex::Regex;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use reqwest::Client;
@@ -297,15 +297,29 @@ pub mod spotify_search {
                 .expect("Failed to compile Spotify URL regex");
     }
 
-    pub fn is_valid_spotify_url(url: &str) -> bool {
-        if let Some(captures) = SPOTIFY_URL_REGEX.captures(url) {
-            if captures.get(1).map_or(false, |m| m.as_str() == "track") {
-                return captures.get(2).map_or(false, |m| m.as_str().len() == 22);
-            } else if captures.get(1).map_or(false, |m| m.as_str() == "album") {
-                return true;
+    pub enum SpotifyUrlStatus {
+        Valid,
+        Incomplete,
+        Invalid,
+    }
+    
+    pub fn is_valid_spotify_url(url: &str) -> SpotifyUrlStatus {
+        if url.starts_with("https://open.spotify.com/") {
+            if let Some(captures) = SPOTIFY_URL_REGEX.captures(url) {
+                if captures.get(1).map_or(false, |m| m.as_str() == "track") {
+                    if captures.get(2).map_or(false, |m| m.as_str().len() == 22) {
+                        return SpotifyUrlStatus::Valid;
+                    } else {
+                        return SpotifyUrlStatus::Incomplete;
+                    }
+                } else if captures.get(1).map_or(false, |m| m.as_str() == "album") {
+                    return SpotifyUrlStatus::Valid;
+                }
             }
+            SpotifyUrlStatus::Incomplete
+        } else {
+            SpotifyUrlStatus::Invalid
         }
-        false
     }
 
     pub async fn search_album_by_url(
@@ -405,15 +419,15 @@ pub mod spotify_search {
             .map(|artist| artist.name.clone())
             .collect::<Vec<String>>()
             .join(", ");
-    
+
         let spotify_url = track.external_urls.get("spotify").cloned();
-    
+
         let track_info = TrackInfo {
             name: track_name,
             artists: artist_names,
             album: album_name,
         };
-    
+
         (track_info, spotify_url)
     }
 
@@ -467,53 +481,54 @@ pub mod spotify_search {
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
             query, limit, offset
         );
-        
-        let response = client
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await?;
-    
+
+        let response = client.get(&url).bearer_auth(token).send().await?;
+
         if debug_mode {
             info!("Spotify API 請求詳情:");
             info!("  URL: {}", url);
             info!("收到回應狀態碼: {}", response.status());
         }
-    
+
         let response_text = response.text().await?;
-    
+
         if debug_mode {
             info!("Spotify API 回應 JSON: {}", response_text);
         }
-    
+
         let search_result: SearchResult = serde_json::from_str(&response_text)?;
-    
+
         match search_result.tracks {
             Some(tracks) => {
                 let total_pages = (tracks.total + limit - 1) / limit;
-                
+
                 if debug_mode {
                     info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
                 }
-    
+
                 let mut track_infos: Vec<TrackWithCover> = Vec::new();
                 let mut error_occurred = false;
-    
+
                 for track in tracks.items {
                     let cover_url = track.album.images.first().map(|img| img.url.clone());
-                    let artists_names = track.artists.iter()
+                    let artists_names = track
+                        .artists
+                        .iter()
                         .map(|artist| artist.name.clone())
                         .collect::<Vec<String>>()
                         .join(", ");
-    
+
                     if cover_url.is_none() {
                         error_occurred = true;
-                        error!("處理曲目時出錯: \"{}\" by {} - 缺少封面 URL", track.name, artists_names);
+                        error!(
+                            "處理曲目時出錯: \"{}\" by {} - 缺少封面 URL",
+                            track.name, artists_names
+                        );
                     } else if debug_mode {
                         info!("處理曲目: \"{}\" by {}", track.name, artists_names);
                         info!("  專輯封面 URL: {}", cover_url.as_ref().unwrap());
                     }
-    
+
                     track_infos.push(TrackWithCover {
                         name: track.name,
                         artists: track.artists,
@@ -522,13 +537,13 @@ pub mod spotify_search {
                         cover_url,
                     });
                 }
-    
+
                 if error_occurred {
                     error!("部分曲目處理出錯，請檢查錯誤日誌");
                 } else if debug_mode {
                     info!("成功處理 {} 首曲目", track_infos.len());
                 }
-    
+
                 Ok((track_infos, total_pages))
             }
             None => {
@@ -542,11 +557,11 @@ pub mod spotify_search {
         let config = read_config(debug_mode).await?;
         let client_id = &config.spotify.client_id;
         let client_secret = &config.spotify.client_secret;
-    
+
         if debug_mode {
             debug!("正在獲取 Spotify access token");
         }
-    
+
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
         let auth_header = base64::encode(format!("{}:{}", client_id, client_secret));
@@ -555,9 +570,9 @@ pub mod spotify_search {
             .header("Authorization", format!("Basic {}", auth_header))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
-    
+
         let response = request.send().await;
-    
+
         match response {
             Ok(resp) => {
                 let auth_response: AuthResponse = resp.json().await?;
@@ -714,13 +729,13 @@ pub mod spotify_search {
 
 pub mod osu_search {
     use crate::read_config;
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
     use log::{debug, error, info};
     use reqwest::Client;
     use serde::Deserialize;
 
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize,Clone)]
     pub struct Covers {
         pub cover: Option<String>,
         pub cover_2x: Option<String>,
@@ -731,7 +746,7 @@ pub mod osu_search {
         pub slimcover: Option<String>,
         pub slimcover_2x: Option<String>,
     }
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Clone)]  // 添加 Clone
     pub struct Beatmapset {
         pub beatmaps: Vec<Beatmap>,
         pub id: i32,
@@ -749,7 +764,7 @@ pub mod osu_search {
     pub struct SearchResponse {
         beatmapsets: Vec<Beatmapset>,
     }
-    #[derive(Debug, Deserialize, Clone)] 
+    #[derive(Debug, Deserialize, Clone)]
     pub struct Beatmap {
         pub difficulty_rating: f32,
         pub id: i32,
@@ -765,7 +780,6 @@ pub mod osu_search {
         pub creator: String,
         pub beatmaps: Vec<String>,
     }
-    
 
     pub async fn get_beatmapsets(
         client: &Client,
@@ -782,36 +796,84 @@ pub mod osu_search {
             .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?;
 
         let response_text = response.text().await?;
+
+        if debug_mode {
+            info!("Osu API 回應 JSON: {}", response_text);
+        }
+
+        let search_response: SearchResponse = serde_json::from_str(&response_text)
+            .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
+
+        Ok(search_response.beatmapsets)
+    }
+
+    pub async fn get_beatmapset_by_id(
+        client: &Client,
+        access_token: &str,
+        beatmapset_id: &str,
+        debug_mode: bool,
+    ) -> Result<Beatmapset> {
+        let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
+        
+        let response = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?;
+    
+        let response_text = response.text().await?;
     
         if debug_mode {
             info!("Osu API 回應 JSON: {}", response_text);
         }
     
-        let search_response: SearchResponse = serde_json::from_str(&response_text)
+        let beatmapset: Beatmapset = serde_json::from_str(&response_text)
             .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
     
-        Ok(search_response.beatmapsets)
+        Ok(beatmapset)
+    }
+
+    pub async fn get_beatmapset_details(client: &Client, access_token: &str, beatmapset_id: &str, debug_mode: bool) -> Result<(String, String)> {
+        let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
+        
+        let response = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to send request: {}", e))?;
+    
+        let beatmapset: serde_json::Value = response.json().await
+            .map_err(|e| anyhow!("Failed to parse JSON: {}", e))?;
+    
+        if debug_mode {
+            println!("Beatmapset details: {:?}", beatmapset);
+        }
+    
+        let artist = beatmapset["artist"].as_str().unwrap_or("Unknown Artist").to_string();
+        let title = beatmapset["title"].as_str().unwrap_or("Unknown Title").to_string();
+    
+        Ok((artist, title))
     }
 
     pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String> {
         if debug_mode {
             debug!("開始獲取 Osu token");
         }
-    
-        let config = read_config(debug_mode)
-            .await
-            .map_err(|e| {
-                error!("讀取配置文件時出錯: {}", e);
-                anyhow::anyhow!("Error reading config: {}", e)
-            })?;
-    
+
+        let config = read_config(debug_mode).await.map_err(|e| {
+            error!("讀取配置文件時出錯: {}", e);
+            anyhow::anyhow!("Error reading config: {}", e)
+        })?;
+
         let client_id = &config.osu.client_id;
         let client_secret = &config.osu.client_secret;
-    
+
         if debug_mode {
             debug!("成功讀取 Osu client_id 和 client_secret");
         }
-    
+
         let url = "https://osu.ppy.sh/oauth/token";
         let params = [
             ("client_id", client_id),
@@ -819,11 +881,11 @@ pub mod osu_search {
             ("grant_type", &"client_credentials".to_string()),
             ("scope", &"public".to_string()),
         ];
-    
+
         if debug_mode {
             debug!("準備發送 Osu token 請求");
         }
-    
+
         let response: TokenResponse = client
             .post(url)
             .form(&params)
@@ -839,13 +901,14 @@ pub mod osu_search {
                 error!("解析 Osu token 回應時出錯: {}", e);
                 anyhow::anyhow!("Error parsing response: {}", e)
             })?;
-    
+
         if debug_mode {
             debug!("成功獲取 Osu token");
         }
-    
+
         Ok(response.access_token)
     }
+
 
     pub fn print_beatmap_info_gui(beatmapset: &Beatmapset) -> BeatmapInfo {
         let mut beatmaps = Vec::new();
@@ -860,7 +923,7 @@ pub mod osu_search {
                 beatmap.version
             ));
         }
-    
+
         BeatmapInfo {
             title: beatmapset.title.clone(),
             artist: beatmapset.artist.clone(),
@@ -868,5 +931,4 @@ pub mod osu_search {
             beatmaps,
         }
     }
-
 }
