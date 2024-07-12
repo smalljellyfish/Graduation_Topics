@@ -228,7 +228,7 @@ impl eframe::App for SearchApp {
             });
 
             if self.show_settings {
-                self.show_settings(ui);
+                self.show_settings(ui); 
             }
 
             ui.horizontal(|ui| {
@@ -535,18 +535,20 @@ impl SearchApp {
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
+        ui.heading("設置");
         ui.add_space(10.0);
 
-        // 字體大小設置
+        // 整體縮放設置
         ui.horizontal(|ui| {
-            ui.label("Font Size:");
-            if ui.button("-").clicked() && self.global_font_size > 8.0 {
-                self.global_font_size -= 1.0;
+            ui.label("整體縮放:");
+            if ui.button("-").clicked() {
+                let new_scale = (ui.ctx().pixels_per_point() - 0.1).max(0.5);
+                ui.ctx().set_pixels_per_point(new_scale);
             }
-            ui.label(format!("{:.0}", self.global_font_size));
-            if ui.button("+").clicked() && self.global_font_size < 32.0 {
-                self.global_font_size += 1.0;
+            ui.label(format!("{:.2}", ui.ctx().pixels_per_point()));
+            if ui.button("+").clicked() {
+                let new_scale = (ui.ctx().pixels_per_point() + 0.1).min(3.0);
+                ui.ctx().set_pixels_per_point(new_scale);
             }
         });
 
