@@ -95,6 +95,10 @@ pub async fn read_config(debug_mode: bool) -> Result<Config> {
         debug!("成功將配置解析為 Config 結構");
     }
 
+    if debug_mode {
+        debug!("完整的 JSON 配置文件: {}", content);
+    }
+
     Ok(config)
 }
 
@@ -459,8 +463,6 @@ pub mod spotify_search {
         offset: u32,
         debug_mode: bool,
     ) -> Result<(Vec<TrackWithCover>, u32), anyhow::Error> {
-        
-    
         let url = format!(
             "https://api.spotify.com/v1/search?q={}&type=track&limit={}&offset={}",
             query, limit, offset
@@ -471,60 +473,62 @@ pub mod spotify_search {
             .bearer_auth(token)
             .send()
             .await?;
-
+    
         if debug_mode {
             info!("Spotify API 請求詳情:");
             info!("  URL: {}", url);
+            info!("收到回應狀態碼: {}", response.status());
         }
-        
-        info!("收到回應狀態碼: {}", response.status());
-
-        // 獲取回應的文本內容
+    
         let response_text = response.text().await?;
     
-        // 記錄 Spotify API 的完整 JSON 回應
         if debug_mode {
             info!("Spotify API 回應 JSON: {}", response_text);
         }
-        
-        
-
-        // 將文本解析為 SearchResult
+    
         let search_result: SearchResult = serde_json::from_str(&response_text)?;
     
         match search_result.tracks {
             Some(tracks) => {
                 let total_pages = (tracks.total + limit - 1) / limit;
-                info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
+                
+                if debug_mode {
+                    info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
+                }
     
-                let track_infos: Vec<TrackWithCover> = tracks
-                    .items
-                    .into_iter()
-                    .map(|track| {
-                        let cover_url = track.album.images.first().map(|img| img.url.clone());
-                        let artists_names = track.artists.iter()
-                        .fold(String::new(), |acc, artist| {
-                            if acc.is_empty() {
-                                artist.name.clone()
-                            } else {
-                                format!("{}, {}", acc, artist.name)
-                            }
-                        });
+                let mut track_infos: Vec<TrackWithCover> = Vec::new();
+                let mut error_occurred = false;
+    
+                for track in tracks.items {
+                    let cover_url = track.album.images.first().map(|img| img.url.clone());
+                    let artists_names = track.artists.iter()
+                        .map(|artist| artist.name.clone())
+                        .collect::<Vec<String>>()
+                        .join(", ");
+    
+                    if cover_url.is_none() {
+                        error_occurred = true;
+                        error!("處理曲目時出錯: \"{}\" by {} - 缺少封面 URL", track.name, artists_names);
+                    } else if debug_mode {
                         info!("處理曲目: \"{}\" by {}", track.name, artists_names);
-                        if let Some(url) = &cover_url {
-                            info!("  專輯封面 URL: {}", url);
-                        }
-                        TrackWithCover {
-                            name: track.name,
-                            artists: track.artists,
-                            external_urls: track.external_urls,
-                            album_name: track.album.name,
-                            cover_url,
-                        }
-                    })
-                    .collect();
+                        info!("  專輯封面 URL: {}", cover_url.as_ref().unwrap());
+                    }
     
-                info!("成功處理 {} 首曲目", track_infos.len());
+                    track_infos.push(TrackWithCover {
+                        name: track.name,
+                        artists: track.artists,
+                        external_urls: track.external_urls,
+                        album_name: track.album.name,
+                        cover_url,
+                    });
+                }
+    
+                if error_occurred {
+                    error!("部分曲目處理出錯，請檢查錯誤日誌");
+                } else if debug_mode {
+                    info!("成功處理 {} 首曲目", track_infos.len());
+                }
+    
                 Ok((track_infos, total_pages))
             }
             None => {
@@ -711,7 +715,7 @@ pub mod spotify_search {
 pub mod osu_search {
     use crate::read_config;
     use anyhow::Result;
-    use log::{debug, error};
+    use log::{debug, error, info};
     use reqwest::Client;
     use serde::Deserialize;
 
@@ -767,6 +771,7 @@ pub mod osu_search {
         client: &Client,
         access_token: &str,
         song_name: &str,
+        debug_mode: bool,
     ) -> Result<Vec<Beatmapset>> {
         let response = client
             .get("https://osu.ppy.sh/api/v2/beatmapsets/search")
@@ -774,12 +779,18 @@ pub mod osu_search {
             .bearer_auth(access_token)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?
-            .json::<SearchResponse>()
-            .await
-            .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?;
 
-        Ok(response.beatmapsets)
+        let response_text = response.text().await?;
+    
+        if debug_mode {
+            info!("Osu API 回應 JSON: {}", response_text);
+        }
+    
+        let search_response: SearchResponse = serde_json::from_str(&response_text)
+            .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
+    
+        Ok(search_response.beatmapsets)
     }
 
     pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String> {

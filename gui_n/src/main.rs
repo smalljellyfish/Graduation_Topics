@@ -518,7 +518,7 @@ impl SearchApp {
             texture_cache,
             texture_load_queue,
             config_errors,
-            debug_mode: false,
+            debug_mode,
             spotify_icon,
             show_settings: false,
         }
@@ -526,25 +526,45 @@ impl SearchApp {
 
     //設置日誌級別
     fn set_log_level(&self) {
-        if self.debug_mode {
-            log::set_max_level(LevelFilter::Debug);
+        let log_level = if self.debug_mode {
+            LevelFilter::Debug
         } else {
-            log::set_max_level(LevelFilter::Info);
-        }
+            LevelFilter::Info
+        };
+        log::set_max_level(log_level);
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui) {
-        let settings_window = egui::Window::new("Settings")
-            .fixed_pos(egui::pos2(10.0, 40.0)) // 設置固定位置
-            .resizable(false) // 禁止調整大小
-            .collapsible(true) // 禁止摺疊
-            .movable(false) // 禁止移動
-            .open(&mut self.show_settings);
+        ui.heading("Settings");
+        ui.add_space(10.0);
 
-        settings_window.show(ui.ctx(), |ui| {
-            ui.add(egui::Slider::new(&mut self.global_font_size, 8.0..=32.0).text("Font Size"));
+        // 字體大小設置
+        ui.horizontal(|ui| {
+            ui.label("Font Size:");
+            if ui.button("-").clicked() && self.global_font_size > 8.0 {
+                self.global_font_size -= 1.0;
+            }
+            ui.label(format!("{:.0}", self.global_font_size));
+            if ui.button("+").clicked() && self.global_font_size < 32.0 {
+                self.global_font_size += 1.0;
+            }
         });
+
+        ui.add_space(10.0);
+
+        // Debug 模式設置
+        let mut debug_mode = self.debug_mode;
+        ui.checkbox(&mut debug_mode, "Debug Mode");
+        if debug_mode != self.debug_mode {
+            self.debug_mode = debug_mode;
+            self.set_log_level();
+            info!("Debug mode: {}", self.debug_mode);
+        }
+
+        ui.add_space(10.0);
     }
+
+
 
     fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         let is_dark = ctx.style().visuals.dark_mode;
@@ -779,7 +799,7 @@ impl SearchApp {
                 }
             };
 
-            match get_beatmapsets(&*client.lock().await, &osu_token, &osu_query).await {
+            match get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode).await {
                 Ok(results) => {
                     info!("Osu 搜索結果: {} 個 beatmapsets", results.len());
                     if debug_mode {
