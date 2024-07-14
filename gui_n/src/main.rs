@@ -28,11 +28,14 @@ use reqwest::Client;
 use simplelog::*;
 
 use image::load_from_memory;
+
 use std::default::Default;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::collections::HashMap;
+
 //use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -276,30 +279,44 @@ impl eframe::App for SearchApp {
                         }
 
                         let cloned_response = text_edit_response.clone();
-
-                        // 檢測右鍵是否按下
+                        // 搜索框的右鍵菜單
                         cloned_response.context_menu(|ui| {
-                            ui.style_mut()
-                                .text_styles
-                                .iter_mut()
-                                .for_each(|(__, font_id)| {
-                                    font_id.size = self.global_font_size * 1.2; // 增加字體大小
-                                });
+                            let search_query =
+                                Arc::new(std::sync::Mutex::new(self.search_query.clone()));
+                            let show_relax_window =
+                                Arc::new(std::sync::Mutex::new(self.show_relax_window));
 
-                            ui.style_mut().spacing.item_spacing.y = 10.0; // 增加項目間的垂直間距
+                            let search_query_clone = Arc::clone(&search_query);
+                            let show_relax_window_clone = Arc::clone(&show_relax_window);
 
-                            if ui.button("Paste").clicked() {
-                                let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
-                                if let Ok(clipboard_contents) = ctx.get_contents() {
-                                    self.search_query = clipboard_contents;
-                                    ui.close_menu();
-                                }
-                            }
-                            if ui.button("Relax").clicked() {
-                                // 觸發浪費時間
-                                self.show_relax_window = true;
-                                ui.close_menu();
-                            }
+                            self.create_context_menu(ui, |add_button| {
+                                let search_query = Arc::clone(&search_query_clone);
+                                add_button(
+                                    "Paste",
+                                    Box::new(move || {
+                                        let mut ctx: ClipboardContext =
+                                            ClipboardProvider::new().unwrap();
+                                        if let Ok(clipboard_contents) = ctx.get_contents() {
+                                            let mut search_query = search_query.lock().unwrap();
+                                            *search_query = clipboard_contents;
+                                        }
+                                    }),
+                                );
+
+                                let show_relax_window = Arc::clone(&show_relax_window_clone);
+                                add_button(
+                                    "Relax",
+                                    Box::new(move || {
+                                        let mut show_relax_window =
+                                            show_relax_window.lock().unwrap();
+                                        *show_relax_window = true;
+                                    }),
+                                );
+                            });
+
+                            // 在這裡更新 self 的狀態
+                            self.search_query = search_query.lock().unwrap().clone();
+                            self.show_relax_window = *show_relax_window.lock().unwrap();
                         });
 
                         // 檢測Enter是否按下，並處理調試模式
@@ -638,6 +655,46 @@ impl SearchApp {
             }
         }
     }
+    fn create_context_menu<F>(&self, ui: &mut egui::Ui, content: F)
+    where
+        F: FnOnce(&mut dyn FnMut(&str, Box<dyn FnOnce() + '_>)),
+    {
+        ui.style_mut()
+            .text_styles
+            .iter_mut()
+            .for_each(|(__, font_id)| {
+                font_id.size = self.global_font_size * 1.2;
+            });
+
+        ui.style_mut().spacing.item_spacing.y = 5.0; // 減少項目間的垂直間距
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(5.0);
+
+            let button_width = ui.available_width().max(100.0);
+            let button_height = 30.0;
+
+            content(&mut |label: &str, on_click: Box<dyn FnOnce() + '_>| {
+                if ui
+                    .add_sized(
+                        [button_width, button_height],
+                        egui::Button::new(
+                            egui::RichText::new(label)
+                                .size(self.global_font_size * 1.2)
+                                .text_style(egui::TextStyle::Button),
+                        ),
+                    )
+                    .clicked()
+                {
+                    on_click();
+                    ui.close_menu();
+                }
+            });
+
+            ui.add_space(5.0);
+        });
+    }
+
     // 輔助函數來加載圖片
     fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
         let image = image::io::Reader::open(path)?.decode()?;
@@ -673,7 +730,7 @@ impl SearchApp {
 
     fn perform_search(&mut self, ctx: egui::Context) -> JoinHandle<Result<()>> {
         self.set_log_level(); // 設置日誌級別
-    
+
         let client = self.client.clone();
         let debug_mode = self.debug_mode;
         let query = self.search_query.clone();
@@ -683,11 +740,11 @@ impl SearchApp {
         let need_repaint = self.need_repaint.clone();
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
-    
+
         info!("使用者搜尋: {}", query);
-    
+
         is_searching.store(true, Ordering::SeqCst);
-    
+
         tokio::spawn(async move {
             let result: Result<()> = async {
                 let mut error = err_msg.lock().await;
@@ -695,24 +752,24 @@ impl SearchApp {
                 if debug_mode {
                     debug!("除錯模式開啟");
                 }
-    
+
                 let spotify_token = get_access_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| {
                         error!("獲取 Spotify token 錯誤: {:?}", e);
                         anyhow!("Spotify 錯誤：無法獲取 token")
                     })?;
-    
+
                 let osu_token = get_osu_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| {
                         error!("獲取 Osu token 錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：無法獲取 token")
                     })?;
-    
+
                 if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
                     info!("Osu 搜尋: {}", query);
-    
+
                     // 如果是 osu! URL，獲取譜面信息並進行反搜索
                     let (artist, title) = get_beatmapset_details(
                         &*client.lock().await,
@@ -725,10 +782,10 @@ impl SearchApp {
                         error!("獲取 Osu 譜面詳情錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：獲取譜面詳情失敗")
                     })?;
-    
+
                     let spotify_query = format!("{} {}", artist, title);
                     info!("Spotify 查詢 (從 osu): {}", spotify_query);
-    
+
                     // 使用獲取的 artist 和 title 進行 Spotify 搜索
                     let tracks_with_cover = search_track(
                         &*client.lock().await,
@@ -744,7 +801,7 @@ impl SearchApp {
                         error!("Spotify 反搜索錯誤: {:?}", e);
                         anyhow!("Spotify 錯誤：反搜索失敗")
                     })?;
-    
+
                     // 更新 Spotify 搜索結果
                     let mut search_results = search_results.lock().await;
                     *search_results = tracks_with_cover
@@ -775,7 +832,7 @@ impl SearchApp {
                             external_urls: twc.external_urls.clone(),
                         })
                         .collect();
-    
+
                     // 獲取 osu! beatmapset
                     let beatmapset = get_beatmapset_by_id(
                         &*client.lock().await,
@@ -788,15 +845,15 @@ impl SearchApp {
                         error!("獲取 Osu 譜面錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：獲取譜面失敗")
                     })?;
-    
+
                     let results = vec![beatmapset];
                     *osu_search_results.lock().await = results.clone();
-    
+
                     let mut osu_urls = Vec::new();
                     if let Some(cover_url) = &results[0].covers.cover {
                         osu_urls.push(cover_url.clone());
                     }
-    
+
                     let ctx_clone = ctx.clone();
                     let sender_clone = sender.clone();
                     tokio::spawn(async move {
@@ -804,57 +861,59 @@ impl SearchApp {
                     });
                 } else {
                     // 如果不是 osu! URL，執行原有的搜索邏輯
-                    let spotify_result: Result<Vec<TrackWithCover>> = match is_valid_spotify_url(&query) {
-                        SpotifyUrlStatus::Valid => {
-                            info!("Spotify 查詢 (URL): {}", query);
-                            let track_id = query
-                                .split('/')
-                                .last()
-                                .unwrap_or("")
-                                .split('?')
-                                .next()
-                                .unwrap_or("");
-                            let track = get_track_info(&*client.lock().await, track_id, &spotify_token)
-                                .await
-                                .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
-    
-                            Ok(vec![TrackWithCover {
-                                name: track.name.clone(),
-                                artists: track.artists.clone(),
-                                external_urls: track.external_urls.clone(),
-                                album_name: track.album.name.clone(),
-                                cover_url: track
-                                    .album
-                                    .images
-                                    .first()
-                                    .map(|img| img.url.clone()),
-                            }])
-                        }
-                        SpotifyUrlStatus::Incomplete => {
-                            *error = "Spotify URL 不完整，請輸入完整的 URL".to_string();
-                            return Ok(());
-                        }
-                        SpotifyUrlStatus::Invalid => {
-                            if !query.is_empty() {
-                                info!("Spotify 查詢 (關鍵字): {}", query);
-                                let limit = 10;
-                                let offset = 0;
-                                search_track(
-                                    &*client.lock().await,
-                                    &query,
-                                    &spotify_token,
-                                    limit,
-                                    offset,
-                                    debug_mode,
-                                )
-                                .await
-                                .map(|(tracks_with_cover, _)| tracks_with_cover)
-                            } else {
-                                Ok(Vec::new())
+                    let spotify_result: Result<Vec<TrackWithCover>> =
+                        match is_valid_spotify_url(&query) {
+                            SpotifyUrlStatus::Valid => {
+                                info!("Spotify 查詢 (URL): {}", query);
+                                let track_id = query
+                                    .split('/')
+                                    .last()
+                                    .unwrap_or("")
+                                    .split('?')
+                                    .next()
+                                    .unwrap_or("");
+                                let track =
+                                    get_track_info(&*client.lock().await, track_id, &spotify_token)
+                                        .await
+                                        .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
+
+                                Ok(vec![TrackWithCover {
+                                    name: track.name.clone(),
+                                    artists: track.artists.clone(),
+                                    external_urls: track.external_urls.clone(),
+                                    album_name: track.album.name.clone(),
+                                    cover_url: track
+                                        .album
+                                        .images
+                                        .first()
+                                        .map(|img| img.url.clone()),
+                                }])
                             }
-                        }
-                    };
-    
+                            SpotifyUrlStatus::Incomplete => {
+                                *error = "Spotify URL 不完整，請輸入完整的 URL".to_string();
+                                return Ok(());
+                            }
+                            SpotifyUrlStatus::Invalid => {
+                                if !query.is_empty() {
+                                    info!("Spotify 查詢 (關鍵字): {}", query);
+                                    let limit = 10;
+                                    let offset = 0;
+                                    search_track(
+                                        &*client.lock().await,
+                                        &query,
+                                        &spotify_token,
+                                        limit,
+                                        offset,
+                                        debug_mode,
+                                    )
+                                    .await
+                                    .map(|(tracks_with_cover, _)| tracks_with_cover)
+                                } else {
+                                    Ok(Vec::new())
+                                }
+                            }
+                        };
+
                     let osu_query = match spotify_result {
                         Ok(ref tracks_with_cover) => {
                             info!("Spotify 搜索結果: {} 首曲目", tracks_with_cover.len());
@@ -887,7 +946,7 @@ impl SearchApp {
                                     external_urls: twc.external_urls.clone(),
                                 })
                                 .collect();
-    
+
                             if matches!(is_valid_spotify_url(&query), SpotifyUrlStatus::Valid)
                                 && !tracks_with_cover.is_empty()
                             {
@@ -913,19 +972,20 @@ impl SearchApp {
                             return Err(anyhow!("Spotify 錯誤：搜索失敗"));
                         }
                     };
-    
-                    let results = get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
-                        .await
-                        .map_err(|e| {
-                            error!("Osu 搜索錯誤: {:?}", e);
-                            anyhow!("Osu 錯誤：搜索失敗")
-                        })?;
-    
+
+                    let results =
+                        get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
+                            .await
+                            .map_err(|e| {
+                                error!("Osu 搜索錯誤: {:?}", e);
+                                anyhow!("Osu 錯誤：搜索失敗")
+                            })?;
+
                     info!("Osu 搜索結果: {} 個 beatmapsets", results.len());
                     if debug_mode {
                         debug!("Osu 搜索結果詳情: {:?}", results);
                     }
-    
+
                     let mut osu_urls = Vec::new();
                     for beatmapset in &results {
                         if let Some(cover_url) = &beatmapset.covers.cover {
@@ -935,20 +995,21 @@ impl SearchApp {
                     *osu_search_results.lock().await = results;
                     let ctx_clone = ctx.clone();
                     let sender_clone = sender.clone();
-    
+
                     tokio::spawn(async move {
                         load_all_covers(osu_urls, ctx_clone, sender_clone).await;
                     });
                 }
-    
+
                 Ok(())
-            }.await;
-    
+            }
+            .await;
+
             if let Err(e) = &result {
                 let mut error = err_msg.lock().await;
                 *error = e.to_string();
             }
-    
+
             is_searching.store(false, Ordering::SeqCst);
             need_repaint.store(true, Ordering::SeqCst);
             result
@@ -1034,66 +1095,37 @@ impl SearchApp {
                                     }
 
                                     // 右鍵菜單
+                                    // Spotify 結果的右鍵菜單
                                     response.context_menu(|ui| {
-                                        ui.style_mut().text_styles.iter_mut().for_each(
-                                            |(__, font_id)| {
-                                                font_id.size = self.global_font_size * 1.2;
-                                                // 增加字體大小
-                                            },
-                                        );
-
-                                        ui.style_mut().spacing.item_spacing.y = 5.0; // 減少項目間的垂直間距
-
-                                        if let Some(url) = &spotify_url {
-                                            ui.vertical_centered(|ui| {
-                                                ui.add_space(5.0);
-
-                                                let button_width = ui.available_width().max(100.0); // 確保最小寬度
-
-                                                if ui
-                                                    .add_sized(
-                                                        [button_width, 30.0],
-                                                        egui::Button::new(
-                                                            egui::RichText::new("🔗 Copy")
-                                                                .size(self.global_font_size * 1.2)
-                                                                .text_style(
-                                                                    egui::TextStyle::Button,
-                                                                ),
-                                                        ),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    let mut ctx: ClipboardContext =
-                                                        ClipboardProvider::new().unwrap();
-                                                    ctx.set_contents(url.clone()).unwrap();
-                                                    ui.close_menu();
-                                                }
-
-                                                if ui
-                                                    .add_sized(
-                                                        [button_width, 30.0],
-                                                        egui::Button::new(
-                                                            egui::RichText::new("Open")
-                                                                .size(self.global_font_size * 1.2)
-                                                                .text_style(
-                                                                    egui::TextStyle::Button,
-                                                                ),
-                                                        ),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    match open_spotify_url(url) {
-                                                        Ok(_) => {}
-                                                        Err(e) => {
-                                                            log::error!("Failed to open URL: {}", e)
+                                        self.create_context_menu(ui, |add_button| {
+                                            if let Some(url) = &spotify_url {
+                                                add_button(
+                                                    "🔗 Copy",
+                                                    Box::new({
+                                                        let url = url.clone();
+                                                        move || {
+                                                            let mut ctx: ClipboardContext =
+                                                                ClipboardProvider::new().unwrap();
+                                                            ctx.set_contents(url.clone()).unwrap();
                                                         }
-                                                    }
-                                                    ui.close_menu();
-                                                }
-
-                                                ui.add_space(5.0);
-                                            });
-                                        }
+                                                    }),
+                                                );
+                                                add_button(
+                                                    "Open",
+                                                    Box::new({
+                                                        let url = url.clone();
+                                                        move || {
+                                                            if let Err(e) = open_spotify_url(&url) {
+                                                                log::error!(
+                                                                    "Failed to open URL: {}",
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
+                                                    }),
+                                                );
+                                            }
+                                        });
                                     });
                                 });
                             });
