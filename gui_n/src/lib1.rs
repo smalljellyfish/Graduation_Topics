@@ -27,7 +27,7 @@ pub struct Config {
     pub osu: ServiceConfig,
 }
 
-pub async fn read_config(debug_mode: bool) -> Result<Config> {
+pub fn read_config(debug_mode: bool) -> Result<Config> {
     if debug_mode {
         debug!("開始讀取配置文件");
     }
@@ -284,7 +284,8 @@ pub mod spotify_search {
         pub album_name: String,
         pub cover_url: Option<String>,
     }
-
+    
+    #[derive(Debug, Clone)]
     pub struct TrackInfo {
         pub name: String,
         pub artists: String,
@@ -303,6 +304,13 @@ pub mod spotify_search {
         Invalid,
     }
     
+    #[derive(Debug, Clone)]
+    pub struct CurrentlyPlaying {
+        pub track_info: TrackInfo,
+        pub spotify_url: Option<String>,
+    }
+
+
     pub fn is_valid_spotify_url(url: &str) -> SpotifyUrlStatus {
         if url.starts_with("https://open.spotify.com/") {
             if let Some(captures) = SPOTIFY_URL_REGEX.captures(url) {
@@ -554,13 +562,14 @@ pub mod spotify_search {
     }
 
     pub async fn get_access_token(client: &reqwest::Client, debug_mode: bool) -> Result<String> {
-        let config = read_config(debug_mode).await?;
+        let config = read_config(debug_mode)?; 
         let client_id = &config.spotify.client_id;
         let client_secret = &config.spotify.client_secret;
-
+    
         if debug_mode {
             debug!("正在獲取 Spotify access token");
         }
+    
 
         let auth_url = "https://accounts.spotify.com/api/token";
         let body = "grant_type=client_credentials";
@@ -729,13 +738,12 @@ pub mod spotify_search {
 
 pub mod osu_search {
     use crate::read_config;
-    use anyhow::{Result, anyhow};
+    use anyhow::{anyhow, Result};
     use log::{debug, error, info};
     use reqwest::Client;
     use serde::Deserialize;
 
-
-    #[derive(Debug, Deserialize,Clone)]
+    #[derive(Debug, Deserialize, Clone)]
     pub struct Covers {
         pub cover: Option<String>,
         pub cover_2x: Option<String>,
@@ -746,7 +754,7 @@ pub mod osu_search {
         pub slimcover: Option<String>,
         pub slimcover_2x: Option<String>,
     }
-    #[derive(Debug, Deserialize, Clone)]  // 添加 Clone
+    #[derive(Debug, Deserialize, Clone)] // 添加 Clone
     pub struct Beatmapset {
         pub beatmaps: Vec<Beatmap>,
         pub id: i32,
@@ -814,46 +822,59 @@ pub mod osu_search {
         debug_mode: bool,
     ) -> Result<Beatmapset> {
         let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
-        
+
         let response = client
             .get(&url)
             .bearer_auth(access_token)
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("Error sending request: {}", e))?;
-    
+
         let response_text = response.text().await?;
-    
+
         if debug_mode {
             info!("Osu API 回應 JSON: {}", response_text);
         }
-    
+
         let beatmapset: Beatmapset = serde_json::from_str(&response_text)
             .map_err(|e| anyhow::anyhow!("Error parsing response: {}", e))?;
-    
+
         Ok(beatmapset)
     }
 
-    pub async fn get_beatmapset_details(client: &Client, access_token: &str, beatmapset_id: &str, debug_mode: bool) -> Result<(String, String)> {
+    pub async fn get_beatmapset_details(
+        client: &Client,
+        access_token: &str,
+        beatmapset_id: &str,
+        debug_mode: bool,
+    ) -> Result<(String, String)> {
         let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
-        
+
         let response = client
             .get(&url)
             .bearer_auth(access_token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to send request: {}", e))?;
-    
-        let beatmapset: serde_json::Value = response.json().await
+
+        let beatmapset: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| anyhow!("Failed to parse JSON: {}", e))?;
-    
+
         if debug_mode {
             println!("Beatmapset details: {:?}", beatmapset);
         }
-    
-        let artist = beatmapset["artist"].as_str().unwrap_or("Unknown Artist").to_string();
-        let title = beatmapset["title"].as_str().unwrap_or("Unknown Title").to_string();
-    
+
+        let artist = beatmapset["artist"]
+            .as_str()
+            .unwrap_or("Unknown Artist")
+            .to_string();
+        let title = beatmapset["title"]
+            .as_str()
+            .unwrap_or("Unknown Title")
+            .to_string();
+
         Ok((artist, title))
     }
 
@@ -861,12 +882,12 @@ pub mod osu_search {
         if debug_mode {
             debug!("開始獲取 Osu token");
         }
-
-        let config = read_config(debug_mode).await.map_err(|e| {
+    
+        let config = read_config(debug_mode).map_err(|e| { 
             error!("讀取配置文件時出錯: {}", e);
             anyhow::anyhow!("Error reading config: {}", e)
         })?;
-
+    
         let client_id = &config.osu.client_id;
         let client_secret = &config.osu.client_secret;
 
@@ -908,7 +929,6 @@ pub mod osu_search {
 
         Ok(response.access_token)
     }
-
 
     pub fn print_beatmap_info_gui(beatmapset: &Beatmapset) -> BeatmapInfo {
         let mut beatmaps = Vec::new();
