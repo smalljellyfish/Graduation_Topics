@@ -10,9 +10,9 @@ use lib::osu_search::{
 };
 use lib::read_config;
 use lib::spotify_search::{
-    get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url, print_track_info_gui,
-    search_track, Album, Artist, CurrentlyPlaying, Image, SpotifyUrlStatus, Track, TrackInfo,
-    TrackWithCover,
+    get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url,
+    open_url_default_browser, print_track_info_gui, search_track, Album, Artist, CurrentlyPlaying,
+    Image, SpotifyUrlStatus, Track, TrackInfo, TrackWithCover,
 };
 
 use anyhow::{anyhow, Result};
@@ -33,6 +33,7 @@ use image::load_from_memory;
 use std::default::Default;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::sync::{Arc, Mutex};
 
 use std::future::Future;
@@ -41,8 +42,6 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
 use std::collections::HashMap;
-
-use std::io::{self, Write};
 
 //use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
@@ -55,12 +54,16 @@ use std::env;
 use regex::Regex;
 
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use url::Url;
+
 use rspotify::model::PlayableItem;
 use rspotify::scopes;
 use rspotify::AuthCodeSpotify;
 
 use rspotify::{
-    clients::OAuthClient, model::CurrentlyPlayingContext, prelude::*, Credentials, OAuth,
+    clients::OAuthClient, model::CurrentlyPlayingContext, prelude::*, Credentials, OAuth, Token,
 };
 
 //錯誤應用
@@ -109,7 +112,7 @@ struct SearchApp {
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
     last_update: Arc<Mutex<Option<Instant>>>,
-    spotify_oauth: OAuth,
+    spotify_authorized: Arc<AtomicBool>,
 }
 
 impl eframe::App for SearchApp {
@@ -464,20 +467,71 @@ impl eframe::App for SearchApp {
             self.search_query.clear(); // 清空搜索框
             info!("Debug mode: {}", self.debug_mode);
         }
-        // 在底部添加一個面板來顯示當前播放信息
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
-            self.render_bottom_panel(ui);
+            ui.horizontal(|ui| {
+                self.render_bottom_panel(ui);
+        
+                // 在底部面板右側添加授權按鈕
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(10.0); // 添加一些右側間距
+                    let button_text = if self.spotify_authorized.load(Ordering::SeqCst) {
+                        "Spotify 已授權"
+                    } else {
+                        "授權 Spotify"
+                    };
+                    if ui.button(egui::RichText::new(button_text).size(14.0)).clicked() {
+                        if !self.spotify_authorized.load(Ordering::SeqCst) {
+                            let spotify_client = self.spotify_client.clone();
+                            let debug_mode = self.debug_mode;
+                            let spotify_authorized = self.spotify_authorized.clone();
+                            let ctx = ctx.clone();
+        
+                            tokio::spawn(async move {
+                                match Self::authorize_spotify(spotify_client, debug_mode).await {
+                                    Ok(()) => {
+                                        info!("Spotify 授權成功");
+                                        spotify_authorized.store(true, Ordering::SeqCst);
+                                    }
+                                    Err(e) => {
+                                        error!("Spotify 授權失敗: {:?}", e);
+                                    }
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
+                    }
+                });
+            });
         });
+
         if self.should_update_current_playing() {
             let spotify_client = self.spotify_client.clone();
             let currently_playing = self.currently_playing.clone();
-            let oauth = self.spotify_oauth.clone();
+            let debug_mode = self.debug_mode;
             let ctx = ctx.clone();
+            let spotify_authorized = self.spotify_authorized.clone();
+        
             tokio::spawn(async move {
-                if let Err(e) = SearchApp::update_current_playing(spotify_client, currently_playing, oauth).await {
-                    error!("更新當前播放失敗: {:?}", e);
+                match Self::update_currently_playing_wrapper(
+                    spotify_client.clone(),
+                    currently_playing.clone(),
+                    debug_mode,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        spotify_authorized.store(true, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        error!("更新當前播放失敗: {:?}", e);
+                        if e.to_string().contains("Token 無效") || e.to_string().contains("需要重新授權") {
+                            info!("Token 無效或過期，需要重新授權");
+                            spotify_authorized.store(false, Ordering::SeqCst);
+                        }
+                    }
                 }
-                ctx.request_repaint(); // 請求重繪 UI
+        
+                ctx.request_repaint();
             });
         }
     }
@@ -561,10 +615,7 @@ impl SearchApp {
         let spotify_icon = Self::load_spotify_icon(&ctx);
         let config = read_config(debug_mode)?;
 
-        let creds = Credentials::new(
-            &config.spotify.client_id,
-            &config.spotify.client_secret
-        );
+        let creds = Credentials::new(&config.spotify.client_id, &config.spotify.client_secret);
         let mut oauth = OAuth::default();
         oauth.redirect_uri = "http://localhost:8888/callback".to_string();
         oauth.scopes = scopes!("user-read-currently-playing");
@@ -596,7 +647,7 @@ impl SearchApp {
             }
         });
 
-        Ok (Self {
+        Ok(Self {
             client,
             access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
             search_query: String::new(),
@@ -623,8 +674,7 @@ impl SearchApp {
             spotify_client,
             currently_playing: Arc::new(Mutex::new(None)),
             last_update: Arc::new(Mutex::new(None)),
-            spotify_oauth: oauth,
-            
+            spotify_authorized: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -680,103 +730,209 @@ impl SearchApp {
         }
     }
 
-    fn update_current_playing(
-        spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
+    async fn update_current_playing(
+        spotify: &AuthCodeSpotify,
         currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
-        oauth: OAuth,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-        Box::pin(async move {
-            let spotify = {
-                let client = spotify_client.lock().map_err(|_| anyhow!("無法獲取 Spotify 客戶端鎖"))?;
-                match &*client {
-                    Some(s) => s.clone(),
-                    None => return Err(anyhow!("Spotify 客戶端未初始化")),
-                }
-            }; // 鎖在這裡被釋放
-
-            match spotify.me().await {
-                Ok(_) => {
-                    match spotify.current_user_playing_item().await {
-                        Ok(Some(playing_context)) => {
-                            if let Some(PlayableItem::Track(track)) = playing_context.item {
-                                let artists = track.artists.iter().map(|a| Artist { name: a.name.clone() }).collect::<Vec<_>>();
-                                let track_info = TrackInfo {
-                                    name: track.name,
-                                    artists: artists.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", "),
-                                    album: track.album.name,
-                                };
-                                let spotify_url = track.external_urls.get("spotify").cloned();
-                                let new_currently_playing = CurrentlyPlaying {
-                                    track_info,
-                                    spotify_url,
-                                };
-                                let mut currently_playing = currently_playing.lock()
-                                    .map_err(|_| anyhow!("無法獲取當前播放鎖"))?;
-                                *currently_playing = Some(new_currently_playing);
-                            }
-                        }
-                        Ok(None) => {
-                            let mut currently_playing = currently_playing.lock()
-                                .map_err(|_| anyhow!("無法獲取當前播放鎖"))?;
-                            *currently_playing = None;
-                        }
-                        Err(e) => {
-                            error!("獲取當前播放信息時發生錯誤: {:?}", e);
-                            let mut currently_playing = currently_playing.lock()
-                                .map_err(|_| anyhow!("無法獲取當前播放鎖"))?;
-                            *currently_playing = None;
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("檢查 token 有效性時發生錯誤: {:?}", e);
-                    // Token 可能已過期，需要重新授權
-                    Self::authorize_spotify(spotify_client.clone(), oauth.clone()).await?;
-                    // 重新嘗試更新當前播放
-                    return Self::update_current_playing(spotify_client, currently_playing, oauth).await;
+        debug_mode: bool,
+    ) -> Result<Option<CurrentlyPlaying>> {
+        match spotify.current_user_playing_item().await {
+            Ok(Some(playing_context)) => {
+                if let Some(PlayableItem::Track(track)) = playing_context.item {
+                    let artists = track
+                        .artists
+                        .iter()
+                        .map(|a| Artist {
+                            name: a.name.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let track_info = TrackInfo {
+                        name: track.name,
+                        artists: artists
+                            .iter()
+                            .map(|a| a.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        album: track.album.name,
+                    };
+                    let spotify_url = track.external_urls.get("spotify").cloned();
+                    let new_currently_playing = CurrentlyPlaying {
+                        track_info,
+                        spotify_url,
+                    };
+                    Ok(Some(new_currently_playing))
+                } else {
+                    Ok(None)
                 }
             }
-            Ok(())
-        })
+            Ok(None) => Ok(None),
+            Err(e) => {
+                error!("獲取當前播放信息時發生錯誤: {:?}", e);
+                Err(anyhow!("獲取當前播放信息失敗"))
+            }
+        }
     }
 
-    fn authorize_spotify(spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>, oauth: OAuth) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+    async fn update_currently_playing_wrapper(
+        spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
+        currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
+        debug_mode: bool,
+    ) -> Result<()> {
+        let spotify_ref = {
+            let spotify = spotify_client.lock().unwrap();
+            spotify.as_ref().cloned()
+        };
+    
+        let update_result = if let Some(spotify) = spotify_ref {
+            Self::update_current_playing(&spotify, currently_playing.clone(), debug_mode).await
+        } else {
+            Err(anyhow!("Spotify 客戶端未初始化"))
+        };
+    
+        match update_result {
+            Ok(Some(new_currently_playing)) => {
+                let mut currently_playing = currently_playing.lock().unwrap();
+                *currently_playing = Some(new_currently_playing);
+                Ok(())
+            }
+            Ok(None) => {
+                let mut currently_playing = currently_playing.lock().unwrap();
+                *currently_playing = None;
+                Ok(())
+            }
+            Err(e) => {
+                if e.to_string().contains("InvalidToken") {
+                    error!("Token 無效，需要重新授權");
+                    return Err(anyhow!("Token 無效，需要重新授權"));
+                } else {
+                    error!("更新當前播放失敗: {:?}", e);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    fn authorize_spotify(
+        spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
+        debug_mode: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
-            let spotify = {
-                let mut client = spotify_client.lock().map_err(|_| anyhow!("無法獲取 Spotify 客戶端鎖"))?;
-                client.take().ok_or_else(|| anyhow!("Spotify 客戶端未初始化"))?
-            };
+            let config = read_config(debug_mode)?;
 
-            let url = spotify.get_authorize_url(false)?;
-            
-            println!("請在瀏覽器中打開以下 URL 進行授權：");
-            println!("{}", url);
-            println!("授權完成後，您將被重定向到一個新的頁面。請複製該頁面的完整 URL 並粘貼到這裡：");
-            
-            io::stdout().flush()?;
+            let client_id = &config.spotify.client_id;
+            let redirect_uri = "http://localhost:8888/callback";
+            let scope = "user-read-currently-playing";
 
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
+            let mut url = Url::parse("https://accounts.spotify.com/authorize").unwrap();
+            url.query_pairs_mut()
+                .append_pair("client_id", client_id)
+                .append_pair("response_type", "code")
+                .append_pair("redirect_uri", redirect_uri)
+                .append_pair("scope", scope)
+                .append_pair("show_dialog", "true");
+
+            let auth_url = url.to_string();
+
+            if debug_mode {
+                info!("Authorization URL: {}", auth_url);
+            }
+
+            open_url_default_browser(&auth_url)?;
+
+            println!("請在瀏覽器中完成授權...");
+
+            // 啟動本地伺服器來捕獲回調
+            let listener = TcpListener::bind("127.0.0.1:8888").expect("無法啟動本地伺服器");
+
+            // 等待回調
+            let (mut stream, _) = listener.accept().expect("無法接受連接");
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).expect("無法讀取請求");
+
+            let redirect_url = request_line
+                .split_whitespace()
+                .nth(1)
+                .ok_or_else(|| anyhow!("無效的請求"))?;
+            let url = format!("http://localhost:8888{}", redirect_url);
+
+            // 向瀏覽器發送響應
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>授權成功，請關閉此窗口。</body></html>";
+            stream.write_all(response.as_bytes()).expect("無法發送響應");
+
+            if debug_mode {
+                info!("Received callback URL: {}", url);
+            }
 
             println!("正在處理授權...");
 
-            let code = spotify.parse_response_code(&input.trim())
+            let parsed_url = Url::parse(&url)?;
+            let code = parsed_url
+                .query_pairs()
+                .find(|(key, _)| key == "code")
+                .map(|(_, value)| value.into_owned())
                 .ok_or_else(|| anyhow!("無法從回調 URL 中解析授權碼"))?;
 
-            // 使用 timeout 來避免無限等待
-            match timeout(Duration::from_secs(30), spotify.request_token(&code)).await {
-                Ok(token_result) => {
-                    token_result?;
-                    println!("成功獲取訪問令牌！");
+            // 當獲取到授權碼後，使用 client_id 和 client_secret 請求訪問令牌
+            let token_url = "https://accounts.spotify.com/api/token";
+            let client = reqwest::Client::new();
+            let params = [
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", "http://localhost:8888/callback"),
+            ];
+
+            match timeout(
+                Duration::from_secs(30),
+                client
+                    .post(token_url)
+                    .basic_auth(
+                        &config.spotify.client_id,
+                        Some(&config.spotify.client_secret),
+                    )
+                    .form(&params)
+                    .send(),
+            )
+            .await
+            {
+                Ok(response_result) => {
+                    let response = response_result?;
+                    if response.status().is_success() {
+                        let token_data: Token = response.json().await?;
+                        println!("成功獲取訪問令牌！");
+
+                        // 創建新的 AuthCodeSpotify 實例
+                        let creds = Credentials::new(
+                            &config.spotify.client_id,
+                            &config.spotify.client_secret,
+                        );
+                        let oauth = OAuth {
+                            redirect_uri: "http://localhost:8888/callback".to_string(),
+                            scopes: scopes!("user-read-currently-playing"),
+                            ..Default::default()
+                        };
+
+                        // 使用 from_token_with_config 方法，並使用完全限定的路徑
+                        let new_spotify = AuthCodeSpotify::from_token_with_config(
+                            token_data,
+                            creds,
+                            oauth,
+                            rspotify::Config::default(), // 使用 rspotify::Config 而不是 Config
+                        );
+
+                        // 更新 spotify_client
+                        let mut client = spotify_client
+                            .lock()
+                            .map_err(|_| anyhow!("無法獲取 Spotify 客戶端鎖"))?;
+                        *client = Some(new_spotify);
+
+                        println!("Spotify 授權成功！");
+                    } else {
+                        return Err(anyhow!("獲取訪問令牌失敗: {}", response.status()));
+                    }
                 }
                 Err(_) => return Err(anyhow!("請求訪問令牌超時")),
             }
 
-            // 更新 spotify_client 中的 AuthCodeSpotify
-            let mut client = spotify_client.lock().map_err(|_| anyhow!("無法獲取 Spotify 客戶端鎖"))?;
-            *client = Some(spotify);
-
-            println!("Spotify 授權成功！");
             Ok(())
         })
     }
@@ -787,12 +943,14 @@ impl SearchApp {
             if let Some(current_playing) = current_playing.as_ref() {
                 if let Some(spotify_icon) = &self.spotify_icon {
                     let size = egui::vec2(24.0, 24.0);
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(spotify_icon.id(), size)));
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                        spotify_icon.id(),
+                        size,
+                    )));
                 }
                 ui.label(format!(
                     "正在播放: {} - {}",
-                    current_playing.track_info.artists,
-                    current_playing.track_info.name
+                    current_playing.track_info.artists, current_playing.track_info.name
                 ));
             } else {
                 ui.label("當前沒有正在播放的曲目");
@@ -1534,7 +1692,7 @@ async fn main() {
                 egui::Visuals::light()
             });
             ctx.set_pixels_per_point(1.0);
-            
+
             match SearchApp::new(
                 client.clone(),
                 sender,

@@ -677,29 +677,37 @@ pub mod spotify_search {
             }
         }
     }
-    fn open_url_default_browser(url: &str) -> io::Result<()> {
+    pub fn open_url_default_browser(url: &str) -> io::Result<()> {
         if cfg!(target_os = "windows") {
-            Command::new("cmd")
-                .args(&["/C", "start", "", url])
+            // 使用 PowerShell 來打開 URL
+            Command::new("powershell")
+                .arg("-Command")
+                .arg(format!("Start-Process '{}'", url))
                 .spawn()
                 .map_err(|e| {
                     io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
-                })?
+                })?;
         } else if cfg!(target_os = "macos") {
-            Command::new("open").arg(url).spawn().map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
-            })?
+            Command::new("open")
+                .arg(url)
+                .spawn()
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+                })?;
         } else if cfg!(target_os = "linux") {
-            Command::new("xdg-open").arg(url).spawn().map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
-            })?
+            Command::new("xdg-open")
+                .arg(url)
+                .spawn()
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+                })?;
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "Unsupported operating system",
             ));
-        };
-
+        }
+    
         Ok(())
     }
     fn is_spotify_protocol_associated() -> io::Result<bool> {
