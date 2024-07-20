@@ -63,7 +63,7 @@ use rspotify::scopes;
 use rspotify::AuthCodeSpotify;
 
 use rspotify::{
-    clients::OAuthClient, model::CurrentlyPlayingContext, prelude::*, Credentials, OAuth, Token,
+    clients::OAuthClient, Credentials, OAuth, Token,
 };
 
 //錯誤應用
@@ -113,6 +113,17 @@ struct SearchApp {
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
     last_update: Arc<Mutex<Option<Instant>>>,
     spotify_authorized: Arc<AtomicBool>,
+    auth_status: Arc<Mutex<AuthStatus>>,
+    show_auth_progress: bool,
+}
+#[derive(Clone)]
+enum AuthStatus {
+    NotStarted,
+    WaitingForBrowser,
+    Processing,
+    TokenObtained,
+    Completed,
+    Failed(String),
 }
 
 impl eframe::App for SearchApp {
@@ -199,6 +210,9 @@ impl eframe::App for SearchApp {
                     });
                 }
             });
+        }
+        if self.show_auth_progress {
+            self.show_auth_progress(ctx);
         }
 
         let mut should_close_error = false;
@@ -481,19 +495,25 @@ impl eframe::App for SearchApp {
                     };
                     if ui.button(egui::RichText::new(button_text).size(14.0)).clicked() {
                         if !self.spotify_authorized.load(Ordering::SeqCst) {
+                            self.show_auth_progress = true; // 設置為 true 以顯示進度窗口
                             let spotify_client = self.spotify_client.clone();
                             let debug_mode = self.debug_mode;
                             let spotify_authorized = self.spotify_authorized.clone();
+                            let auth_status = self.auth_status.clone();
                             let ctx = ctx.clone();
-        
+                    
                             tokio::spawn(async move {
-                                match Self::authorize_spotify(spotify_client, debug_mode).await {
+                                match Self::authorize_spotify(spotify_client, debug_mode, auth_status.clone()).await {
                                     Ok(()) => {
                                         info!("Spotify 授權成功");
                                         spotify_authorized.store(true, Ordering::SeqCst);
+                                        let mut status = auth_status.lock().unwrap();
+                                        *status = AuthStatus::Completed;
                                     }
                                     Err(e) => {
                                         error!("Spotify 授權失敗: {:?}", e);
+                                        let mut status = auth_status.lock().unwrap();
+                                        *status = AuthStatus::Failed(e.to_string());
                                     }
                                 }
                                 ctx.request_repaint();
@@ -675,9 +695,50 @@ impl SearchApp {
             currently_playing: Arc::new(Mutex::new(None)),
             last_update: Arc::new(Mutex::new(None)),
             spotify_authorized: Arc::new(AtomicBool::new(false)),
+            auth_status: Arc::new(Mutex::new(AuthStatus::NotStarted)),
+            show_auth_progress: false,
         })
     }
-
+    //授權過程
+    fn show_auth_progress(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Spotify 授權進度")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let status = self.auth_status.lock().unwrap().clone(); // Clone to avoid holding the lock
+                match status {
+                    AuthStatus::NotStarted => {
+                        ui.label("準備開始授權...");
+                        ui.add(egui::ProgressBar::new(0.0).animate(true));
+                    }
+                    AuthStatus::WaitingForBrowser => {
+                        ui.label("請在瀏覽器中完成授權...");
+                        ui.add(egui::ProgressBar::new(0.25).animate(true));
+                    }
+                    AuthStatus::Processing => {
+                        ui.label("正在處理授權...");
+                        ui.add(egui::ProgressBar::new(0.5).animate(true));
+                    }
+                    AuthStatus::TokenObtained => {
+                        ui.label("成功獲取訪問令牌！");
+                        ui.add(egui::ProgressBar::new(0.75).animate(true));
+                    }
+                    AuthStatus::Completed => {
+                        ui.label("Spotify 授權成功！");
+                        ui.add(egui::ProgressBar::new(1.0));
+                        if ui.button("關閉").clicked() {
+                            self.show_auth_progress = false;
+                        }
+                    }
+                    AuthStatus::Failed(ref error) => {
+                        ui.label(format!("授權失敗: {}", error));
+                        if ui.button("關閉").clicked() {
+                            self.show_auth_progress = false;
+                        }
+                    }
+                }
+            });
+    }
     //設置日誌級別
     fn set_log_level(&self) {
         let log_level = if self.debug_mode {
@@ -687,7 +748,7 @@ impl SearchApp {
         };
         log::set_max_level(log_level);
     }
-
+    //顯示SETTINGS
     fn show_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("設置");
         ui.add_space(10.0);
@@ -814,14 +875,15 @@ impl SearchApp {
     fn authorize_spotify(
         spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
         debug_mode: bool,
+        auth_status: Arc<Mutex<AuthStatus>>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
             let config = read_config(debug_mode)?;
-
+    
             let client_id = &config.spotify.client_id;
             let redirect_uri = "http://localhost:8888/callback";
             let scope = "user-read-currently-playing";
-
+    
             let mut url = Url::parse("https://accounts.spotify.com/authorize").unwrap();
             url.query_pairs_mut()
                 .append_pair("client_id", client_id)
@@ -829,49 +891,55 @@ impl SearchApp {
                 .append_pair("redirect_uri", redirect_uri)
                 .append_pair("scope", scope)
                 .append_pair("show_dialog", "true");
-
+    
             let auth_url = url.to_string();
-
+    
             if debug_mode {
                 info!("Authorization URL: {}", auth_url);
             }
-
+    
+            {
+                let mut status = auth_status.lock().unwrap();
+                *status = AuthStatus::WaitingForBrowser;
+            }
+    
             open_url_default_browser(&auth_url)?;
-
-            println!("請在瀏覽器中完成授權...");
-
+    
             // 啟動本地伺服器來捕獲回調
             let listener = TcpListener::bind("127.0.0.1:8888").expect("無法啟動本地伺服器");
-
+    
             // 等待回調
             let (mut stream, _) = listener.accept().expect("無法接受連接");
             let mut reader = BufReader::new(&stream);
             let mut request_line = String::new();
             reader.read_line(&mut request_line).expect("無法讀取請求");
-
+    
             let redirect_url = request_line
                 .split_whitespace()
                 .nth(1)
                 .ok_or_else(|| anyhow!("無效的請求"))?;
             let url = format!("http://localhost:8888{}", redirect_url);
-
+    
             // 向瀏覽器發送響應
             let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>授權成功，請關閉此窗口。</body></html>";
             stream.write_all(response.as_bytes()).expect("無法發送響應");
-
+    
             if debug_mode {
                 info!("Received callback URL: {}", url);
             }
-
-            println!("正在處理授權...");
-
+    
+            {
+                let mut status = auth_status.lock().unwrap();
+                *status = AuthStatus::Processing;
+            }
+    
             let parsed_url = Url::parse(&url)?;
             let code = parsed_url
                 .query_pairs()
                 .find(|(key, _)| key == "code")
                 .map(|(_, value)| value.into_owned())
                 .ok_or_else(|| anyhow!("無法從回調 URL 中解析授權碼"))?;
-
+    
             // 當獲取到授權碼後，使用 client_id 和 client_secret 請求訪問令牌
             let token_url = "https://accounts.spotify.com/api/token";
             let client = reqwest::Client::new();
@@ -880,7 +948,7 @@ impl SearchApp {
                 ("code", &code),
                 ("redirect_uri", "http://localhost:8888/callback"),
             ];
-
+    
             match timeout(
                 Duration::from_secs(30),
                 client
@@ -898,8 +966,12 @@ impl SearchApp {
                     let response = response_result?;
                     if response.status().is_success() {
                         let token_data: Token = response.json().await?;
-                        println!("成功獲取訪問令牌！");
-
+                        
+                        {
+                            let mut status = auth_status.lock().unwrap();
+                            *status = AuthStatus::TokenObtained;
+                        }
+    
                         // 創建新的 AuthCodeSpotify 實例
                         let creds = Credentials::new(
                             &config.spotify.client_id,
@@ -910,7 +982,7 @@ impl SearchApp {
                             scopes: scopes!("user-read-currently-playing"),
                             ..Default::default()
                         };
-
+    
                         // 使用 from_token_with_config 方法，並使用完全限定的路徑
                         let new_spotify = AuthCodeSpotify::from_token_with_config(
                             token_data,
@@ -918,21 +990,24 @@ impl SearchApp {
                             oauth,
                             rspotify::Config::default(), // 使用 rspotify::Config 而不是 Config
                         );
-
+    
                         // 更新 spotify_client
                         let mut client = spotify_client
                             .lock()
                             .map_err(|_| anyhow!("無法獲取 Spotify 客戶端鎖"))?;
                         *client = Some(new_spotify);
-
-                        println!("Spotify 授權成功！");
+    
+                        {
+                            let mut status = auth_status.lock().unwrap();
+                            *status = AuthStatus::Completed;
+                        }
                     } else {
                         return Err(anyhow!("獲取訪問令牌失敗: {}", response.status()));
                     }
                 }
                 Err(_) => return Err(anyhow!("請求訪問令牌超時")),
             }
-
+    
             Ok(())
         })
     }
