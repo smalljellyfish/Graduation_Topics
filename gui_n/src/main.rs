@@ -1,34 +1,30 @@
-﻿/*use spotify_search_lib::spotify_search::{
-    get_access_token, get_track_info, is_valid_spotify_url, print_album_info, print_track_infos,
-    search_album_by_name, search_album_by_url, search_track,
-}; */
-//上方為lib1裡的相關函數
-// 引入所需模組
-use lib::osu_search::{
-    get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token,
-    print_beatmap_info_gui, Beatmapset,
+mod osu;
+mod spotify;
+
+use crate::osu::{
+    get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers,
+    parse_osu_url, print_beatmap_info_gui, Beatmapset,
+};
+use crate::spotify::{
+    authorize_spotify, get_access_token, get_track_info, is_valid_spotify_url, load_spotify_icon,
+    open_spotify_url, print_track_info_gui, search_track, update_currently_playing_wrapper, Album,
+    AuthStatus, CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::read_config;
-use lib::spotify_search::{
-    get_access_token, get_track_info, is_valid_spotify_url, open_spotify_url,
-    open_url_default_browser, print_track_info_gui, search_track, Album, Artist, CurrentlyPlaying,
-    Image, SpotifyUrlStatus, Track, TrackInfo, TrackWithCover,
-};
 
 use anyhow::{anyhow, Result};
 use clipboard::{ClipboardContext, ClipboardProvider};
 use eframe::{self, egui};
+use egui::TextureHandle;
 use egui::TextureWrapMode;
 use egui::ViewportBuilder;
-use egui::{ColorImage, TextureHandle};
 use egui::{FontData, FontDefinitions, FontFamily};
 use tokio;
+
 
 use log::{debug, error, info, LevelFilter};
 use reqwest::Client;
 use simplelog::*;
-
-use image::load_from_memory;
 
 use std::default::Default;
 
@@ -36,10 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::sync::{Arc, Mutex};
 
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
-use tokio::time::timeout;
 
 use std::collections::HashMap;
 
@@ -51,22 +44,12 @@ use tokio::sync::mpsc::Sender;
 
 use std::env;
 
-use regex::Regex;
-
-
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use url::Url;
-
-use rspotify::model::PlayableItem;
 use rspotify::scopes;
 use rspotify::AuthCodeSpotify;
 
-use rspotify::{
-    clients::OAuthClient, Credentials, OAuth, Token,
-};
+use rspotify::{Credentials, OAuth};
 
-//錯誤應用
+
 struct ErrorApp {
     error: String,
 }
@@ -103,6 +86,7 @@ struct SearchApp {
     err_msg: Arc<tokio::sync::Mutex<String>>,
     receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
     cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
+    cover_load_errors: Arc<RwLock<HashMap<usize, String>>>,
     sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
     texture_load_queue: Arc<Mutex<Vec<String>>>,
@@ -115,15 +99,6 @@ struct SearchApp {
     spotify_authorized: Arc<AtomicBool>,
     auth_status: Arc<Mutex<AuthStatus>>,
     show_auth_progress: bool,
-}
-#[derive(Clone)]
-enum AuthStatus {
-    NotStarted,
-    WaitingForBrowser,
-    Processing,
-    TokenObtained,
-    Completed,
-    Failed(String),
 }
 
 impl eframe::App for SearchApp {
@@ -140,14 +115,24 @@ impl eframe::App for SearchApp {
             let osu_urls = vec![];
             let sender_clone = self.sender.clone();
             let ctx_clone = ctx.clone();
+            let debug_mode = self.debug_mode;
+        
             tokio::spawn(async move {
-                load_all_covers(osu_urls.clone(), ctx_clone, sender_clone).await;
+                if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender_clone).await {
+                    error!("初始化時載入 osu 封面發生錯誤: {:?}", e);
+                    if debug_mode {
+                        ctx_clone.request_repaint();
+                        egui::Window::new("Error").show(&ctx_clone, |ui| {
+                            ui.label(format!("載入 osu 封面錯誤: {:?}", e));
+                        });
+                    }
+                }
             });
-
+        
             let mut receiver = self.receiver.take().expect("Receiver already taken");
             let cover_textures = self.cover_textures.clone();
             let need_repaint_clone = self.need_repaint.clone();
-
+        
             tokio::spawn(async move {
                 while let Some((id, texture, dimensions)) = receiver.recv().await {
                     let mut textures = cover_textures.write().await;
@@ -155,16 +140,16 @@ impl eframe::App for SearchApp {
                     need_repaint_clone.store(true, Ordering::SeqCst);
                 }
             });
-
+        
             self.initialized = true;
-
+        
             let access_token = self.access_token.clone();
             let error_message = self.error_message.clone();
             let client_clone = client.clone();
             let debug_mode = self.debug_mode;
             let is_searching = self.is_searching.clone();
             let need_repaint = self.need_repaint.clone();
-
+        
             tokio::spawn(async move {
                 let client_guard = client_clone.lock().await;
                 match get_access_token(&*client_guard, debug_mode).await {
@@ -181,24 +166,24 @@ impl eframe::App for SearchApp {
                     }
                 }
             });
-
+        
             let mut fonts = FontDefinitions::default();
             let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
-
+        
             fonts.font_data.insert(
                 "jf-openhuninn".to_owned(),
                 FontData::from_owned(font_data.to_vec()),
             );
-
+        
             if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
                 family.insert(0, "jf-openhuninn".to_owned());
             }
             if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
                 family.insert(0, "jf-openhuninn".to_owned());
             }
-
+        
             ctx.set_fonts(fonts);
-
+        
             let ctx_clone = ctx.clone();
             let err_msg_clone = self.err_msg.clone();
             tokio::spawn(async move {
@@ -484,7 +469,7 @@ impl eframe::App for SearchApp {
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 self.render_bottom_panel(ui);
-        
+
                 // 在底部面板右側添加授權按鈕
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(10.0); // 添加一些右側間距
@@ -493,7 +478,10 @@ impl eframe::App for SearchApp {
                     } else {
                         "授權 Spotify"
                     };
-                    if ui.button(egui::RichText::new(button_text).size(14.0)).clicked() {
+                    if ui
+                        .button(egui::RichText::new(button_text).size(14.0))
+                        .clicked()
+                    {
                         if !self.spotify_authorized.load(Ordering::SeqCst) {
                             self.show_auth_progress = true; // 設置為 true 以顯示進度窗口
                             let spotify_client = self.spotify_client.clone();
@@ -501,9 +489,15 @@ impl eframe::App for SearchApp {
                             let spotify_authorized = self.spotify_authorized.clone();
                             let auth_status = self.auth_status.clone();
                             let ctx = ctx.clone();
-                    
+
                             tokio::spawn(async move {
-                                match Self::authorize_spotify(spotify_client, debug_mode, auth_status.clone()).await {
+                                match authorize_spotify(
+                                    spotify_client,
+                                    debug_mode,
+                                    auth_status.clone(),
+                                )
+                                .await
+                                {
                                     Ok(()) => {
                                         info!("Spotify 授權成功");
                                         spotify_authorized.store(true, Ordering::SeqCst);
@@ -530,9 +524,9 @@ impl eframe::App for SearchApp {
             let debug_mode = self.debug_mode;
             let ctx = ctx.clone();
             let spotify_authorized = self.spotify_authorized.clone();
-        
+
             tokio::spawn(async move {
-                match Self::update_currently_playing_wrapper(
+                match update_currently_playing_wrapper(
                     spotify_client.clone(),
                     currently_playing.clone(),
                     debug_mode,
@@ -544,74 +538,21 @@ impl eframe::App for SearchApp {
                     }
                     Err(e) => {
                         error!("更新當前播放失敗: {:?}", e);
-                        if e.to_string().contains("Token 無效") || e.to_string().contains("需要重新授權") {
+                        if e.to_string().contains("Token 無效")
+                            || e.to_string().contains("需要重新授權")
+                        {
                             info!("Token 無效或過期，需要重新授權");
                             spotify_authorized.store(false, Ordering::SeqCst);
                         }
                     }
                 }
-        
+
                 ctx.request_repaint();
             });
         }
     }
 }
-async fn load_all_covers(
-    urls: Vec<String>,
-    ctx: egui::Context,
-    sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
-) {
-    let client = Client::new();
-    for (index, url) in urls.into_iter().enumerate() {
-        debug!("正在載入封面，URL: {}", url);
-        match client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.bytes().await {
-                        Ok(bytes) => match load_from_memory(&bytes) {
-                            Ok(image) => {
-                                debug!("成功從記憶體載入圖片，URL: {}", url);
-                                let color_image = ColorImage::from_rgba_unmultiplied(
-                                    [image.width() as usize, image.height() as usize],
-                                    &image.to_rgba8(),
-                                );
-                                let texture = ctx.load_texture(
-                                    format!("cover_{}", index),
-                                    color_image,
-                                    Default::default(),
-                                );
-                                let texture = Arc::new(texture);
-                                let size = (image.width() as f32, image.height() as f32);
-                                match sender.send((index, texture, size)).await {
-                                    Ok(_) => debug!("成功發送紋理，URL: {}", url),
-                                    Err(e) => error!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e),
-                                }
-                            }
-                            Err(e) => error!("從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}", url, e),
-                        },
-                        Err(e) => error!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e),
-                    }
-                } else {
-                    error!("載入封面失敗，URL: {}, 狀態碼: {}", url, response.status());
-                }
-            }
-            Err(e) => error!("發送請求失敗，URL: {}, 錯誤: {:?}", url, e),
-        }
-    }
-}
 
-fn parse_osu_url(url: &str) -> Option<(String, Option<String>)> {
-    let beatmapset_regex =
-        Regex::new(r"https://osu\.ppy\.sh/beatmapsets/(\d+)(?:#(\w+)/(\d+))?$").unwrap();
-
-    if let Some(captures) = beatmapset_regex.captures(url) {
-        let beatmapset_id = captures.get(1).unwrap().as_str().to_string();
-        let beatmap_id = captures.get(3).map(|m| m.as_str().to_string());
-        Some((beatmapset_id, beatmap_id))
-    } else {
-        None
-    }
-}
 impl SearchApp {
     fn new(
         client: Arc<tokio::sync::Mutex<Client>>,
@@ -632,7 +573,7 @@ impl SearchApp {
         let need_repaint_clone = Arc::clone(&need_repaint);
         let ctx_clone = ctx.clone();
 
-        let spotify_icon = Self::load_spotify_icon(&ctx);
+        let spotify_icon = load_spotify_icon(&ctx);
         let config = read_config(debug_mode)?;
 
         let creds = Credentials::new(&config.spotify.client_id, &config.spotify.client_secret);
@@ -697,6 +638,7 @@ impl SearchApp {
             spotify_authorized: Arc::new(AtomicBool::new(false)),
             auth_status: Arc::new(Mutex::new(AuthStatus::NotStarted)),
             show_auth_progress: false,
+            cover_load_errors: Arc::new(RwLock::new(HashMap::new())),
         })
     }
     //授權過程
@@ -791,227 +733,6 @@ impl SearchApp {
         }
     }
 
-    async fn update_current_playing(
-        spotify: &AuthCodeSpotify,
-        currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
-        debug_mode: bool,
-    ) -> Result<Option<CurrentlyPlaying>> {
-        match spotify.current_user_playing_item().await {
-            Ok(Some(playing_context)) => {
-                if let Some(PlayableItem::Track(track)) = playing_context.item {
-                    let artists = track
-                        .artists
-                        .iter()
-                        .map(|a| Artist {
-                            name: a.name.clone(),
-                        })
-                        .collect::<Vec<_>>();
-                    let track_info = TrackInfo {
-                        name: track.name,
-                        artists: artists
-                            .iter()
-                            .map(|a| a.name.clone())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        album: track.album.name,
-                    };
-                    let spotify_url = track.external_urls.get("spotify").cloned();
-                    let new_currently_playing = CurrentlyPlaying {
-                        track_info,
-                        spotify_url,
-                    };
-                    Ok(Some(new_currently_playing))
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                error!("獲取當前播放信息時發生錯誤: {:?}", e);
-                Err(anyhow!("獲取當前播放信息失敗"))
-            }
-        }
-    }
-
-    async fn update_currently_playing_wrapper(
-        spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
-        currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
-        debug_mode: bool,
-    ) -> Result<()> {
-        let spotify_ref = {
-            let spotify = spotify_client.lock().unwrap();
-            spotify.as_ref().cloned()
-        };
-    
-        let update_result = if let Some(spotify) = spotify_ref {
-            Self::update_current_playing(&spotify, currently_playing.clone(), debug_mode).await
-        } else {
-            Err(anyhow!("Spotify 客戶端未初始化"))
-        };
-    
-        match update_result {
-            Ok(Some(new_currently_playing)) => {
-                let mut currently_playing = currently_playing.lock().unwrap();
-                *currently_playing = Some(new_currently_playing);
-                Ok(())
-            }
-            Ok(None) => {
-                let mut currently_playing = currently_playing.lock().unwrap();
-                *currently_playing = None;
-                Ok(())
-            }
-            Err(e) => {
-                if e.to_string().contains("InvalidToken") {
-                    error!("Token 無效，需要重新授權");
-                    return Err(anyhow!("Token 無效，需要重新授權"));
-                } else {
-                    error!("更新當前播放失敗: {:?}", e);
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    fn authorize_spotify(
-        spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
-        debug_mode: bool,
-        auth_status: Arc<Mutex<AuthStatus>>,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-        Box::pin(async move {
-            let config = read_config(debug_mode)?;
-    
-            let client_id = &config.spotify.client_id;
-            let redirect_uri = "http://localhost:8888/callback";
-            let scope = "user-read-currently-playing";
-    
-            let mut url = Url::parse("https://accounts.spotify.com/authorize").unwrap();
-            url.query_pairs_mut()
-                .append_pair("client_id", client_id)
-                .append_pair("response_type", "code")
-                .append_pair("redirect_uri", redirect_uri)
-                .append_pair("scope", scope)
-                .append_pair("show_dialog", "true");
-    
-            let auth_url = url.to_string();
-    
-            if debug_mode {
-                info!("Authorization URL: {}", auth_url);
-            }
-    
-            {
-                let mut status = auth_status.lock().unwrap();
-                *status = AuthStatus::WaitingForBrowser;
-            }
-    
-            open_url_default_browser(&auth_url)?;
-    
-            // 啟動本地伺服器來捕獲回調
-            let listener = TcpListener::bind("127.0.0.1:8888").expect("無法啟動本地伺服器");
-    
-            // 等待回調
-            let (mut stream, _) = listener.accept().expect("無法接受連接");
-            let mut reader = BufReader::new(&stream);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).expect("無法讀取請求");
-    
-            let redirect_url = request_line
-                .split_whitespace()
-                .nth(1)
-                .ok_or_else(|| anyhow!("無效的請求"))?;
-            let url = format!("http://localhost:8888{}", redirect_url);
-    
-            // 向瀏覽器發送響應
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>授權成功，請關閉此窗口。</body></html>";
-            stream.write_all(response.as_bytes()).expect("無法發送響應");
-    
-            if debug_mode {
-                info!("Received callback URL: {}", url);
-            }
-    
-            {
-                let mut status = auth_status.lock().unwrap();
-                *status = AuthStatus::Processing;
-            }
-    
-            let parsed_url = Url::parse(&url)?;
-            let code = parsed_url
-                .query_pairs()
-                .find(|(key, _)| key == "code")
-                .map(|(_, value)| value.into_owned())
-                .ok_or_else(|| anyhow!("無法從回調 URL 中解析授權碼"))?;
-    
-            // 當獲取到授權碼後，使用 client_id 和 client_secret 請求訪問令牌
-            let token_url = "https://accounts.spotify.com/api/token";
-            let client = reqwest::Client::new();
-            let params = [
-                ("grant_type", "authorization_code"),
-                ("code", &code),
-                ("redirect_uri", "http://localhost:8888/callback"),
-            ];
-    
-            match timeout(
-                Duration::from_secs(30),
-                client
-                    .post(token_url)
-                    .basic_auth(
-                        &config.spotify.client_id,
-                        Some(&config.spotify.client_secret),
-                    )
-                    .form(&params)
-                    .send(),
-            )
-            .await
-            {
-                Ok(response_result) => {
-                    let response = response_result?;
-                    if response.status().is_success() {
-                        let token_data: Token = response.json().await?;
-                        
-                        {
-                            let mut status = auth_status.lock().unwrap();
-                            *status = AuthStatus::TokenObtained;
-                        }
-    
-                        // 創建新的 AuthCodeSpotify 實例
-                        let creds = Credentials::new(
-                            &config.spotify.client_id,
-                            &config.spotify.client_secret,
-                        );
-                        let oauth = OAuth {
-                            redirect_uri: "http://localhost:8888/callback".to_string(),
-                            scopes: scopes!("user-read-currently-playing"),
-                            ..Default::default()
-                        };
-    
-                        // 使用 from_token_with_config 方法，並使用完全限定的路徑
-                        let new_spotify = AuthCodeSpotify::from_token_with_config(
-                            token_data,
-                            creds,
-                            oauth,
-                            rspotify::Config::default(), // 使用 rspotify::Config 而不是 Config
-                        );
-    
-                        // 更新 spotify_client
-                        let mut client = spotify_client
-                            .lock()
-                            .map_err(|_| anyhow!("無法獲取 Spotify 客戶端鎖"))?;
-                        *client = Some(new_spotify);
-    
-                        {
-                            let mut status = auth_status.lock().unwrap();
-                            *status = AuthStatus::Completed;
-                        }
-                    } else {
-                        return Err(anyhow!("獲取訪問令牌失敗: {}", response.status()));
-                    }
-                }
-                Err(_) => return Err(anyhow!("請求訪問令牌超時")),
-            }
-    
-            Ok(())
-        })
-    }
-
     fn render_bottom_panel(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let current_playing = self.currently_playing.lock().unwrap();
@@ -1033,63 +754,6 @@ impl SearchApp {
         });
     }
 
-    fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        let is_dark = ctx.style().visuals.dark_mode;
-
-        let icon_name = if is_dark {
-            "spotify_icon_black.png"
-        } else {
-            "spotify_icon_black.png"
-        };
-
-        // 獲取可執行文件的目錄
-        let exe_dir = std::env::current_exe().ok()?;
-        let exe_dir = exe_dir.parent()?;
-
-        // icon 資料夾與 exe 檔在同一目錄
-        let icon_dir = exe_dir.join("icon");
-
-        // 構建圖標的絕對路徑
-        let icon_path = icon_dir.join(icon_name);
-
-        println!("Trying to load icon from: {:?}", icon_path);
-
-        match Self::load_image_from_path(&icon_path) {
-            Ok(image) => {
-                let texture_options = egui::TextureOptions {
-                    magnification: egui::TextureFilter::Linear,
-                    minification: egui::TextureFilter::Linear,
-                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                };
-                Some(ctx.load_texture("spotify_icon", image, texture_options))
-            }
-            Err(e) => {
-                eprintln!("Failed to load Spotify icon ({}): {:?}", icon_name, e);
-                // 嘗試加載另一個圖標作為備用
-                let fallback_icon_name = if is_dark {
-                    "spotify_icon_black.png"
-                } else {
-                    "spotify_icon.png"
-                };
-                let fallback_icon_path = icon_dir.join(fallback_icon_name);
-
-                println!(
-                    "Trying to load fallback icon from: {:?}",
-                    fallback_icon_path
-                );
-
-                match Self::load_image_from_path(&fallback_icon_path) {
-                    Ok(fallback_image) => {
-                        Some(ctx.load_texture("spotify_icon", fallback_image, Default::default()))
-                    }
-                    Err(e) => {
-                        eprintln!("無法載入備用 Spotify 圖標：{:?}", e);
-                        None
-                    }
-                }
-            }
-        }
-    }
     fn create_context_menu<F>(&self, ui: &mut egui::Ui, content: F)
     where
         F: FnOnce(&mut dyn FnMut(&str, Box<dyn FnOnce() + '_>)),
@@ -1130,24 +794,6 @@ impl SearchApp {
         });
     }
 
-    // 輔助函數來加載圖片
-    fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
-        let image = image::io::Reader::open(path)?.decode()?;
-        let size = [image.width() as _, image.height() as _];
-        let image_buffer = image.into_rgba8();
-        let pixels = image_buffer.as_flat_samples();
-
-        // 手動處理透明度
-        let mut color_image = egui::ColorImage::new(size, egui::Color32::TRANSPARENT);
-        for (i, pixel) in pixels.as_slice().chunks_exact(4).enumerate() {
-            let [r, g, b, a] = pixel else { continue };
-            if *a > 0 {
-                color_image.pixels[i] = egui::Color32::from_rgba_unmultiplied(*r, *g, *b, *a);
-            }
-        }
-
-        Ok(color_image)
-    }
     async fn load_texture_async(ctx: &egui::Context, url: &str) -> Option<TextureHandle> {
         let bytes = reqwest::get(url).await.ok()?.bytes().await.ok()?;
         let image = image::load_from_memory(&bytes).ok()?;
@@ -1165,7 +811,7 @@ impl SearchApp {
 
     fn perform_search(&mut self, ctx: egui::Context) -> JoinHandle<Result<()>> {
         self.set_log_level(); // 設置日誌級別
-
+    
         let client = self.client.clone();
         let debug_mode = self.debug_mode;
         let query = self.search_query.clone();
@@ -1175,11 +821,12 @@ impl SearchApp {
         let need_repaint = self.need_repaint.clone();
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
-
+        let ctx_clone = ctx.clone();  // 在這裡克隆 ctx
+    
         info!("使用者搜尋: {}", query);
-
+    
         is_searching.store(true, Ordering::SeqCst);
-
+    
         tokio::spawn(async move {
             let result: Result<()> = async {
                 let mut error = err_msg.lock().await;
@@ -1187,24 +834,27 @@ impl SearchApp {
                 if debug_mode {
                     debug!("除錯模式開啟");
                 }
-
+    
                 let spotify_token = get_access_token(&*client.lock().await, debug_mode)
                     .await
-                    .map_err(|e| {
-                        error!("獲取 Spotify token 錯誤: {:?}", e);
-                        anyhow!("Spotify 錯誤：無法獲取 token")
+                    .map_err(|e| match e {
+                        SpotifyError::AccessTokenError(msg) => {
+                            anyhow!("Spotify 錯誤：無法獲取 token: {}", msg)
+                        }
+                        SpotifyError::RequestError(e) => anyhow!("Spotify 請求錯誤：{}", e),
+                        _ => anyhow!("Spotify 錯誤：{}", e),
                     })?;
-
+    
                 let osu_token = get_osu_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| {
                         error!("獲取 Osu token 錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：無法獲取 token")
                     })?;
-
+    
                 if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
                     info!("Osu 搜尋: {}", query);
-
+    
                     // 如果是 osu! URL，獲取譜面信息並進行反搜索
                     let (artist, title) = get_beatmapset_details(
                         &*client.lock().await,
@@ -1217,10 +867,10 @@ impl SearchApp {
                         error!("獲取 Osu 譜面詳情錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：獲取譜面詳情失敗")
                     })?;
-
+                    
                     let spotify_query = format!("{} {}", artist, title);
                     info!("Spotify 查詢 (從 osu): {}", spotify_query);
-
+    
                     // 使用獲取的 artist 和 title 進行 Spotify 搜索
                     let tracks_with_cover = search_track(
                         &*client.lock().await,
@@ -1236,7 +886,7 @@ impl SearchApp {
                         error!("Spotify 反搜索錯誤: {:?}", e);
                         anyhow!("Spotify 錯誤：反搜索失敗")
                     })?;
-
+    
                     // 更新 Spotify 搜索結果
                     let mut search_results = search_results.lock().await;
                     *search_results = tracks_with_cover
@@ -1267,7 +917,7 @@ impl SearchApp {
                             external_urls: twc.external_urls.clone(),
                         })
                         .collect();
-
+    
                     // 獲取 osu! beatmapset
                     let beatmapset = get_beatmapset_by_id(
                         &*client.lock().await,
@@ -1280,75 +930,90 @@ impl SearchApp {
                         error!("獲取 Osu 譜面錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：獲取譜面失敗")
                     })?;
-
+    
                     let results = vec![beatmapset];
                     *osu_search_results.lock().await = results.clone();
-
+    
                     let mut osu_urls = Vec::new();
                     if let Some(cover_url) = &results[0].covers.cover {
                         osu_urls.push(cover_url.clone());
                     }
-
-                    let ctx_clone = ctx.clone();
-                    let sender_clone = sender.clone();
-                    tokio::spawn(async move {
-                        load_all_covers(osu_urls, ctx_clone, sender_clone).await;
-                    });
+    
+                    if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
+                        error!("載入 osu 封面時發生錯誤: {:?}", e);
+                        if debug_mode {
+                            ctx_clone.request_repaint();
+                            egui::Window::new("Error").show(&ctx_clone, |ui| {
+                                ui.label("部分 osu 封面載入失敗:");
+                                ui.label(format!("{:?}", e));
+                            });
+                        }
+                    }
                 } else {
                     // 如果不是 osu! URL，執行原有的搜索邏輯
                     let spotify_result: Result<Vec<TrackWithCover>> =
                         match is_valid_spotify_url(&query) {
-                            SpotifyUrlStatus::Valid => {
-                                info!("Spotify 查詢 (URL): {}", query);
-                                let track_id = query
-                                    .split('/')
-                                    .last()
-                                    .unwrap_or("")
-                                    .split('?')
-                                    .next()
-                                    .unwrap_or("");
-                                let track =
-                                    get_track_info(&*client.lock().await, track_id, &spotify_token)
-                                        .await
-                                        .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
-
-                                Ok(vec![TrackWithCover {
-                                    name: track.name.clone(),
-                                    artists: track.artists.clone(),
-                                    external_urls: track.external_urls.clone(),
-                                    album_name: track.album.name.clone(),
-                                    cover_url: track
-                                        .album
-                                        .images
-                                        .first()
-                                        .map(|img| img.url.clone()),
-                                }])
-                            }
-                            SpotifyUrlStatus::Incomplete => {
-                                *error = "Spotify URL 不完整，請輸入完整的 URL".to_string();
-                                return Ok(());
-                            }
-                            SpotifyUrlStatus::Invalid => {
-                                if !query.is_empty() {
-                                    info!("Spotify 查詢 (關鍵字): {}", query);
-                                    let limit = 10;
-                                    let offset = 0;
-                                    search_track(
+                            Ok(status) => match status {
+                                SpotifyUrlStatus::Valid => {
+                                    info!("Spotify 查詢 (URL): {}", query);
+                                    let track_id = query
+                                        .split('/')
+                                        .last()
+                                        .unwrap_or("")
+                                        .split('?')
+                                        .next()
+                                        .unwrap_or("");
+                                    let track = get_track_info(
                                         &*client.lock().await,
-                                        &query,
+                                        track_id,
                                         &spotify_token,
-                                        limit,
-                                        offset,
-                                        debug_mode,
                                     )
                                     .await
-                                    .map(|(tracks_with_cover, _)| tracks_with_cover)
-                                } else {
-                                    Ok(Vec::new())
+                                    .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
+    
+                                    Ok(vec![TrackWithCover {
+                                        name: track.name.clone(),
+                                        artists: track.artists.clone(),
+                                        external_urls: track.external_urls.clone(),
+                                        album_name: track.album.name.clone(),
+                                        cover_url: track
+                                            .album
+                                            .images
+                                            .first()
+                                            .map(|img| img.url.clone()),
+                                    }])
                                 }
+                                SpotifyUrlStatus::Incomplete => {
+                                    *error = "Spotify URL 不完整，請輸入完整的 URL".to_string();
+                                    return Ok(());
+                                }
+                                SpotifyUrlStatus::Invalid => {
+                                    // 執行普通搜索
+                                    if !query.is_empty() {
+                                        info!("Spotify 查詢 (關鍵字): {}", query);
+                                        let limit = 10;
+                                        let offset = 0;
+                                        search_track(
+                                            &*client.lock().await,
+                                            &query,
+                                            &spotify_token,
+                                            limit,
+                                            offset,
+                                            debug_mode,
+                                        )
+                                        .await
+                                        .map(|(tracks_with_cover, _)| tracks_with_cover)
+                                        .map_err(|e| anyhow!("Spotify 搜索錯誤: {}", e))
+                                    } else {
+                                        Ok(Vec::new())
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                error!("驗證 Spotify URL 時發生錯誤: {:?}", e);
+                                Err(anyhow!("Spotify URL 驗證錯誤"))
                             }
                         };
-
                     let osu_query = match spotify_result {
                         Ok(ref tracks_with_cover) => {
                             info!("Spotify 搜索結果: {} 首曲目", tracks_with_cover.len());
@@ -1381,8 +1046,8 @@ impl SearchApp {
                                     external_urls: twc.external_urls.clone(),
                                 })
                                 .collect();
-
-                            if matches!(is_valid_spotify_url(&query), SpotifyUrlStatus::Valid)
+    
+                            if matches!(is_valid_spotify_url(&query), Ok(SpotifyUrlStatus::Valid))
                                 && !tracks_with_cover.is_empty()
                             {
                                 let osu_query = format!(
@@ -1407,7 +1072,7 @@ impl SearchApp {
                             return Err(anyhow!("Spotify 錯誤：搜索失敗"));
                         }
                     };
-
+    
                     let results =
                         get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
                             .await
@@ -1415,12 +1080,12 @@ impl SearchApp {
                                 error!("Osu 搜索錯誤: {:?}", e);
                                 anyhow!("Osu 錯誤：搜索失敗")
                             })?;
-
+    
                     info!("Osu 搜索結果: {} 個 beatmapsets", results.len());
                     if debug_mode {
                         debug!("Osu 搜索結果詳情: {:?}", results);
                     }
-
+    
                     let mut osu_urls = Vec::new();
                     for beatmapset in &results {
                         if let Some(cover_url) = &beatmapset.covers.cover {
@@ -1428,23 +1093,28 @@ impl SearchApp {
                         }
                     }
                     *osu_search_results.lock().await = results;
-                    let ctx_clone = ctx.clone();
-                    let sender_clone = sender.clone();
-
-                    tokio::spawn(async move {
-                        load_all_covers(osu_urls, ctx_clone, sender_clone).await;
-                    });
+    
+                    if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
+                        error!("載入 osu 封面時發生錯誤: {:?}", e);
+                        if debug_mode {
+                            ctx_clone.request_repaint();
+                            egui::Window::new("Error").show(&ctx_clone, |ui| {
+                                ui.label("部分 osu 封面載入失敗:");
+                                ui.label(format!("{:?}", e));
+                            });
+                        }
+                    }
                 }
-
+    
                 Ok(())
             }
             .await;
-
+    
             if let Err(e) = &result {
                 let mut error = err_msg.lock().await;
                 *error = e.to_string();
             }
-
+    
             is_searching.store(false, Ordering::SeqCst);
             need_repaint.store(true, Ordering::SeqCst);
             result
@@ -1582,7 +1252,7 @@ impl SearchApp {
                         if let Some(selected_index) = self.selected_beatmapset {
                             let selected_beatmapset = &osu_search_results_guard[selected_index];
                             let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
-
+    
                             ui.heading(
                                 egui::RichText::new(format!(
                                     "{} - {}",
@@ -1595,7 +1265,7 @@ impl SearchApp {
                                     .font(egui::FontId::proportional(self.global_font_size * 0.9)),
                             );
                             ui.add_space(10.0);
-
+    
                             for beatmap_info in beatmap_info.beatmaps {
                                 ui.add_space(10.0);
                                 ui.label(
@@ -1624,18 +1294,16 @@ impl SearchApp {
                                         .frame(false)
                                         .min_size(egui::vec2(ui.available_width(), 100.0)),
                                 );
-
+    
                                 if response.clicked() {
                                     self.selected_beatmapset = Some(index);
                                 }
-
+    
                                 ui.allocate_ui_at_rect(response.rect, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
                                             if let Ok(textures) = self.cover_textures.try_read() {
-                                                if let Some(Some((texture, size))) =
-                                                    textures.get(&index)
-                                                {
+                                                if let Some(Some((texture, size))) = textures.get(&index) {
                                                     let max_height = 100.0;
                                                     let aspect_ratio = size.0 / size.1;
                                                     let image_size = egui::Vec2::new(
@@ -1643,14 +1311,20 @@ impl SearchApp {
                                                         max_height,
                                                     );
                                                     ui.image((texture.id(), image_size));
+                                                } else if let Ok(errors) = self.cover_load_errors.try_read() {
+                                                    if let Some(error_msg) = errors.get(&index) {
+                                                        ui.label(egui::RichText::new(error_msg).color(egui::Color32::RED));
+                                                    } else {
+                                                        ui.label("Loading...");
+                                                    }
                                                 } else {
                                                     ui.label("Loading...");
                                                 }
                                             }
                                         });
-
+    
                                         ui.add_space(10.0);
-
+    
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 egui::RichText::new(&beatmapset.title)
@@ -1676,7 +1350,7 @@ impl SearchApp {
                                         });
                                     });
                                 });
-
+    
                                 ui.add_space(5.0);
                                 ui.separator();
                             }
