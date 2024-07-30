@@ -1,12 +1,13 @@
-﻿use anyhow::{anyhow, Context, Result};
+﻿use anyhow::Result;
 use lazy_static::lazy_static;
-use log::{debug, error, info};
+use log::{debug, error};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
+use thiserror::Error;
 
 
 lazy_static! {
@@ -25,14 +26,30 @@ pub struct Config {
     pub osu: ServiceConfig,
 }
 
-pub fn read_config(debug_mode: bool) -> Result<Config> {
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("無法開啟配置文件: {0}")]
+    FileOpenError(String),
+    #[error("無法讀取配置文件內容: {0}")]
+    FileReadError(String),
+    #[error("配置文件格式錯誤: {0}")]
+    JsonParseError(String),
+    #[error("Spotify 配置錯誤: {0}")]
+    SpotifyConfigError(String),
+    #[error("Osu 配置錯誤: {0}")]
+    OsuConfigError(String),
+    #[error("其他錯誤: {0}")]
+    Other(String),
+}
+
+pub fn read_config(debug_mode: bool) -> Result<Config, ConfigError> {
     if debug_mode {
         debug!("開始讀取配置文件");
     }
 
     let file_path = "config.json";
-    let mut file =
-        File::open(file_path).with_context(|| format!("無法開啟配置文件: {}", file_path))?;
+    let mut file = File::open(file_path)
+        .map_err(|e| ConfigError::FileOpenError(e.to_string()))?;
 
     if debug_mode {
         debug!("成功開啟配置文件: {}", file_path);
@@ -40,62 +57,32 @@ pub fn read_config(debug_mode: bool) -> Result<Config> {
 
     let mut content = String::new();
     file.read_to_string(&mut content)
-        .with_context(|| "無法讀取配置文件內容")?;
+        .map_err(|e| ConfigError::FileReadError(e.to_string()))?;
 
     if debug_mode {
         debug!("成功讀取配置文件內容");
     }
 
-    let config_value: Value =
-        serde_json::from_str(&content).with_context(|| "配置文件格式錯誤，請檢查 JSON 格式")?;
+    let config_value: Value = serde_json::from_str(&content)
+        .map_err(|e| ConfigError::JsonParseError(e.to_string()))?;
 
     if debug_mode {
         debug!("成功解析 JSON 格式");
     }
 
-    let mut errors = Vec::new();
-
-    // Spotify 配置檢查
+    // 檢查 Spotify 配置
     if let Err(e) = check_spotify_config(&config_value) {
-        errors.extend(e);
+        return Err(ConfigError::SpotifyConfigError(e.join(", ")));
     }
 
-    // Osu 配置檢查
+    // 檢查 Osu 配置
     if let Err(e) = check_osu_config(&config_value) {
-        errors.extend(e);
+        return Err(ConfigError::OsuConfigError(e.join(", ")));
     }
 
-    if !errors.is_empty() {
-        let error_msg = format!("配置檢查失敗:\n{}", errors.join("\n"));
-
-        // 檢查錯誤是否有變化
-        let mut last_error = LAST_ERROR.lock().unwrap();
-        if last_error.as_ref() != Some(&error_msg) {
-            error!("{}", error_msg);
-            *last_error = Some(error_msg.clone());
-        }
-
-        return Err(anyhow!(error_msg));
-    } else {
-        // 如果沒有錯誤，清除上一次的錯誤記錄
-        let mut last_error = LAST_ERROR.lock().unwrap();
-        if last_error.is_some() {
-            info!("配置檢查通過");
-            *last_error = None;
-        }
-    }
-
-    // 如果檢查通過，解析為 Config 結構
-    let config: Config =
-        serde_json::from_value(config_value).with_context(|| "無法將配置文件解析為 Config 結構")?;
-
-    if debug_mode {
-        debug!("成功將配置解析為 Config 結構");
-    }
-
-    if debug_mode {
-        debug!("完整的 JSON 配置文件: {}", content);
-    }
+    // 解析配置
+    let config: Config = serde_json::from_value(config_value)
+        .map_err(|e| ConfigError::JsonParseError(e.to_string()))?;
 
     Ok(config)
 }

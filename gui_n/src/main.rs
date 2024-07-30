@@ -10,9 +10,9 @@ use crate::spotify::{
     open_spotify_url, print_track_info_gui, search_track, update_currently_playing_wrapper, Album,
     AuthStatus, CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
-use lib::read_config;
+use lib::{read_config, ConfigError};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result,Context};
 use clipboard::{ClipboardContext, ClipboardProvider};
 use eframe::{self, egui};
 use egui::TextureHandle;
@@ -49,25 +49,25 @@ use rspotify::AuthCodeSpotify;
 
 use rspotify::{Credentials, OAuth};
 
+use thiserror::Error;
 
-struct ErrorApp {
-    error: String,
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("°t¸m¿ù»~: {0}")]
+    ConfigError(#[from] ConfigError),
+    #[error("Spotify ¿ù»~: {0}")]
+    SpotifyError(#[from] spotify::SpotifyError),
+    #[error("Osu ¿ù»~: {0}")]
+    OsuError(#[from] osu::OsuError),
+    #[error("IO ¿ù»~: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error(transparent)]
+    AnyhowError(#[from] anyhow::Error),
+    #[error("¨ä¥L¿ù»~: {0}")]
+    Other(String),
 }
 
-impl ErrorApp {
-    fn new(error: String) -> Self {
-        Self { error }
-    }
-}
-impl eframe::App for ErrorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Error");
-            ui.label(&self.error);
-        });
-    }
-}
-// å®šç¾© SpotifySearchAppçµæ§‹ï¼Œå„²å­˜ç¨‹å¼ç‹€æ…‹å’Œæ•¸æ“š
+// ©w¸q SpotifySearchAppµ²ºc¡AÀx¦sµ{¦¡ª¬ºA©M¼Æ¾Ú
 struct SearchApp {
     client: Arc<tokio::sync::Mutex<Client>>,
     access_token: Arc<tokio::sync::Mutex<String>>,
@@ -103,13 +103,13 @@ struct SearchApp {
 
 impl eframe::App for SearchApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // è«‹æ±‚æ›´æ–°ä»‹é¢ï¼Œç”¨æ–¼åˆ·æ–°GUI
+        // ½Ğ¨D§ó·s¤¶­±¡A¥Î©ó¨ê·sGUI
         if self.need_repaint.load(Ordering::SeqCst) {
             ctx.request_repaint();
             self.need_repaint.store(false, Ordering::SeqCst);
         }
 
-        // åˆå§‹åŒ–ç¨‹å¼,å’Œè¨­ç½®å­—é«”åŠç²å–access token
+        // ªì©l¤Æµ{¦¡,©M³]¸m¦rÅé¤ÎÀò¨úaccess token
         if !self.initialized {
             let client = self.client.clone();
             let osu_urls = vec![];
@@ -119,11 +119,11 @@ impl eframe::App for SearchApp {
         
             tokio::spawn(async move {
                 if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender_clone).await {
-                    error!("åˆå§‹åŒ–æ™‚è¼‰å…¥ osu å°é¢ç™¼ç”ŸéŒ¯èª¤: {:?}", e);
+                    error!("ªì©l¤Æ®É¸ü¤J osu «Ê­±µo¥Í¿ù»~: {:?}", e);
                     if debug_mode {
                         ctx_clone.request_repaint();
                         egui::Window::new("Error").show(&ctx_clone, |ui| {
-                            ui.label(format!("è¼‰å…¥ osu å°é¢éŒ¯èª¤: {:?}", e));
+                            ui.label(format!("¸ü¤J osu «Ê­±¿ù»~: {:?}", e));
                         });
                     }
                 }
@@ -159,8 +159,8 @@ impl eframe::App for SearchApp {
                     }
                     Err(e) => {
                         let mut error = error_message.lock().await;
-                        *error = "Spotify éŒ¯èª¤ï¼šç„¡æ³•ç²å– token".to_string();
-                        error!("ç²å– Spotify token éŒ¯èª¤: {:?}", e);
+                        *error = "Spotify ¿ù»~¡GµLªkÀò¨ú token".to_string();
+                        error!("Àò¨ú Spotify token ¿ù»~: {:?}", e);
                         is_searching.store(false, Ordering::SeqCst);
                         need_repaint.store(true, Ordering::SeqCst);
                     }
@@ -212,7 +212,7 @@ impl eframe::App for SearchApp {
                     .show(ctx, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(20.0);
-                            ui.heading(egui::RichText::new("é…ç½®æª¢æŸ¥éŒ¯èª¤ï¼š").size(32.0));
+                            ui.heading(egui::RichText::new("°t¸mÀË¬d¿ù»~¡G").size(32.0));
                             ui.add_space(20.0);
 
                             for error_msg in errors.iter() {
@@ -236,7 +236,7 @@ impl eframe::App for SearchApp {
                             if ui
                                 .add_sized(
                                     [200.0, 60.0],
-                                    egui::Button::new(egui::RichText::new("ç¢ºå®š").size(40.0)),
+                                    egui::Button::new(egui::RichText::new("½T©w").size(40.0)),
                                 )
                                 .clicked()
                             {
@@ -247,7 +247,7 @@ impl eframe::App for SearchApp {
             }
         }
 
-        // åœ¨é–‰åŒ…å¤–éƒ¨è™•ç†éŒ¯èª¤è¦–çª—çš„é—œé–‰
+        // ¦b³¬¥]¥~³¡³B²z¿ù»~µøµ¡ªºÃö³¬
         if should_close_error {
             if let Ok(mut errors) = self.config_errors.lock() {
                 errors.clear();
@@ -261,7 +261,7 @@ impl eframe::App for SearchApp {
             let window_size = ui.available_size();
 
             ui.horizontal(|ui| {
-                if ui.button("âš™").clicked() {
+                if ui.button("?").clicked() {
                     self.show_settings = !self.show_settings;
                 }
                 ui.label(format!(
@@ -309,7 +309,7 @@ impl eframe::App for SearchApp {
                                 .add_sized(
                                     egui::vec2(self.global_font_size * 2.2, text_edit_height),
                                     egui::Button::new(
-                                        egui::RichText::new("Ã—").size(self.global_font_size * 1.3),
+                                        egui::RichText::new("¡Ñ").size(self.global_font_size * 1.3),
                                     )
                                     .frame(false),
                                 )
@@ -320,7 +320,7 @@ impl eframe::App for SearchApp {
                         }
 
                         let cloned_response = text_edit_response.clone();
-                        // æœç´¢æ¡†çš„å³éµèœå–®
+                        // ·j¯Á®Øªº¥kÁäµæ³æ
                         cloned_response.context_menu(|ui| {
                             let search_query =
                                 Arc::new(std::sync::Mutex::new(self.search_query.clone()));
@@ -355,23 +355,23 @@ impl eframe::App for SearchApp {
                                 );
                             });
 
-                            // åœ¨é€™è£¡æ›´æ–° self çš„ç‹€æ…‹
+                            // ¦b³o¸Ì§ó·s self ªºª¬ºA
                             self.search_query = search_query.lock().unwrap().clone();
                             self.show_relax_window = *show_relax_window.lock().unwrap();
                         });
 
-                        // æª¢æ¸¬Enteræ˜¯å¦æŒ‰ä¸‹ï¼Œä¸¦è™•ç†èª¿è©¦æ¨¡å¼
+                        // ÀË´úEnter¬O§_«ö¤U¡A¨Ã³B²z½Õ¸Õ¼Ò¦¡
                         if text_edit_response.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         {
                             if self.search_query.trim().to_lowercase() == "debug" {
-                                self.debug_mode = !self.debug_mode; // åˆ‡æ›èª¿è©¦æ¨¡å¼
-                                self.search_query.clear(); // æ¸…ç©ºæœç´¢æ¡†
+                                self.debug_mode = !self.debug_mode; // ¤Á´«½Õ¸Õ¼Ò¦¡
+                                self.search_query.clear(); // ²MªÅ·j¯Á®Ø
                             } else {
                                 self.perform_search(ctx.clone());
                             }
                         }
-                        // é¡¯ç¤ºèª¿è©¦æ¨¡å¼ç‹€æ…‹
+                        // Åã¥Ü½Õ¸Õ¼Ò¦¡ª¬ºA
                         if self.debug_mode {
                             ui.add_space(5.0);
                             ui.label(
@@ -393,11 +393,11 @@ impl eframe::App for SearchApp {
             if let Ok(err_msg_guard) = self.err_msg.try_lock() {
                 ui.label(format!("{}", *err_msg_guard));
             }
-            // æ ¹æ“šè¦–çª—å¤§å°æ±ºå®šä½ˆå±€
+            // ®Ú¾Úµøµ¡¤j¤p¨M©w§G§½
             if window_size.x >= 1000.0 {
-                // å¤§è¦–çª—ä½ˆå±€
+                // ¤jµøµ¡§G§½
                 ui.columns(2, |columns| {
-                    // Spotify çµæœ
+                    // Spotify µ²ªG
                     columns[0].vertical(|ui| {
                         ui.set_min_width(0.45 * window_size.x);
                         if let Some(icon) = &self.spotify_icon {
@@ -412,7 +412,7 @@ impl eframe::App for SearchApp {
                         self.display_spotify_results(ui);
                     });
 
-                    // Osu çµæœ
+                    // Osu µ²ªG
                     columns[1].vertical(|ui| {
                         ui.set_min_width(0.45 * window_size.x);
                         ui.heading(
@@ -422,7 +422,7 @@ impl eframe::App for SearchApp {
                     });
                 });
             } else {
-                // å°è¦–çª—ä½ˆå±€ï¼ˆæŠ˜ç–Šå¼ï¼‰
+                // ¤pµøµ¡§G§½¡]§éÅ|¦¡¡^
                 egui::CollapsingHeader::new(
                     egui::RichText::new("Spotify Results").size(self.global_font_size * 1.1),
                 )
@@ -448,7 +448,7 @@ impl eframe::App for SearchApp {
 
                     let slider = egui::Slider::new(&mut self.relax_slider_value, 0..=999_999_999)
                         .clamp_to_range(true)
-                        .text("æˆ‘ä¸çŸ¥é“é€™æ˜¯åšå•¥");
+                        .text("§Ú¤£ª¾¹D³o¬O°µÔ£");
                     ui.add_sized([ui.available_width(), 20.0], slider);
 
                     ui.label(format!("Value: {}", self.relax_slider_value));
@@ -461,29 +461,29 @@ impl eframe::App for SearchApp {
         }
 
         if self.search_query.trim().to_lowercase() == "debug" {
-            self.debug_mode = !self.debug_mode; // åˆ‡æ›èª¿è©¦æ¨¡å¼
-            self.set_log_level(); // æ›´æ–°æ—¥èªŒç´šåˆ¥
-            self.search_query.clear(); // æ¸…ç©ºæœç´¢æ¡†
+            self.debug_mode = !self.debug_mode; // ¤Á´«½Õ¸Õ¼Ò¦¡
+            self.set_log_level(); // §ó·s¤é»x¯Å§O
+            self.search_query.clear(); // ²MªÅ·j¯Á®Ø
             info!("Debug mode: {}", self.debug_mode);
         }
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 self.render_bottom_panel(ui);
 
-                // åœ¨åº•éƒ¨é¢æ¿å³å´æ·»åŠ æˆæ¬ŠæŒ‰éˆ•
+                // ¦b©³³¡­±ªO¥k°¼²K¥[±ÂÅv«ö¶s
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(10.0); // æ·»åŠ ä¸€äº›å³å´é–“è·
+                    ui.add_space(10.0); // ²K¥[¤@¨Ç¥k°¼¶¡¶Z
                     let button_text = if self.spotify_authorized.load(Ordering::SeqCst) {
-                        "Spotify å·²æˆæ¬Š"
+                        "Spotify ¤w±ÂÅv"
                     } else {
-                        "æˆæ¬Š Spotify"
+                        "±ÂÅv Spotify"
                     };
                     if ui
                         .button(egui::RichText::new(button_text).size(14.0))
                         .clicked()
                     {
                         if !self.spotify_authorized.load(Ordering::SeqCst) {
-                            self.show_auth_progress = true; // è¨­ç½®ç‚º true ä»¥é¡¯ç¤ºé€²åº¦çª—å£
+                            self.show_auth_progress = true; // ³]¸m¬° true ¥HÅã¥Ü¶i«×µ¡¤f
                             let spotify_client = self.spotify_client.clone();
                             let debug_mode = self.debug_mode;
                             let spotify_authorized = self.spotify_authorized.clone();
@@ -499,13 +499,13 @@ impl eframe::App for SearchApp {
                                 .await
                                 {
                                     Ok(()) => {
-                                        info!("Spotify æˆæ¬ŠæˆåŠŸ");
+                                        info!("Spotify ±ÂÅv¦¨¥\");
                                         spotify_authorized.store(true, Ordering::SeqCst);
                                         let mut status = auth_status.lock().unwrap();
                                         *status = AuthStatus::Completed;
                                     }
                                     Err(e) => {
-                                        error!("Spotify æˆæ¬Šå¤±æ•—: {:?}", e);
+                                        error!("Spotify ±ÂÅv¥¢±Ñ: {:?}", e);
                                         let mut status = auth_status.lock().unwrap();
                                         *status = AuthStatus::Failed(e.to_string());
                                     }
@@ -537,11 +537,11 @@ impl eframe::App for SearchApp {
                         spotify_authorized.store(true, Ordering::SeqCst);
                     }
                     Err(e) => {
-                        error!("æ›´æ–°ç•¶å‰æ’­æ”¾å¤±æ•—: {:?}", e);
-                        if e.to_string().contains("Token ç„¡æ•ˆ")
-                            || e.to_string().contains("éœ€è¦é‡æ–°æˆæ¬Š")
+                        error!("§ó·s·í«e¼½©ñ¥¢±Ñ: {:?}", e);
+                        if e.to_string().contains("Token µL®Ä")
+                            || e.to_string().contains("»İ­n­«·s±ÂÅv")
                         {
-                            info!("Token ç„¡æ•ˆæˆ–éæœŸï¼Œéœ€è¦é‡æ–°æˆæ¬Š");
+                            info!("Token µL®Ä©Î¹L´Á¡A»İ­n­«·s±ÂÅv");
                             spotify_authorized.store(false, Ordering::SeqCst);
                         }
                     }
@@ -584,7 +584,7 @@ impl SearchApp {
         let spotify = AuthCodeSpotify::new(creds, oauth.clone());
         let spotify_client = Arc::new(Mutex::new(Some(spotify)));
 
-        // å•Ÿå‹•ç•°æ­¥åŠ è¼‰ä»»å‹™
+        // ±Ò°Ê²§¨B¥[¸ü¥ô°È
         tokio::spawn(async move {
             loop {
                 let url = {
@@ -641,47 +641,47 @@ impl SearchApp {
             cover_load_errors: Arc::new(RwLock::new(HashMap::new())),
         })
     }
-    //æˆæ¬Šéç¨‹
+    //±ÂÅv¹Lµ{
     fn show_auth_progress(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Spotify æˆæ¬Šé€²åº¦")
+        egui::Window::new("Spotify ±ÂÅv¶i«×")
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
                 let status = self.auth_status.lock().unwrap().clone(); // Clone to avoid holding the lock
                 match status {
                     AuthStatus::NotStarted => {
-                        ui.label("æº–å‚™é–‹å§‹æˆæ¬Š...");
+                        ui.label("·Ç³Æ¶}©l±ÂÅv...");
                         ui.add(egui::ProgressBar::new(0.0).animate(true));
                     }
                     AuthStatus::WaitingForBrowser => {
-                        ui.label("è«‹åœ¨ç€è¦½å™¨ä¸­å®Œæˆæˆæ¬Š...");
+                        ui.label("½Ğ¦bÂsÄı¾¹¤¤§¹¦¨±ÂÅv...");
                         ui.add(egui::ProgressBar::new(0.25).animate(true));
                     }
                     AuthStatus::Processing => {
-                        ui.label("æ­£åœ¨è™•ç†æˆæ¬Š...");
+                        ui.label("¥¿¦b³B²z±ÂÅv...");
                         ui.add(egui::ProgressBar::new(0.5).animate(true));
                     }
                     AuthStatus::TokenObtained => {
-                        ui.label("æˆåŠŸç²å–è¨ªå•ä»¤ç‰Œï¼");
+                        ui.label("¦¨¥\Àò¨ú³X°İ¥OµP¡I");
                         ui.add(egui::ProgressBar::new(0.75).animate(true));
                     }
                     AuthStatus::Completed => {
-                        ui.label("Spotify æˆæ¬ŠæˆåŠŸï¼");
+                        ui.label("Spotify ±ÂÅv¦¨¥\¡I");
                         ui.add(egui::ProgressBar::new(1.0));
-                        if ui.button("é—œé–‰").clicked() {
+                        if ui.button("Ãö³¬").clicked() {
                             self.show_auth_progress = false;
                         }
                     }
                     AuthStatus::Failed(ref error) => {
-                        ui.label(format!("æˆæ¬Šå¤±æ•—: {}", error));
-                        if ui.button("é—œé–‰").clicked() {
+                        ui.label(format!("±ÂÅv¥¢±Ñ: {}", error));
+                        if ui.button("Ãö³¬").clicked() {
                             self.show_auth_progress = false;
                         }
                     }
                 }
             });
     }
-    //è¨­ç½®æ—¥èªŒç´šåˆ¥
+    //³]¸m¤é»x¯Å§O
     fn set_log_level(&self) {
         let log_level = if self.debug_mode {
             LevelFilter::Debug
@@ -690,14 +690,14 @@ impl SearchApp {
         };
         log::set_max_level(log_level);
     }
-    //é¡¯ç¤ºSETTINGS
+    //Åã¥ÜSETTINGS
     fn show_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("è¨­ç½®");
+        ui.heading("³]¸m");
         ui.add_space(10.0);
 
-        // æ•´é«”ç¸®æ”¾è¨­ç½®
+        // ¾ãÅéÁY©ñ³]¸m
         ui.horizontal(|ui| {
-            ui.label("æ•´é«”ç¸®æ”¾:");
+            ui.label("¾ãÅéÁY©ñ:");
             if ui.button("-").clicked() {
                 let new_scale = (ui.ctx().pixels_per_point() - 0.1).max(0.5);
                 ui.ctx().set_pixels_per_point(new_scale);
@@ -711,7 +711,7 @@ impl SearchApp {
 
         ui.add_space(10.0);
 
-        // Debug æ¨¡å¼è¨­ç½®
+        // Debug ¼Ò¦¡³]¸m
         let mut debug_mode = self.debug_mode;
         ui.checkbox(&mut debug_mode, "Debug Mode");
         if debug_mode != self.debug_mode {
@@ -745,11 +745,11 @@ impl SearchApp {
                     )));
                 }
                 ui.label(format!(
-                    "æ­£åœ¨æ’­æ”¾: {} - {}",
+                    "¥¿¦b¼½©ñ: {} - {}",
                     current_playing.track_info.artists, current_playing.track_info.name
                 ));
             } else {
-                ui.label("ç•¶å‰æ²’æœ‰æ­£åœ¨æ’­æ”¾çš„æ›²ç›®");
+                ui.label("·í«e¨S¦³¥¿¦b¼½©ñªº¦±¥Ø");
             }
         });
     }
@@ -765,7 +765,7 @@ impl SearchApp {
                 font_id.size = self.global_font_size * 1.2;
             });
 
-        ui.style_mut().spacing.item_spacing.y = 5.0; // æ¸›å°‘é …ç›®é–“çš„å‚ç›´é–“è·
+        ui.style_mut().spacing.item_spacing.y = 5.0; // ´î¤Ö¶µ¥Ø¶¡ªº««ª½¶¡¶Z
 
         ui.vertical_centered(|ui| {
             ui.add_space(5.0);
@@ -804,13 +804,13 @@ impl SearchApp {
         let texture_options = egui::TextureOptions {
             magnification: egui::TextureFilter::Linear,
             minification: egui::TextureFilter::Linear,
-            wrap_mode: TextureWrapMode::default(), // ä½¿ç”¨é»˜èªå€¼
+            wrap_mode: TextureWrapMode::default(), // ¨Ï¥ÎÀq»{­È
         };
         Some(ctx.load_texture(url, color_image, texture_options))
     }
 
     fn perform_search(&mut self, ctx: egui::Context) -> JoinHandle<Result<()>> {
-        self.set_log_level(); // è¨­ç½®æ—¥èªŒç´šåˆ¥
+        self.set_log_level(); // ³]¸m¤é»x¯Å§O
     
         let client = self.client.clone();
         let debug_mode = self.debug_mode;
@@ -821,9 +821,9 @@ impl SearchApp {
         let need_repaint = self.need_repaint.clone();
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
-        let ctx_clone = ctx.clone();  // åœ¨é€™è£¡å…‹éš† ctx
+        let ctx_clone = ctx.clone();  // ¦b³o¸Ì§J¶© ctx
     
-        info!("ä½¿ç”¨è€…æœå°‹: {}", query);
+        info!("¨Ï¥ÎªÌ·j´M: {}", query);
     
         is_searching.store(true, Ordering::SeqCst);
     
@@ -832,30 +832,30 @@ impl SearchApp {
                 let mut error = err_msg.lock().await;
                 error.clear();
                 if debug_mode {
-                    debug!("é™¤éŒ¯æ¨¡å¼é–‹å•Ÿ");
+                    debug!("°£¿ù¼Ò¦¡¶}±Ò");
                 }
     
                 let spotify_token = get_access_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| match e {
                         SpotifyError::AccessTokenError(msg) => {
-                            anyhow!("Spotify éŒ¯èª¤ï¼šç„¡æ³•ç²å– token: {}", msg)
+                            anyhow!("Spotify ¿ù»~¡GµLªkÀò¨ú token: {}", msg)
                         }
-                        SpotifyError::RequestError(e) => anyhow!("Spotify è«‹æ±‚éŒ¯èª¤ï¼š{}", e),
-                        _ => anyhow!("Spotify éŒ¯èª¤ï¼š{}", e),
+                        SpotifyError::RequestError(e) => anyhow!("Spotify ½Ğ¨D¿ù»~¡G{}", e),
+                        _ => anyhow!("Spotify ¿ù»~¡G{}", e),
                     })?;
     
                 let osu_token = get_osu_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| {
-                        error!("ç²å– Osu token éŒ¯èª¤: {:?}", e);
-                        anyhow!("Osu éŒ¯èª¤ï¼šç„¡æ³•ç²å– token")
+                        error!("Àò¨ú Osu token ¿ù»~: {:?}", e);
+                        anyhow!("Osu ¿ù»~¡GµLªkÀò¨ú token")
                     })?;
     
                 if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
-                    info!("Osu æœå°‹: {}", query);
+                    info!("Osu ·j´M: {}", query);
     
-                    // å¦‚æœæ˜¯ osu! URLï¼Œç²å–è­œé¢ä¿¡æ¯ä¸¦é€²è¡Œåæœç´¢
+                    // ¦pªG¬O osu! URL¡AÀò¨úÃĞ­±«H®§¨Ã¶i¦æ¤Ï·j¯Á
                     let (artist, title) = get_beatmapset_details(
                         &*client.lock().await,
                         &osu_token,
@@ -864,14 +864,14 @@ impl SearchApp {
                     )
                     .await
                     .map_err(|e| {
-                        error!("ç²å– Osu è­œé¢è©³æƒ…éŒ¯èª¤: {:?}", e);
-                        anyhow!("Osu éŒ¯èª¤ï¼šç²å–è­œé¢è©³æƒ…å¤±æ•—")
+                        error!("Àò¨ú Osu ÃĞ­±¸Ô±¡¿ù»~: {:?}", e);
+                        anyhow!("Osu ¿ù»~¡GÀò¨úÃĞ­±¸Ô±¡¥¢±Ñ")
                     })?;
                     
                     let spotify_query = format!("{} {}", artist, title);
-                    info!("Spotify æŸ¥è©¢ (å¾ osu): {}", spotify_query);
+                    info!("Spotify ¬d¸ß (±q osu): {}", spotify_query);
     
-                    // ä½¿ç”¨ç²å–çš„ artist å’Œ title é€²è¡Œ Spotify æœç´¢
+                    // ¨Ï¥ÎÀò¨úªº artist ©M title ¶i¦æ Spotify ·j¯Á
                     let tracks_with_cover = search_track(
                         &*client.lock().await,
                         &spotify_query,
@@ -883,11 +883,11 @@ impl SearchApp {
                     .await
                     .map(|(tracks_with_cover, _)| tracks_with_cover)
                     .map_err(|e| {
-                        error!("Spotify åæœç´¢éŒ¯èª¤: {:?}", e);
-                        anyhow!("Spotify éŒ¯èª¤ï¼šåæœç´¢å¤±æ•—")
+                        error!("Spotify ¤Ï·j¯Á¿ù»~: {:?}", e);
+                        anyhow!("Spotify ¿ù»~¡G¤Ï·j¯Á¥¢±Ñ")
                     })?;
     
-                    // æ›´æ–° Spotify æœç´¢çµæœ
+                    // §ó·s Spotify ·j¯Áµ²ªG
                     let mut search_results = search_results.lock().await;
                     *search_results = tracks_with_cover
                         .iter()
@@ -918,7 +918,7 @@ impl SearchApp {
                         })
                         .collect();
     
-                    // ç²å– osu! beatmapset
+                    // Àò¨ú osu! beatmapset
                     let beatmapset = get_beatmapset_by_id(
                         &*client.lock().await,
                         &osu_token,
@@ -927,8 +927,8 @@ impl SearchApp {
                     )
                     .await
                     .map_err(|e| {
-                        error!("ç²å– Osu è­œé¢éŒ¯èª¤: {:?}", e);
-                        anyhow!("Osu éŒ¯èª¤ï¼šç²å–è­œé¢å¤±æ•—")
+                        error!("Àò¨ú Osu ÃĞ­±¿ù»~: {:?}", e);
+                        anyhow!("Osu ¿ù»~¡GÀò¨úÃĞ­±¥¢±Ñ")
                     })?;
     
                     let results = vec![beatmapset];
@@ -940,22 +940,22 @@ impl SearchApp {
                     }
     
                     if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
-                        error!("è¼‰å…¥ osu å°é¢æ™‚ç™¼ç”ŸéŒ¯èª¤: {:?}", e);
+                        error!("¸ü¤J osu «Ê­±®Éµo¥Í¿ù»~: {:?}", e);
                         if debug_mode {
                             ctx_clone.request_repaint();
                             egui::Window::new("Error").show(&ctx_clone, |ui| {
-                                ui.label("éƒ¨åˆ† osu å°é¢è¼‰å…¥å¤±æ•—:");
+                                ui.label("³¡¤À osu «Ê­±¸ü¤J¥¢±Ñ:");
                                 ui.label(format!("{:?}", e));
                             });
                         }
                     }
                 } else {
-                    // å¦‚æœä¸æ˜¯ osu! URLï¼ŒåŸ·è¡ŒåŸæœ‰çš„æœç´¢é‚è¼¯
+                    // ¦pªG¤£¬O osu! URL¡A°õ¦æ­ì¦³ªº·j¯ÁÅŞ¿è
                     let spotify_result: Result<Vec<TrackWithCover>> =
                         match is_valid_spotify_url(&query) {
                             Ok(status) => match status {
                                 SpotifyUrlStatus::Valid => {
-                                    info!("Spotify æŸ¥è©¢ (URL): {}", query);
+                                    info!("Spotify ¬d¸ß (URL): {}", query);
                                     let track_id = query
                                         .split('/')
                                         .last()
@@ -969,7 +969,7 @@ impl SearchApp {
                                         &spotify_token,
                                     )
                                     .await
-                                    .map_err(|e| anyhow!("ç²å–æ›²ç›®è³‡è¨ŠéŒ¯èª¤: {:?}", e))?;
+                                    .map_err(|e| anyhow!("Àò¨ú¦±¥Ø¸ê°T¿ù»~: {:?}", e))?;
     
                                     Ok(vec![TrackWithCover {
                                         name: track.name.clone(),
@@ -984,13 +984,13 @@ impl SearchApp {
                                     }])
                                 }
                                 SpotifyUrlStatus::Incomplete => {
-                                    *error = "Spotify URL ä¸å®Œæ•´ï¼Œè«‹è¼¸å…¥å®Œæ•´çš„ URL".to_string();
+                                    *error = "Spotify URL ¤£§¹¾ã¡A½Ğ¿é¤J§¹¾ãªº URL".to_string();
                                     return Ok(());
                                 }
                                 SpotifyUrlStatus::Invalid => {
-                                    // åŸ·è¡Œæ™®é€šæœç´¢
+                                    // °õ¦æ´¶³q·j¯Á
                                     if !query.is_empty() {
-                                        info!("Spotify æŸ¥è©¢ (é—œéµå­—): {}", query);
+                                        info!("Spotify ¬d¸ß (ÃöÁä¦r): {}", query);
                                         let limit = 10;
                                         let offset = 0;
                                         search_track(
@@ -1003,20 +1003,20 @@ impl SearchApp {
                                         )
                                         .await
                                         .map(|(tracks_with_cover, _)| tracks_with_cover)
-                                        .map_err(|e| anyhow!("Spotify æœç´¢éŒ¯èª¤: {}", e))
+                                        .map_err(|e| anyhow!("Spotify ·j¯Á¿ù»~: {}", e))
                                     } else {
                                         Ok(Vec::new())
                                     }
                                 }
                             },
                             Err(e) => {
-                                error!("é©—è­‰ Spotify URL æ™‚ç™¼ç”ŸéŒ¯èª¤: {:?}", e);
-                                Err(anyhow!("Spotify URL é©—è­‰éŒ¯èª¤"))
+                                error!("ÅçÃÒ Spotify URL ®Éµo¥Í¿ù»~: {:?}", e);
+                                Err(anyhow!("Spotify URL ÅçÃÒ¿ù»~"))
                             }
                         };
                     let osu_query = match spotify_result {
                         Ok(ref tracks_with_cover) => {
-                            info!("Spotify æœç´¢çµæœ: {} é¦–æ›²ç›®", tracks_with_cover.len());
+                            info!("Spotify ·j¯Áµ²ªG: {} ­º¦±¥Ø", tracks_with_cover.len());
                             let mut search_results = search_results.lock().await;
                             *search_results = tracks_with_cover
                                 .iter()
@@ -1060,16 +1060,16 @@ impl SearchApp {
                                         .join(", "),
                                     tracks_with_cover[0].name
                                 );
-                                info!("Osu æŸ¥è©¢ (å¾ Spotify): {}", osu_query);
+                                info!("Osu ¬d¸ß (±q Spotify): {}", osu_query);
                                 osu_query
                             } else {
-                                info!("Osu æŸ¥è©¢ (é—œéµå­—): {}", query);
+                                info!("Osu ¬d¸ß (ÃöÁä¦r): {}", query);
                                 query.clone()
                             }
                         }
                         Err(e) => {
-                            error!("Spotify æœç´¢éŒ¯èª¤: {:?}", e);
-                            return Err(anyhow!("Spotify éŒ¯èª¤ï¼šæœç´¢å¤±æ•—"));
+                            error!("Spotify ·j¯Á¿ù»~: {:?}", e);
+                            return Err(anyhow!("Spotify ¿ù»~¡G·j¯Á¥¢±Ñ"));
                         }
                     };
     
@@ -1077,13 +1077,13 @@ impl SearchApp {
                         get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
                             .await
                             .map_err(|e| {
-                                error!("Osu æœç´¢éŒ¯èª¤: {:?}", e);
-                                anyhow!("Osu éŒ¯èª¤ï¼šæœç´¢å¤±æ•—")
+                                error!("Osu ·j¯Á¿ù»~: {:?}", e);
+                                anyhow!("Osu ¿ù»~¡G·j¯Á¥¢±Ñ")
                             })?;
     
-                    info!("Osu æœç´¢çµæœ: {} å€‹ beatmapsets", results.len());
+                    info!("Osu ·j¯Áµ²ªG: {} ­Ó beatmapsets", results.len());
                     if debug_mode {
-                        debug!("Osu æœç´¢çµæœè©³æƒ…: {:?}", results);
+                        debug!("Osu ·j¯Áµ²ªG¸Ô±¡: {:?}", results);
                     }
     
                     let mut osu_urls = Vec::new();
@@ -1095,11 +1095,11 @@ impl SearchApp {
                     *osu_search_results.lock().await = results;
     
                     if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
-                        error!("è¼‰å…¥ osu å°é¢æ™‚ç™¼ç”ŸéŒ¯èª¤: {:?}", e);
+                        error!("¸ü¤J osu «Ê­±®Éµo¥Í¿ù»~: {:?}", e);
                         if debug_mode {
                             ctx_clone.request_repaint();
                             egui::Window::new("Error").show(&ctx_clone, |ui| {
-                                ui.label("éƒ¨åˆ† osu å°é¢è¼‰å…¥å¤±æ•—:");
+                                ui.label("³¡¤À osu «Ê­±¸ü¤J¥¢±Ñ:");
                                 ui.label(format!("{:?}", e));
                             });
                         }
@@ -1127,8 +1127,8 @@ impl SearchApp {
                     if !search_results_guard.is_empty() {
                         for track in search_results_guard.iter() {
                             ui.horizontal(|ui| {
-                                ui.set_min_height(100.0); // å¢åŠ æœ€å°é«˜åº¦
-                                                          // é¡¯ç¤ºå°ˆè¼¯å°é¢
+                                ui.set_min_height(100.0); // ¼W¥[³Ì¤p°ª«×
+                                                          // Åã¥Ü±M¿è«Ê­±
                                 if let Some(cover_url) =
                                     &track.album.images.first().map(|img| &img.url)
                                 {
@@ -1137,7 +1137,7 @@ impl SearchApp {
 
                                     if let Ok(cache) = texture_cache.try_read() {
                                         if let Some(texture) = cache.get(*cover_url) {
-                                            let size = egui::Vec2::new(100.0, 100.0); // å¢åŠ åœ–ç‰‡å¤§å°
+                                            let size = egui::Vec2::new(100.0, 100.0); // ¼W¥[¹Ï¤ù¤j¤p
                                             ui.add(egui::Image::new(
                                                 egui::load::SizedTexture::new(texture.id(), size),
                                             ));
@@ -1165,32 +1165,32 @@ impl SearchApp {
                                 ui.vertical(|ui| {
                                     let (track_info, spotify_url) = print_track_info_gui(track);
 
-                                    // é¡¯ç¤ºæ›²ç›®åç¨±
+                                    // Åã¥Ü¦±¥Ø¦WºÙ
                                     ui.label(
                                         egui::RichText::new(&track_info.name)
                                             .strong()
                                             .size(self.global_font_size * 1.2),
                                     );
 
-                                    // é¡¯ç¤ºè—è¡“å®¶
+                                    // Åã¥ÜÃÀ³N®a
                                     ui.label(
                                         egui::RichText::new(&track_info.artists)
                                             .size(self.global_font_size),
                                     );
 
-                                    // é¡¯ç¤ºå°ˆè¼¯åç¨±
+                                    // Åã¥Ü±M¿è¦WºÙ
                                     ui.label(
                                         egui::RichText::new(&track_info.album)
                                             .size(self.global_font_size * 0.9),
                                     );
 
-                                    // æ·»åŠ é»æ“Šå’Œæ‹–å‹•çš„éŸ¿æ‡‰
+                                    // ²K¥[ÂIÀ»©M©ì°ÊªºÅTÀ³
                                     let response = ui.allocate_rect(
                                         ui.min_rect(),
                                         egui::Sense::click_and_drag(),
                                     );
 
-                                    // é›™æ“Š
+                                    // ÂùÀ»
                                     if response.double_clicked() {
                                         if let Some(url) = &spotify_url {
                                             if let Err(e) = open_spotify_url(url) {
@@ -1199,13 +1199,13 @@ impl SearchApp {
                                         }
                                     }
 
-                                    // å³éµèœå–®
-                                    // Spotify çµæœçš„å³éµèœå–®
+                                    // ¥kÁäµæ³æ
+                                    // Spotify µ²ªGªº¥kÁäµæ³æ
                                     response.context_menu(|ui| {
                                         self.create_context_menu(ui, |add_button| {
                                             if let Some(url) = &spotify_url {
                                                 add_button(
-                                                    "ğŸ”— Copy",
+                                                    "? Copy",
                                                     Box::new({
                                                         let url = url.clone();
                                                         move || {
@@ -1235,7 +1235,7 @@ impl SearchApp {
                                 });
                             });
 
-                            ui.add_space(15.0); // å¢åŠ é–“è·
+                            ui.add_space(15.0); // ¼W¥[¶¡¶Z
                             ui.separator();
                             ui.add_space(15.0);
                         }
@@ -1362,12 +1362,12 @@ impl SearchApp {
     }
 }
 #[tokio::main]
-async fn main() {
-    // åˆå§‹åŒ–æ—¥èªŒ
-    let log_file = std::fs::File::create("output.log").unwrap();
+async fn main() -> Result<(), AppError> {
+    // ªì©l¤Æ¤é»x
+    let log_file = std::fs::File::create("output.log")
+        .context("Failed to create log file")?;
     let mut config_builder = simplelog::ConfigBuilder::new();
-    let result = config_builder.set_time_offset_to_local();
-    if let Err(err) = result {
+    if let Err(err) = config_builder.set_time_offset_to_local() {
         eprintln!("Failed to set local time offset: {:?}", err);
     }
 
@@ -1388,26 +1388,18 @@ async fn main() {
         },
         config,
         log_file,
-    )
-    .unwrap();
+    ).context("Failed to initialize logger")?;
 
     info!("Welcome");
 
-    // è®€å–é…ç½®
-    let config_result = read_config(debug_mode);
-    let config_errors = match config_result {
-        Ok(_) => Vec::new(),
-        Err(e) => vec![e.to_string()],
-    };
+    // Åª¨ú°t¸m
+    let config_errors = Arc::new(Mutex::new(Vec::new()));
 
-    // å°‡éŒ¯èª¤ä¿¡æ¯å­˜å„²ï¼Œä»¥ä¾¿åœ¨ GUI ä¸­é¡¯ç¤º
-    let config_errors = Arc::new(Mutex::new(config_errors));
-
-    // åˆå§‹åŒ– HTTP å®¢æˆ¶ç«¯
+    // ªì©l¤Æ HTTP «È¤áºİ
     let client = Arc::new(tokio::sync::Mutex::new(Client::new()));
     let (sender, receiver) = tokio::sync::mpsc::channel(100);
 
-    // å®šç¾© cover_textures
+    // ©w¸q cover_textures
     let cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let need_repaint = Arc::new(AtomicBool::new(false));
@@ -1417,24 +1409,17 @@ async fn main() {
         title: Some(String::from("Search App")),
         inner_size: Some(egui::Vec2::new(730.0, 430.0)),
         min_inner_size: Some(egui::Vec2::new(730.0, 430.0)),
-        resizable: Some(true),       // å…è¨±èª¿æ•´è¦–çª—å¤§å°
-        maximize_button: Some(true), // é¡¯ç¤ºæœ€å¤§åŒ–æŒ‰éˆ•
+        resizable: Some(true),
+        maximize_button: Some(true),
         ..Default::default()
     };
 
-    // å°‡æ‰€æœ‰éœ€è¦çš„è®Šé‡ç§»å‹•åˆ°é–‰åŒ…å…§
-    let client = client.clone();
-    let sender = sender.clone();
-    let cover_textures = cover_textures.clone();
-    let need_repaint = need_repaint.clone();
-
-    // é‹è¡Œæ‡‰ç”¨
+    // ¹B¦æÀ³¥Î
     eframe::run_native(
         "Search App",
         native_options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            // è·Ÿéš¨ç³»çµ±ä¸»é¡Œ
             ctx.set_visuals(if dark_light::detect() == dark_light::Mode::Dark {
                 egui::Visuals::dark()
             } else {
@@ -1455,10 +1440,55 @@ async fn main() {
                 Ok(app) => Box::new(app),
                 Err(e) => {
                     eprintln!("Failed to create SearchApp: {}", e);
-                    Box::new(ErrorApp::new(format!("Failed to create SearchApp: {}", e)))
+                    Box::new(ErrorApp::new(e.to_string()))
                 }
             }
         }),
-    )
-    .unwrap_or_else(|e| eprintln!("Error running native app: {}", e));
+    ).map_err(|e| anyhow::anyhow!("Failed to run eframe: {}", e))?;
+
+    Ok(())
+}
+struct ErrorApp {
+    error: String,
+    font_size: f32,
+}
+
+impl ErrorApp {
+    fn new(error: String) -> Self {
+        Self { 
+            error,
+            font_size: 24.0,
+        }
+    }
+}
+
+impl eframe::App for ErrorApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ³]¸m¦rÅé
+        let mut fonts = FontDefinitions::default();
+        let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
+    
+        fonts.font_data.insert(
+            "jf-openhuninn".to_owned(),
+            FontData::from_owned(font_data.to_vec()),
+        );
+    
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+            family.insert(0, "jf-openhuninn".to_owned());
+        }
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+            family.insert(0, "jf-openhuninn".to_owned());
+        }
+    
+        ctx.set_fonts(fonts);
+
+        // Åã¥Ü¿ù»~°T®§
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() / 3.0);
+                ui.heading(egui::RichText::new("¿ù»~").size(self.font_size * 1.2).color(egui::Color32::RED));
+                ui.label(egui::RichText::new(&self.error).size(self.font_size));
+            });
+        });
+    }
 }
