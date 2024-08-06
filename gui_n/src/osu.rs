@@ -23,7 +23,7 @@ pub struct Covers {
     pub slimcover: Option<String>,
     pub slimcover_2x: Option<String>,
 }
-#[derive(Debug, Deserialize, Clone)] // ²K¥[ Clone
+#[derive(Debug, Deserialize, Clone)] // æ·»åŠ  Clone
 pub struct Beatmapset {
     pub beatmaps: Vec<Beatmap>,
     pub id: i32,
@@ -60,13 +60,13 @@ pub struct BeatmapInfo {
 
 #[derive(Error, Debug)]
 pub enum OsuError {
-    #[error("½Ğ¨D¿ù»~: {0}")]
+    #[error("è«‹æ±‚éŒ¯èª¤: {0}")]
     RequestError(#[from] reqwest::Error),
-    #[error("JSON ¸ÑªR¿ù»~: {0}")]
+    #[error("JSON è§£æéŒ¯èª¤: {0}")]
     JsonError(#[from] serde_json::Error),
-    #[error("°t¸m¿ù»~: {0}")]
+    #[error("é…ç½®éŒ¯èª¤: {0}")]
     ConfigError(String),
-    #[error("¨ä¥L¿ù»~: {0}")]
+    #[error("å…¶ä»–éŒ¯èª¤: {0}")]
     Other(String),
 }
 
@@ -88,7 +88,7 @@ pub async fn get_beatmapsets(
         .map_err(OsuError::RequestError)?;
 
     if debug_mode {
-        info!("Osu API ¦^À³ JSON: {}", response_text);
+        info!("Osu API å›æ‡‰ JSON: {}", response_text);
     }
 
     let search_response: SearchResponse = serde_json::from_str(&response_text)
@@ -116,7 +116,7 @@ pub async fn get_beatmapset_by_id(
         .map_err(OsuError::RequestError)?;
 
     if debug_mode {
-        info!("Osu API ¦^À³ JSON: {}", response_text);
+        info!("Osu API å›æ‡‰ JSON: {}", response_text);
     }
 
     let beatmapset: Beatmapset = serde_json::from_str(&response_text)
@@ -158,11 +158,11 @@ pub async fn get_beatmapset_details(
 }
 pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, OsuError> {
     if debug_mode {
-        debug!("¶}©lÀò¨ú Osu token");
+        debug!("é–‹å§‹ç²å– Osu token");
     }
 
     let config = read_config(debug_mode).map_err(|e| {
-        error!("Åª¨ú°t¸m¤å¥ó®É¥X¿ù: {}", e);
+        error!("è®€å–é…ç½®æ–‡ä»¶æ™‚å‡ºéŒ¯: {}", e);
         OsuError::ConfigError(format!("Error reading config: {}", e))
     })?;
 
@@ -170,7 +170,7 @@ pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, 
     let client_secret = &config.osu.client_secret;
 
     if debug_mode {
-        debug!("¦¨¥\Åª¨ú Osu client_id ©M client_secret");
+        debug!("æˆåŠŸè®€å– Osu client_id å’Œ client_secret");
     }
 
     let url = "https://osu.ppy.sh/oauth/token";
@@ -182,7 +182,7 @@ pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, 
     ];
 
     if debug_mode {
-        debug!("·Ç³Æµo°e Osu token ½Ğ¨D");
+        debug!("æº–å‚™ç™¼é€ Osu token è«‹æ±‚");
     }
 
     let response = client
@@ -191,7 +191,7 @@ pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, 
         .send()
         .await
         .map_err(|e| {
-            error!("µo°e Osu token ½Ğ¨D®É¥X¿ù: {}", e);
+            error!("ç™¼é€ Osu token è«‹æ±‚æ™‚å‡ºéŒ¯: {}", e);
             OsuError::RequestError(e)
         })?;
 
@@ -199,12 +199,12 @@ pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, 
         .json()
         .await
         .map_err(|e| {
-            error!("¸ÑªR Osu token ¦^À³®É¥X¿ù: {}", e);
+            error!("è§£æ Osu token å›æ‡‰æ™‚å‡ºéŒ¯: {}", e);
             OsuError::RequestError(e)
         })?;
 
     if debug_mode {
-        debug!("¦¨¥\Àò¨ú Osu token");
+        debug!("æˆåŠŸç²å– Osu token");
     }
 
     Ok(token_response.access_token)
@@ -260,14 +260,14 @@ pub async fn load_osu_covers(
     let mut errors = Vec::new();
 
     for (index, url) in urls.into_iter().enumerate() {
-        debug!("¥¿¦b¸ü¤J«Ê­±¡AURL: {}", url);
+        debug!("æ­£åœ¨è¼‰å…¥å°é¢ï¼ŒURL: {}", url);
         match client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
                     match response.bytes().await {
                         Ok(bytes) => match load_from_memory(&bytes) {
                             Ok(image) => {
-                                debug!("¦¨¥\±q°O¾ĞÅé¸ü¤J¹Ï¤ù¡AURL: {}", url);
+                                debug!("æˆåŠŸå¾è¨˜æ†¶é«”è¼‰å…¥åœ–ç‰‡ï¼ŒURL: {}", url);
                                 let color_image = ColorImage::from_rgba_unmultiplied(
                                     [image.width() as usize, image.height() as usize],
                                     &image.to_rgba8(),
@@ -280,30 +280,30 @@ pub async fn load_osu_covers(
                                 let texture = Arc::new(texture);
                                 let size = (image.width() as f32, image.height() as f32);
                                 if let Err(e) = sender.send((index, texture, size)).await {
-                                    error!("µo°e¯¾²z¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e);
-                                    errors.push(format!("µo°e¯¾²z¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e));
+                                    error!("ç™¼é€ç´‹ç†å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e);
+                                    errors.push(format!("ç™¼é€ç´‹ç†å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e));
                                 } else {
-                                    debug!("¦¨¥\µo°e¯¾²z¡AURL: {}", url);
+                                    debug!("æˆåŠŸç™¼é€ç´‹ç†ï¼ŒURL: {}", url);
                                 }
                             }
                             Err(e) => {
-                                error!("±q°O¾ĞÅé¸ü¤J¹Ï¤ù¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e);
-                                errors.push(format!("±q°O¾ĞÅé¸ü¤J¹Ï¤ù¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e));
+                                error!("å¾è¨˜æ†¶é«”è¼‰å…¥åœ–ç‰‡å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e);
+                                errors.push(format!("å¾è¨˜æ†¶é«”è¼‰å…¥åœ–ç‰‡å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e));
                             }
                         },
                         Err(e) => {
-                            error!("±q¦^À³Àò¨ú¦ì¤¸²Õ¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e);
-                            errors.push(format!("±q¦^À³Àò¨ú¦ì¤¸²Õ¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e));
+                            error!("å¾å›æ‡‰ç²å–ä½å…ƒçµ„å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e);
+                            errors.push(format!("å¾å›æ‡‰ç²å–ä½å…ƒçµ„å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e));
                         }
                     }
                 } else {
-                    error!("¸ü¤J«Ê­±¥¢±Ñ¡AURL: {}, ª¬ºA½X: {}", url, response.status());
-                    errors.push(format!("¸ü¤J«Ê­±¥¢±Ñ¡AURL: {}, ª¬ºA½X: {}", url, response.status()));
+                    error!("è¼‰å…¥å°é¢å¤±æ•—ï¼ŒURL: {}, ç‹€æ…‹ç¢¼: {}", url, response.status());
+                    errors.push(format!("è¼‰å…¥å°é¢å¤±æ•—ï¼ŒURL: {}, ç‹€æ…‹ç¢¼: {}", url, response.status()));
                 }
             }
             Err(e) => {
-                error!("µo°e½Ğ¨D¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e);
-                errors.push(format!("µo°e½Ğ¨D¥¢±Ñ¡AURL: {}, ¿ù»~: {:?}", url, e));
+                error!("ç™¼é€è«‹æ±‚å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e);
+                errors.push(format!("ç™¼é€è«‹æ±‚å¤±æ•—ï¼ŒURL: {}, éŒ¯èª¤: {:?}", url, e));
             }
         }
     }
