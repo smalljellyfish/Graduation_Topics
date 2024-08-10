@@ -10,9 +10,9 @@ use crate::spotify::{
     open_spotify_url, print_track_info_gui, search_track, update_currently_playing_wrapper, Album,
     AuthStatus, CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
-use lib::{read_config, ConfigError};
+use lib::{read_config, set_log_level, ConfigError};
 
-use anyhow::{anyhow, Result,Context};
+use anyhow::{anyhow, Context, Result};
 use clipboard::{ClipboardContext, ClipboardProvider};
 use eframe::{self, egui};
 use egui::TextureHandle;
@@ -20,7 +20,8 @@ use egui::TextureWrapMode;
 use egui::ViewportBuilder;
 use egui::{FontData, FontDefinitions, FontFamily};
 use tokio;
-
+use tokio::net::TcpListener;
+use tokio::sync::Mutex as TokioMutex;
 
 use log::{debug, error, info, LevelFilter};
 use reqwest::Client;
@@ -32,6 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::sync::{Arc, Mutex};
 
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
@@ -67,6 +69,63 @@ pub enum AppError {
     Other(String),
 }
 
+// 定義 AuthPlatform 列舉，用於標識不同的授權平台
+#[derive(Eq, PartialEq, Hash, Debug, Clone)]
+pub enum AuthPlatform {
+    Spotify,
+    // 未來可以添加其他平台
+}
+
+// 定義 AuthManager 結構，儲存授權狀態和錯誤記錄
+pub struct AuthManager {
+    status: Mutex<HashMap<AuthPlatform, AuthStatus>>,
+    error_logged: AtomicBool,
+}
+
+impl AuthManager {
+    pub fn new() -> Self {
+        let mut status = HashMap::new();
+        status.insert(AuthPlatform::Spotify, AuthStatus::NotStarted);
+        Self {
+            status: Mutex::new(status),
+            error_logged: AtomicBool::new(false),
+        }
+    }
+
+    pub fn reset(&self, platform: &AuthPlatform) {
+        let mut status = self.status.lock().unwrap();
+        status.insert(platform.clone(), AuthStatus::NotStarted);
+        self.error_logged.store(false, Ordering::Relaxed);
+    }
+
+    pub fn update_status(&self, platform: &AuthPlatform, new_status: AuthStatus) {
+        let mut status = self.status.lock().unwrap();
+        let old_status = status
+            .get(platform)
+            .cloned()
+            .unwrap_or(AuthStatus::NotStarted);
+        status.insert(platform.clone(), new_status.clone());
+
+        if let AuthStatus::Failed(ref error) = new_status {
+            if !matches!(old_status, AuthStatus::Failed(_))
+                && !self.error_logged.load(Ordering::Relaxed)
+            {
+                error!("{:?} 授權失敗: {}", platform, error);
+                self.error_logged.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn get_status(&self, platform: &AuthPlatform) -> AuthStatus {
+        self.status
+            .lock()
+            .unwrap()
+            .get(platform)
+            .cloned()
+            .unwrap_or(AuthStatus::NotStarted)
+    }
+}
+
 // 定義 SpotifySearchApp結構，儲存程式狀態和數據
 struct SearchApp {
     client: Arc<tokio::sync::Mutex<Client>>,
@@ -97,8 +156,13 @@ struct SearchApp {
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
     last_update: Arc<Mutex<Option<Instant>>>,
     spotify_authorized: Arc<AtomicBool>,
-    auth_status: Arc<Mutex<AuthStatus>>,
     show_auth_progress: bool,
+    auth_in_progress: bool,
+    listener: Arc<TokioMutex<Option<TcpListener>>>,
+    auth_complete_time: Option<std::time::Instant>,
+    auth_start_time: Option<Instant>,
+    auth_manager: Arc<AuthManager>,
+    auth_error: Option<String>,
 }
 
 impl eframe::App for SearchApp {
@@ -116,9 +180,11 @@ impl eframe::App for SearchApp {
             let sender_clone = self.sender.clone();
             let ctx_clone = ctx.clone();
             let debug_mode = self.debug_mode;
-        
+
             tokio::spawn(async move {
-                if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender_clone).await {
+                if let Err(e) =
+                    load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender_clone).await
+                {
                     error!("初始化時載入 osu 封面發生錯誤: {:?}", e);
                     if debug_mode {
                         ctx_clone.request_repaint();
@@ -128,11 +194,11 @@ impl eframe::App for SearchApp {
                     }
                 }
             });
-        
+
             let mut receiver = self.receiver.take().expect("Receiver already taken");
             let cover_textures = self.cover_textures.clone();
             let need_repaint_clone = self.need_repaint.clone();
-        
+
             tokio::spawn(async move {
                 while let Some((id, texture, dimensions)) = receiver.recv().await {
                     let mut textures = cover_textures.write().await;
@@ -140,16 +206,16 @@ impl eframe::App for SearchApp {
                     need_repaint_clone.store(true, Ordering::SeqCst);
                 }
             });
-        
+
             self.initialized = true;
-        
+
             let access_token = self.access_token.clone();
             let error_message = self.error_message.clone();
             let client_clone = client.clone();
             let debug_mode = self.debug_mode;
             let is_searching = self.is_searching.clone();
             let need_repaint = self.need_repaint.clone();
-        
+
             tokio::spawn(async move {
                 let client_guard = client_clone.lock().await;
                 match get_access_token(&*client_guard, debug_mode).await {
@@ -166,24 +232,24 @@ impl eframe::App for SearchApp {
                     }
                 }
             });
-        
+
             let mut fonts = FontDefinitions::default();
             let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
-        
+
             fonts.font_data.insert(
                 "jf-openhuninn".to_owned(),
                 FontData::from_owned(font_data.to_vec()),
             );
-        
+
             if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
                 family.insert(0, "jf-openhuninn".to_owned());
             }
             if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
                 family.insert(0, "jf-openhuninn".to_owned());
             }
-        
+
             ctx.set_fonts(fonts);
-        
+
             let ctx_clone = ctx.clone();
             let err_msg_clone = self.err_msg.clone();
             tokio::spawn(async move {
@@ -196,8 +262,25 @@ impl eframe::App for SearchApp {
                 }
             });
         }
+
+        // 顯示授權進度
         if self.show_auth_progress {
             self.show_auth_progress(ctx);
+        }
+
+        // 如果沒有錯誤且授權進度窗口應該顯示，則顯示授權進度
+        if self.auth_error.is_none() && self.show_auth_progress {
+            self.show_auth_progress(ctx);
+        }
+        // 檢查授權狀態並更新 auth_in_progress
+        if !self.auth_in_progress {
+            match self.auth_manager.get_status(&AuthPlatform::Spotify) {
+                AuthStatus::Completed | AuthStatus::Failed(_) => {
+                    self.show_auth_progress = false;
+                    self.auth_in_progress = false;
+                }
+                _ => {}
+            }
         }
 
         let mut should_close_error = false;
@@ -462,61 +545,12 @@ impl eframe::App for SearchApp {
 
         if self.search_query.trim().to_lowercase() == "debug" {
             self.debug_mode = !self.debug_mode; // 切換調試模式
-            self.set_log_level(); // 更新日誌級別
+            set_log_level(self.debug_mode); // 更新日誌級別
             self.search_query.clear(); // 清空搜索框
             info!("Debug mode: {}", self.debug_mode);
         }
-        egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                self.render_bottom_panel(ui);
-
-                // 在底部面板右側添加授權按鈕
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(10.0); // 添加一些右側間距
-                    let button_text = if self.spotify_authorized.load(Ordering::SeqCst) {
-                        "Spotify 已授權"
-                    } else {
-                        "授權 Spotify"
-                    };
-                    if ui
-                        .button(egui::RichText::new(button_text).size(14.0))
-                        .clicked()
-                    {
-                        if !self.spotify_authorized.load(Ordering::SeqCst) {
-                            self.show_auth_progress = true; // 設置為 true 以顯示進度窗口
-                            let spotify_client = self.spotify_client.clone();
-                            let debug_mode = self.debug_mode;
-                            let spotify_authorized = self.spotify_authorized.clone();
-                            let auth_status = self.auth_status.clone();
-                            let ctx = ctx.clone();
-
-                            tokio::spawn(async move {
-                                match authorize_spotify(
-                                    spotify_client,
-                                    debug_mode,
-                                    auth_status.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        info!("Spotify 授權成功");
-                                        spotify_authorized.store(true, Ordering::SeqCst);
-                                        let mut status = auth_status.lock().unwrap();
-                                        *status = AuthStatus::Completed;
-                                    }
-                                    Err(e) => {
-                                        error!("Spotify 授權失敗: {:?}", e);
-                                        let mut status = auth_status.lock().unwrap();
-                                        *status = AuthStatus::Failed(e.to_string());
-                                    }
-                                }
-                                ctx.request_repaint();
-                            });
-                        }
-                    }
-                });
-            });
-        });
+        // 渲染底部面板
+        self.render_bottom_panel(ctx);
 
         if self.should_update_current_playing() {
             let spotify_client = self.spotify_client.clone();
@@ -550,6 +584,23 @@ impl eframe::App for SearchApp {
                 ctx.request_repaint();
             });
         }
+        let status = self.auth_manager.get_status(&AuthPlatform::Spotify);
+        match status {
+            AuthStatus::Failed(ref reason) => {
+                if self.auth_error.is_none() {
+                    self.auth_error = Some(reason.clone());
+                }
+            }
+            AuthStatus::Completed => {
+                if self.show_auth_progress {
+                    self.show_auth_progress = false;
+                    info!("授權成功");
+                }
+            }
+            _ => {}
+        }
+
+        ctx.request_repaint();
     }
 }
 
@@ -636,26 +687,64 @@ impl SearchApp {
             currently_playing: Arc::new(Mutex::new(None)),
             last_update: Arc::new(Mutex::new(None)),
             spotify_authorized: Arc::new(AtomicBool::new(false)),
-            auth_status: Arc::new(Mutex::new(AuthStatus::NotStarted)),
             show_auth_progress: false,
             cover_load_errors: Arc::new(RwLock::new(HashMap::new())),
+            listener: Arc::new(TokioMutex::new(None)),
+            auth_in_progress: false,
+            auth_complete_time: None,
+            auth_start_time: None,
+            auth_manager: Arc::new(AuthManager::new()),
+            auth_error: None,
         })
     }
     //授權過程
     fn show_auth_progress(&mut self, ctx: &egui::Context) {
+        let mut should_retry = false;
+        let mut should_cancel = false;
+
+        let current_status = self.auth_manager.get_status(&AuthPlatform::Spotify);
+
+        // 檢查是否超時
+        if let Some(start_time) = self.auth_start_time {
+            if start_time.elapsed() > Duration::from_secs(5)
+                && matches!(
+                    current_status,
+                    AuthStatus::NotStarted | AuthStatus::WaitingForBrowser
+                )
+            {
+                self.auth_manager.update_status(
+                    &AuthPlatform::Spotify,
+                    AuthStatus::Failed("授權超時".to_string()),
+                );
+            }
+        }
+
+        let open = RefCell::new(true); // 始終保持視窗開啟
         egui::Window::new("Spotify 授權進度")
             .collapsible(false)
             .resizable(false)
+            .open(&mut *open.borrow_mut())
             .show(ctx, |ui| {
-                let status = self.auth_status.lock().unwrap().clone(); // Clone to avoid holding the lock
-                match status {
-                    AuthStatus::NotStarted => {
-                        ui.label("準備開始授權...");
-                        ui.add(egui::ProgressBar::new(0.0).animate(true));
-                    }
-                    AuthStatus::WaitingForBrowser => {
-                        ui.label("請在瀏覽器中完成授權...");
-                        ui.add(egui::ProgressBar::new(0.25).animate(true));
+                match current_status {
+                    AuthStatus::NotStarted | AuthStatus::WaitingForBrowser => {
+                        ui.label("請於5秒內完成授權");
+                        if let Some(start_time) = self.auth_start_time {
+                            let elapsed = start_time.elapsed();
+                            let remaining = Duration::from_secs(5)
+                                .checked_sub(elapsed)
+                                .unwrap_or_default();
+                            if remaining.as_secs() > 0 {
+                                ui.label(format!("剩餘時間: {} 秒", remaining.as_secs()));
+                                ui.add(
+                                    egui::ProgressBar::new(
+                                        1.0 - (remaining.as_secs() as f32 / 5.0),
+                                    )
+                                    .animate(true),
+                                );
+                            }
+                        } else {
+                            self.auth_start_time = Some(Instant::now());
+                        }
                     }
                     AuthStatus::Processing => {
                         ui.label("正在處理授權...");
@@ -673,23 +762,92 @@ impl SearchApp {
                         }
                     }
                     AuthStatus::Failed(ref error) => {
-                        ui.label(format!("授權失敗: {}", error));
+                        ui.label(
+                            egui::RichText::new(format!("授權失敗: {}", error))
+                                .color(egui::Color32::RED),
+                        );
+                        ui.add(egui::ProgressBar::new(1.0).fill(egui::Color32::RED));
+                        if ui.button("重新嘗試").clicked() {
+                            should_retry = true;
+                        }
+                        ui.add_space(10.0);
                         if ui.button("關閉").clicked() {
                             self.show_auth_progress = false;
                         }
                     }
                 }
+
+                if matches!(
+                    current_status,
+                    AuthStatus::WaitingForBrowser
+                        | AuthStatus::Processing
+                        | AuthStatus::TokenObtained
+                ) {
+                    ui.add_space(10.0);
+                    if ui.button("取消授權").clicked() {
+                        should_cancel = true;
+                    }
+                    ui.add_space(10.0);
+                    if ui.button("重試授權").clicked() {
+                        should_retry = true;
+                    }
+                }
             });
+
+        if should_retry {
+            self.retry_authorization();
+            self.auth_start_time = Some(Instant::now());
+        }
+
+        if should_cancel {
+            self.cancel_authorization();
+            self.show_auth_progress = false;
+        }
+
+        ctx.request_repaint();
     }
-    //設置日誌級別
-    fn set_log_level(&self) {
-        let log_level = if self.debug_mode {
-            LevelFilter::Debug
-        } else {
-            LevelFilter::Info
-        };
-        log::set_max_level(log_level);
+
+    fn retry_authorization(&mut self) {
+        self.auth_manager.reset(&AuthPlatform::Spotify);
+        self.auth_start_time = Some(Instant::now());
+        self.auth_complete_time = None;
+
+        let spotify_client = self.spotify_client.clone();
+        let auth_manager = self.auth_manager.clone();
+        let listener = self.listener.clone();
+        let debug_mode = self.debug_mode;
+
+        tokio::spawn(async move {
+            if let Err(e) =
+                authorize_spotify(spotify_client, debug_mode, auth_manager, listener).await
+            {
+                error!("重試授權失敗: {:?}", e);
+            }
+        });
     }
+
+    fn cancel_authorization(&mut self) {
+        self.auth_manager.update_status(
+            &AuthPlatform::Spotify,
+            AuthStatus::Failed("用戶取消授權".to_string()),
+        );
+        self.auth_start_time = None;
+        self.auth_complete_time = None;
+
+        if let Ok(mut listener_guard) = self.listener.try_lock() {
+            *listener_guard = None;
+        }
+
+        if let Ok(mut spotify_client) = self.spotify_client.try_lock() {
+            *spotify_client = None;
+        }
+
+        error!("用戶取消了授權流程");
+
+        // 確保取消授權後窗口保持開啟
+        self.show_auth_progress = true;
+    }
+
     //顯示SETTINGS
     fn show_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("設置");
@@ -716,7 +874,7 @@ impl SearchApp {
         ui.checkbox(&mut debug_mode, "Debug Mode");
         if debug_mode != self.debug_mode {
             self.debug_mode = debug_mode;
-            self.set_log_level();
+            set_log_level(self.debug_mode);
             info!("Debug mode: {}", self.debug_mode);
         }
 
@@ -725,35 +883,14 @@ impl SearchApp {
 
     fn should_update_current_playing(&self) -> bool {
         let mut last_update = self.last_update.lock().unwrap();
-        if last_update.is_none() || last_update.unwrap().elapsed() > Duration::from_secs(30) {
+        if last_update.is_none() || last_update.unwrap().elapsed() > Duration::from_secs(10) {
             *last_update = Some(Instant::now());
             true
         } else {
             false
         }
     }
-
-    fn render_bottom_panel(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let current_playing = self.currently_playing.lock().unwrap();
-            if let Some(current_playing) = current_playing.as_ref() {
-                if let Some(spotify_icon) = &self.spotify_icon {
-                    let size = egui::vec2(24.0, 24.0);
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
-                        spotify_icon.id(),
-                        size,
-                    )));
-                }
-                ui.label(format!(
-                    "正在播放: {} - {}",
-                    current_playing.track_info.artists, current_playing.track_info.name
-                ));
-            } else {
-                ui.label("當前沒有正在播放的曲目");
-            }
-        });
-    }
-
+    //創建右鍵選單
     fn create_context_menu<F>(&self, ui: &mut egui::Ui, content: F)
     where
         F: FnOnce(&mut dyn FnMut(&str, Box<dyn FnOnce() + '_>)),
@@ -809,9 +946,10 @@ impl SearchApp {
         Some(ctx.load_texture(url, color_image, texture_options))
     }
 
+    //處理搜尋
     fn perform_search(&mut self, ctx: egui::Context) -> JoinHandle<Result<()>> {
-        self.set_log_level(); // 設置日誌級別
-    
+        set_log_level(self.debug_mode); // 設置日誌級別
+
         let client = self.client.clone();
         let debug_mode = self.debug_mode;
         let query = self.search_query.clone();
@@ -821,12 +959,12 @@ impl SearchApp {
         let need_repaint = self.need_repaint.clone();
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
-        let ctx_clone = ctx.clone();  // 在這裡克隆 ctx
-    
+        let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
+
         info!("使用者搜尋: {}", query);
-    
+
         is_searching.store(true, Ordering::SeqCst);
-    
+
         tokio::spawn(async move {
             let result: Result<()> = async {
                 let mut error = err_msg.lock().await;
@@ -834,7 +972,7 @@ impl SearchApp {
                 if debug_mode {
                     debug!("除錯模式開啟");
                 }
-    
+
                 let spotify_token = get_access_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| match e {
@@ -844,17 +982,17 @@ impl SearchApp {
                         SpotifyError::RequestError(e) => anyhow!("Spotify 請求錯誤：{}", e),
                         _ => anyhow!("Spotify 錯誤：{}", e),
                     })?;
-    
+
                 let osu_token = get_osu_token(&*client.lock().await, debug_mode)
                     .await
                     .map_err(|e| {
                         error!("獲取 Osu token 錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：無法獲取 token")
                     })?;
-    
+
                 if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
                     info!("Osu 搜尋: {}", query);
-    
+
                     // 如果是 osu! URL，獲取譜面信息並進行反搜索
                     let (artist, title) = get_beatmapset_details(
                         &*client.lock().await,
@@ -867,10 +1005,10 @@ impl SearchApp {
                         error!("獲取 Osu 譜面詳情錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：獲取譜面詳情失敗")
                     })?;
-                    
+
                     let spotify_query = format!("{} {}", artist, title);
                     info!("Spotify 查詢 (從 osu): {}", spotify_query);
-    
+
                     // 使用獲取的 artist 和 title 進行 Spotify 搜索
                     let tracks_with_cover = search_track(
                         &*client.lock().await,
@@ -886,7 +1024,7 @@ impl SearchApp {
                         error!("Spotify 反搜索錯誤: {:?}", e);
                         anyhow!("Spotify 錯誤：反搜索失敗")
                     })?;
-    
+
                     // 更新 Spotify 搜索結果
                     let mut search_results = search_results.lock().await;
                     *search_results = tracks_with_cover
@@ -917,7 +1055,7 @@ impl SearchApp {
                             external_urls: twc.external_urls.clone(),
                         })
                         .collect();
-    
+
                     // 獲取 osu! beatmapset
                     let beatmapset = get_beatmapset_by_id(
                         &*client.lock().await,
@@ -930,16 +1068,18 @@ impl SearchApp {
                         error!("獲取 Osu 譜面錯誤: {:?}", e);
                         anyhow!("Osu 錯誤：獲取譜面失敗")
                     })?;
-    
+
                     let results = vec![beatmapset];
                     *osu_search_results.lock().await = results.clone();
-    
+
                     let mut osu_urls = Vec::new();
                     if let Some(cover_url) = &results[0].covers.cover {
                         osu_urls.push(cover_url.clone());
                     }
-    
-                    if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
+
+                    if let Err(e) =
+                        load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await
+                    {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
                             ctx_clone.request_repaint();
@@ -970,7 +1110,7 @@ impl SearchApp {
                                     )
                                     .await
                                     .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
-    
+
                                     Ok(vec![TrackWithCover {
                                         name: track.name.clone(),
                                         artists: track.artists.clone(),
@@ -988,6 +1128,10 @@ impl SearchApp {
                                     return Ok(());
                                 }
                                 SpotifyUrlStatus::Invalid => {
+                                    *error = "無效的 Spotify URL".to_string();
+                                    return Ok(());
+                                }
+                                SpotifyUrlStatus::NotSpotify => {
                                     // 執行普通搜索
                                     if !query.is_empty() {
                                         info!("Spotify 查詢 (關鍵字): {}", query);
@@ -1046,7 +1190,7 @@ impl SearchApp {
                                     external_urls: twc.external_urls.clone(),
                                 })
                                 .collect();
-    
+
                             if matches!(is_valid_spotify_url(&query), Ok(SpotifyUrlStatus::Valid))
                                 && !tracks_with_cover.is_empty()
                             {
@@ -1072,7 +1216,7 @@ impl SearchApp {
                             return Err(anyhow!("Spotify 錯誤：搜索失敗"));
                         }
                     };
-    
+
                     let results =
                         get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
                             .await
@@ -1080,12 +1224,12 @@ impl SearchApp {
                                 error!("Osu 搜索錯誤: {:?}", e);
                                 anyhow!("Osu 錯誤：搜索失敗")
                             })?;
-    
+
                     info!("Osu 搜索結果: {} 個 beatmapsets", results.len());
                     if debug_mode {
                         debug!("Osu 搜索結果詳情: {:?}", results);
                     }
-    
+
                     let mut osu_urls = Vec::new();
                     for beatmapset in &results {
                         if let Some(cover_url) = &beatmapset.covers.cover {
@@ -1093,8 +1237,10 @@ impl SearchApp {
                         }
                     }
                     *osu_search_results.lock().await = results;
-    
-                    if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
+
+                    if let Err(e) =
+                        load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await
+                    {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
                             ctx_clone.request_repaint();
@@ -1105,16 +1251,16 @@ impl SearchApp {
                         }
                     }
                 }
-    
+
                 Ok(())
             }
             .await;
-    
+
             if let Err(e) = &result {
                 let mut error = err_msg.lock().await;
                 *error = e.to_string();
             }
-    
+
             is_searching.store(false, Ordering::SeqCst);
             need_repaint.store(true, Ordering::SeqCst);
             result
@@ -1252,7 +1398,7 @@ impl SearchApp {
                         if let Some(selected_index) = self.selected_beatmapset {
                             let selected_beatmapset = &osu_search_results_guard[selected_index];
                             let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
-    
+
                             ui.heading(
                                 egui::RichText::new(format!(
                                     "{} - {}",
@@ -1265,7 +1411,7 @@ impl SearchApp {
                                     .font(egui::FontId::proportional(self.global_font_size * 0.9)),
                             );
                             ui.add_space(10.0);
-    
+
                             for beatmap_info in beatmap_info.beatmaps {
                                 ui.add_space(10.0);
                                 ui.label(
@@ -1294,16 +1440,18 @@ impl SearchApp {
                                         .frame(false)
                                         .min_size(egui::vec2(ui.available_width(), 100.0)),
                                 );
-    
+
                                 if response.clicked() {
                                     self.selected_beatmapset = Some(index);
                                 }
-    
+
                                 ui.allocate_ui_at_rect(response.rect, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
                                             if let Ok(textures) = self.cover_textures.try_read() {
-                                                if let Some(Some((texture, size))) = textures.get(&index) {
+                                                if let Some(Some((texture, size))) =
+                                                    textures.get(&index)
+                                                {
                                                     let max_height = 100.0;
                                                     let aspect_ratio = size.0 / size.1;
                                                     let image_size = egui::Vec2::new(
@@ -1311,9 +1459,14 @@ impl SearchApp {
                                                         max_height,
                                                     );
                                                     ui.image((texture.id(), image_size));
-                                                } else if let Ok(errors) = self.cover_load_errors.try_read() {
+                                                } else if let Ok(errors) =
+                                                    self.cover_load_errors.try_read()
+                                                {
                                                     if let Some(error_msg) = errors.get(&index) {
-                                                        ui.label(egui::RichText::new(error_msg).color(egui::Color32::RED));
+                                                        ui.label(
+                                                            egui::RichText::new(error_msg)
+                                                                .color(egui::Color32::RED),
+                                                        );
                                                     } else {
                                                         ui.label("Loading...");
                                                     }
@@ -1322,9 +1475,9 @@ impl SearchApp {
                                                 }
                                             }
                                         });
-    
+
                                         ui.add_space(10.0);
-    
+
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 egui::RichText::new(&beatmapset.title)
@@ -1350,7 +1503,7 @@ impl SearchApp {
                                         });
                                     });
                                 });
-    
+
                                 ui.add_space(5.0);
                                 ui.separator();
                             }
@@ -1360,12 +1513,100 @@ impl SearchApp {
             });
         });
     }
+
+    // 渲染底部面板
+    fn render_bottom_panel(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                self.render_bottom_panel_content(ui, ctx);
+            });
+        });
+    }
+
+    // 渲染底部面板內容
+    fn render_bottom_panel_content(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // 顯示當前播放的曲目信息
+        if let Ok(current_playing) = self.currently_playing.lock() {
+            if let Some(current_playing) = current_playing.as_ref() {
+                if let Some(spotify_icon) = &self.spotify_icon {
+                    let size = egui::vec2(24.0, 24.0);
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                        spotify_icon.id(),
+                        size,
+                    )));
+                }
+                ui.label(format!(
+                    "正在播放: {} - {}",
+                    current_playing.track_info.artists, current_playing.track_info.name
+                ));
+            } else {
+                ui.label("當前沒有正在播放的曲目");
+            }
+        }
+
+        // 在底部面板右側添加授權按鈕
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(10.0);
+            let button_text = if self.spotify_authorized.load(Ordering::SeqCst) {
+                "Spotify 已授權"
+            } else {
+                "授權 Spotify"
+            };
+            if ui
+                .button(egui::RichText::new(button_text).size(14.0))
+                .clicked()
+            {
+                if !self.spotify_authorized.load(Ordering::SeqCst) && !self.auth_in_progress {
+                    self.auth_in_progress = true;
+                    self.show_auth_progress = true;
+                    self.auth_manager.reset(&AuthPlatform::Spotify);
+                    let spotify_client = self.spotify_client.clone();
+                    let debug_mode = self.debug_mode;
+                    let spotify_authorized = self.spotify_authorized.clone();
+                    let auth_manager = self.auth_manager.clone();
+                    let listener = self.listener.clone();
+                    let ctx = ctx.clone();
+                    let auth_in_progress = Arc::new(AtomicBool::new(true));
+                    let auth_in_progress_clone = auth_in_progress.clone();
+
+                    tokio::spawn(async move {
+                        let result = authorize_spotify(
+                            spotify_client,
+                            debug_mode,
+                            auth_manager.clone(),
+                            listener,
+                        )
+                        .await;
+
+                        match result {
+                            Ok(()) => {
+                                info!("Spotify 授權成功");
+                                spotify_authorized.store(true, Ordering::SeqCst);
+                                auth_manager
+                                    .update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+                            }
+                            Err(e) => {
+                                error!("Spotify 授權失敗: {:?}", e);
+                                auth_manager.update_status(
+                                    &AuthPlatform::Spotify,
+                                    AuthStatus::Failed(e.to_string()),
+                                );
+                            }
+                        }
+
+                        auth_in_progress_clone.store(false, Ordering::SeqCst);
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        });
+    }
 }
+
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     // 初始化日誌
-    let log_file = std::fs::File::create("output.log")
-        .context("Failed to create log file")?;
+    let log_file = std::fs::File::create("output.log").context("Failed to create log file")?;
     let mut config_builder = simplelog::ConfigBuilder::new();
     if let Err(err) = config_builder.set_time_offset_to_local() {
         eprintln!("Failed to set local time offset: {:?}", err);
@@ -1388,7 +1629,8 @@ async fn main() -> Result<(), AppError> {
         },
         config,
         log_file,
-    ).context("Failed to initialize logger")?;
+    )
+    .context("Failed to initialize logger")?;
 
     info!("Welcome");
 
@@ -1444,7 +1686,8 @@ async fn main() -> Result<(), AppError> {
                 }
             }
         }),
-    ).map_err(|e| anyhow::anyhow!("Failed to run eframe: {}", e))?;
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to run eframe: {}", e))?;
 
     Ok(())
 }
@@ -1455,7 +1698,7 @@ struct ErrorApp {
 
 impl ErrorApp {
     fn new(error: String) -> Self {
-        Self { 
+        Self {
             error,
             font_size: 24.0,
         }
@@ -1467,26 +1710,30 @@ impl eframe::App for ErrorApp {
         // 設置字體
         let mut fonts = FontDefinitions::default();
         let font_data = include_bytes!("jf-openhuninn-2.0.ttf");
-    
+
         fonts.font_data.insert(
             "jf-openhuninn".to_owned(),
             FontData::from_owned(font_data.to_vec()),
         );
-    
+
         if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
             family.insert(0, "jf-openhuninn".to_owned());
         }
         if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
             family.insert(0, "jf-openhuninn".to_owned());
         }
-    
+
         ctx.set_fonts(fonts);
 
         // 顯示錯誤訊息
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() / 3.0);
-                ui.heading(egui::RichText::new("錯誤").size(self.font_size * 1.2).color(egui::Color32::RED));
+                ui.heading(
+                    egui::RichText::new("錯誤")
+                        .size(self.font_size * 1.2)
+                        .color(egui::Color32::RED),
+                );
                 ui.label(egui::RichText::new(&self.error).size(self.font_size));
             });
         });

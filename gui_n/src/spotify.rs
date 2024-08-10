@@ -1,3 +1,4 @@
+use crate::{AuthManager, AuthPlatform};
 use anyhow::{anyhow, Error, Result};
 use lazy_static::lazy_static;
 use log::{debug, error, info};
@@ -14,14 +15,23 @@ use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
+use std::fs;
+use std::net::SocketAddr;
 use std::process::Command;
 use std::ptr;
 
+use tokio::sync::Mutex as TokioMutex;
+
+use serde_json::Value;
+
 use std::future::Future;
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{self, Write};
 use std::pin::Pin;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::time::timeout;
 use url::Url;
 
@@ -55,23 +65,31 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SpotifyError {
-    #[error("Àò¨ú access token ¥¢±Ñ: {0}")]
+    #[error("ç²å– access token å¤±æ•—: {0}")]
     AccessTokenError(String),
-    #[error("½Ğ¨D¥¢±Ñ: {0}")]
+    #[error("è«‹æ±‚å¤±æ•—: {0}")]
     RequestError(#[from] reqwest::Error),
-    #[error("JSON ¸ÑªR¿ù»~: {0}")]
+    #[error("JSON è§£æéŒ¯èª¤: {0}")]
     JsonError(#[from] serde_json::Error),
-    #[error("IO ¿ù»~: {0}")]
+    #[error("IO éŒ¯èª¤: {0}")]
     IoError(String),
-    #[error("URL ¸ÑªR¿ù»~: {0}")]
+    #[error("URL è§£æéŒ¯èª¤: {0}")]
     UrlParseError(#[from] url::ParseError),
-    #[error("Spotify API ¿ù»~: {0}")]
+    #[error("Spotify API éŒ¯èª¤: {0}")]
     ApiError(String),
-    #[error("±ÂÅv¿ù»~: {0}")]
+    #[error("æˆæ¬ŠéŒ¯èª¤: {0}")]
     AuthorizationError(String),
+    #[error("é…ç½®éŒ¯èª¤: {0}")]
+    ConfigError(String),
+}
+//å°‡std::io::Errorè½‰æ›ç‚ºSpotifyErrorçš„io error
+impl From<io::Error> for SpotifyError {
+    fn from(error: io::Error) -> Self {
+        SpotifyError::IoError(error.to_string())
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone,PartialEq)]
 pub enum AuthStatus {
     NotStarted,
     WaitingForBrowser,
@@ -168,6 +186,7 @@ pub enum SpotifyUrlStatus {
     Valid,
     Incomplete,
     Invalid,
+    NotSpotify,
 }
 
 #[derive(Debug, Clone)]
@@ -179,16 +198,32 @@ pub struct CurrentlyPlaying {
 pub fn is_valid_spotify_url(url: &str) -> Result<SpotifyUrlStatus, SpotifyError> {
     lazy_static! {
         static ref SPOTIFY_URL_REGEX: Regex = Regex::new(
-            r"^https?://open\.spotify\.com/(track|album|playlist)/([a-zA-Z0-9]+)(?:\?.*)?$"
-        ).unwrap();
+            r"^https?://open\.spotify\.com/(track|album|playlist)/[a-zA-Z0-9]+(?:\?.*)?$"
+        )
+        .unwrap();
     }
 
-    if SPOTIFY_URL_REGEX.is_match(url) {
-        Ok(SpotifyUrlStatus::Valid)
-    } else if url.starts_with("https://open.spotify.com/") {
-        Ok(SpotifyUrlStatus::Incomplete)
+    if let Ok(parsed_url) = url::Url::parse(url) {
+        match parsed_url.domain() {
+            Some("open.spotify.com") => {
+                if SPOTIFY_URL_REGEX.is_match(url) {
+                    Ok(SpotifyUrlStatus::Valid)
+                } else {
+                    Ok(SpotifyUrlStatus::Incomplete)
+                }
+            }
+            Some(_) => {
+                if url.contains("/track/") || url.contains("/album/") || url.contains("/playlist/")
+                {
+                    Ok(SpotifyUrlStatus::Invalid)
+                } else {
+                    Ok(SpotifyUrlStatus::NotSpotify)
+                }
+            }
+            None => Ok(SpotifyUrlStatus::NotSpotify),
+        }
     } else {
-        Ok(SpotifyUrlStatus::Invalid)
+        Ok(SpotifyUrlStatus::NotSpotify)
     }
 }
 /*
@@ -204,14 +239,14 @@ pub async fn search_album_by_url(
             Some(m) => Ok(m.as_str().to_string()),
             None => {
                 let mut err_msg = ERR_MSG.lock().unwrap();
-                *err_msg = "URLºÃ¦ü¿ù»~¡A½Ğ­«·s¿é¤J".to_string();
-                Err("URLºÃ¦ü¿ù»~¡A½Ğ­«·s¿é¤J".into())
+                *err_msg = "URLç–‘ä¼¼éŒ¯èª¤ï¼Œè«‹é‡æ–°è¼¸å…¥".to_string();
+                Err("URLç–‘ä¼¼éŒ¯èª¤ï¼Œè«‹é‡æ–°è¼¸å…¥".into())
             }
         },
         None => {
             let mut err_msg = ERR_MSG.lock().unwrap();
-            *err_msg = "URLºÃ¦ü¿ù»~¡A½Ğ­«·s¿é¤J".to_string();
-            Err("URLºÃ¦ü¿ù»~¡A½Ğ­«·s¿é¤J".into())
+            *err_msg = "URLç–‘ä¼¼éŒ¯èª¤ï¼Œè«‹é‡æ–°è¼¸å…¥".to_string();
+            Err("URLç–‘ä¼¼éŒ¯èª¤ï¼Œè«‹é‡æ–°è¼¸å…¥".into())
         }
     };
 
@@ -335,31 +370,37 @@ pub async fn search_track(
         SPOTIFY_API_BASE_URL, query, limit, offset
     );
 
-    let response = client.get(&url).bearer_auth(token).send().await
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
         .map_err(|e| SpotifyError::RequestError(e))?;
 
     if debug_mode {
-        info!("Spotify API ½Ğ¨D¸Ô±¡:");
+        info!("Spotify API è«‹æ±‚è©³æƒ…:");
         info!("  URL: {}", url);
-        info!("¦¬¨ì¦^À³ª¬ºA½X: {}", response.status());
+        info!("æ”¶åˆ°å›æ‡‰ç‹€æ…‹ç¢¼: {}", response.status());
     }
 
-    let response_text = response.text().await
+    let response_text = response
+        .text()
+        .await
         .map_err(|e| SpotifyError::RequestError(e))?;
 
     if debug_mode {
-        info!("Spotify API ¦^À³ JSON: {}", response_text);
+        info!("Spotify API å›æ‡‰ JSON: {}", response_text);
     }
 
-    let search_result: SearchResult = serde_json::from_str(&response_text)
-        .map_err(|e| SpotifyError::JsonError(e))?;
+    let search_result: SearchResult =
+        serde_json::from_str(&response_text).map_err(|e| SpotifyError::JsonError(e))?;
 
     match search_result.tracks {
         Some(tracks) => {
             let total_pages = (tracks.total + limit - 1) / limit;
 
             if debug_mode {
-                info!("§ä¨ì {} ­º¦±¥Ø¡A¦@ {} ­¶", tracks.total, total_pages);
+                info!("æ‰¾åˆ° {} é¦–æ›²ç›®ï¼Œå…± {} é ", tracks.total, total_pages);
             }
 
             let mut track_infos: Vec<TrackWithCover> = Vec::new();
@@ -377,12 +418,12 @@ pub async fn search_track(
                 if cover_url.is_none() {
                     error_occurred = true;
                     error!(
-                        "³B²z¦±¥Ø®É¥X¿ù: \"{}\" by {} - ¯Ê¤Ö«Ê­± URL",
+                        "è™•ç†æ›²ç›®æ™‚å‡ºéŒ¯: \"{}\" by {} - ç¼ºå°‘å°é¢ URL",
                         track.name, artists_names
                     );
                 } else if debug_mode {
-                    info!("³B²z¦±¥Ø: \"{}\" by {}", track.name, artists_names);
-                    info!("  ±M¿è«Ê­± URL: {}", cover_url.as_ref().unwrap());
+                    info!("è™•ç†æ›²ç›®: \"{}\" by {}", track.name, artists_names);
+                    info!("  å°ˆè¼¯å°é¢ URL: {}", cover_url.as_ref().unwrap());
                 }
 
                 track_infos.push(TrackWithCover {
@@ -395,24 +436,27 @@ pub async fn search_track(
             }
 
             if error_occurred {
-                error!("³¡¤À¦±¥Ø³B²z¥X¿ù¡A½ĞÀË¬d¿ù»~¤é»x");
+                error!("éƒ¨åˆ†æ›²ç›®è™•ç†å‡ºéŒ¯ï¼Œè«‹æª¢æŸ¥éŒ¯èª¤æ—¥èªŒ");
             } else if debug_mode {
-                info!("¦¨¥\³B²z {} ­º¦±¥Ø", track_infos.len());
+                info!("æˆåŠŸè™•ç† {} é¦–æ›²ç›®", track_infos.len());
             }
 
             Ok((track_infos, total_pages))
         }
-        None => Err(SpotifyError::ApiError("·j¯Áµ²ªG¤¤¨S¦³§ä¨ì¦±¥Ø".to_string())),
+        None => Err(SpotifyError::ApiError("æœç´¢çµæœä¸­æ²’æœ‰æ‰¾åˆ°æ›²ç›®".to_string())),
     }
 }
 
-pub async fn get_access_token(client: &reqwest::Client, debug_mode: bool) -> Result<String, SpotifyError> {
+pub async fn get_access_token(
+    client: &reqwest::Client,
+    debug_mode: bool,
+) -> Result<String, SpotifyError> {
     let config = read_config(debug_mode).map_err(|e| SpotifyError::IoError(e.to_string()))?;
     let client_id = &config.spotify.client_id;
     let client_secret = &config.spotify.client_secret;
 
     if debug_mode {
-        debug!("¥¿¦bÀò¨ú Spotify access token");
+        debug!("æ­£åœ¨ç²å– Spotify access token");
     }
 
     let auth_url = SPOTIFY_AUTH_URL;
@@ -424,19 +468,19 @@ pub async fn get_access_token(client: &reqwest::Client, debug_mode: bool) -> Res
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body);
 
-        let response = request.send().await.map_err(SpotifyError::RequestError)?;
+    let response = request.send().await.map_err(SpotifyError::RequestError)?;
 
-        if response.status().is_success() {
-            let auth_response: AuthResponse = response.json().await?;  // ³o¸Ìª½±µ¨Ï¥Î ?
-            if debug_mode {
-                debug!("¦¨¥\Àò¨ú Spotify access token");
-            }
-            Ok(auth_response.access_token)
-        } else {
-            let error_text = response.text().await.map_err(SpotifyError::RequestError)?;
-            error!("Àò¨ú token ½Ğ¨D¥¢±Ñ: {}", error_text);
-            Err(SpotifyError::AccessTokenError(error_text))
+    if response.status().is_success() {
+        let auth_response: AuthResponse = response.json().await?; // é€™è£¡ç›´æ¥ä½¿ç”¨ ?
+        if debug_mode {
+            debug!("æˆåŠŸç²å– Spotify access token");
         }
+        Ok(auth_response.access_token)
+    } else {
+        let error_text = response.text().await.map_err(SpotifyError::RequestError)?;
+        error!("ç²å– token è«‹æ±‚å¤±æ•—: {}", error_text);
+        Err(SpotifyError::AccessTokenError(error_text))
+    }
 }
 
 pub fn open_spotify_url(url: &str) -> io::Result<()> {
@@ -521,7 +565,7 @@ pub fn open_spotify_url(url: &str) -> io::Result<()> {
 }
 pub fn open_url_default_browser(url: &str) -> io::Result<()> {
     if cfg!(target_os = "windows") {
-        // ¨Ï¥Î PowerShell ¨Ó¥´¶} URL
+        // ä½¿ç”¨ PowerShell ä¾†æ‰“é–‹ URL
         Command::new("powershell")
             .arg("-Command")
             .arg(format!("Start-Process '{}'", url))
@@ -614,8 +658,8 @@ pub async fn update_current_playing(
         }
         Ok(None) => Ok(None),
         Err(e) => {
-            error!("Àò¨ú·í«e¼½©ñ«H®§®Éµo¥Í¿ù»~: {:?}", e);
-            Err(anyhow!("Àò¨ú·í«e¼½©ñ«H®§¥¢±Ñ"))
+            error!("ç²å–ç•¶å‰æ’­æ”¾ä¿¡æ¯æ™‚ç™¼ç”ŸéŒ¯èª¤: {:?}", e);
+            Err(anyhow!("ç²å–ç•¶å‰æ’­æ”¾ä¿¡æ¯å¤±æ•—"))
         }
     }
 }
@@ -632,7 +676,7 @@ pub async fn update_currently_playing_wrapper(
     let update_result = if let Some(spotify) = spotify_ref {
         update_current_playing(&spotify, currently_playing.clone(), debug_mode).await
     } else {
-        Err(anyhow!("Spotify «È¤áºİ¥¼ªì©l¤Æ"))
+        Err(anyhow!("Spotify å®¢æˆ¶ç«¯æœªåˆå§‹åŒ–"))
     };
 
     match update_result {
@@ -648,10 +692,10 @@ pub async fn update_currently_playing_wrapper(
         }
         Err(e) => {
             if e.to_string().contains("InvalidToken") {
-                error!("Token µL®Ä¡A»İ­n­«·s±ÂÅv");
-                return Err(anyhow!("Token µL®Ä¡A»İ­n­«·s±ÂÅv"));
+                error!("Token ç„¡æ•ˆï¼Œéœ€è¦é‡æ–°æˆæ¬Š");
+                return Err(anyhow!("Token ç„¡æ•ˆï¼Œéœ€è¦é‡æ–°æˆæ¬Š"));
             } else {
-                error!("§ó·s·í«e¼½©ñ¥¢±Ñ: {:?}", e);
+                error!("æ›´æ–°ç•¶å‰æ’­æ”¾å¤±æ•—: {:?}", e);
                 Err(e)
             }
         }
@@ -661,21 +705,65 @@ pub async fn update_currently_playing_wrapper(
 pub fn authorize_spotify(
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
     debug_mode: bool,
-    auth_status: Arc<Mutex<AuthStatus>>,
+    auth_manager: Arc<AuthManager>,
+    listener: Arc<TokioMutex<Option<TcpListener>>>,
 ) -> Pin<Box<dyn Future<Output = Result<(), SpotifyError>> + Send>> {
     Box::pin(async move {
-        let config = read_config(debug_mode).map_err(|e| SpotifyError::IoError(e.to_string()))?;
+        // é‡ç½®æˆæ¬Šç‹€æ…‹
+        auth_manager.reset(&AuthPlatform::Spotify);
 
-        let client_id = &config.spotify.client_id;
-        let redirect_uri = "http://localhost:8888/callback";
+        // ç¢ºä¿é—œé–‰ä¹‹å‰çš„ç›£è½å™¨
+        {
+            let mut listener_guard = listener.lock().await;
+            if let Some(l) = listener_guard.take() {
+                drop(l); // é¡¯å¼é—œé–‰ç›£è½å™¨
+            }
+        }
+
+        // è®€å–å’Œè§£æ JSON æ–‡ä»¶
+        let config_str = fs::read_to_string("config.json")
+            .map_err(|e| SpotifyError::IoError(format!("ç„¡æ³•è®€å–é…ç½®æ–‡ä»¶: {}", e)))?;
+        let config: Value = serde_json::from_str(&config_str)
+            .map_err(|e| SpotifyError::ConfigError(format!("ç„¡æ³•è§£æé…ç½®æ–‡ä»¶: {}", e)))?;
+
+        let client_id = config["spotify"]["client_id"]
+            .as_str()
+            .ok_or_else(|| SpotifyError::ConfigError("Missing Spotify client ID".to_string()))?;
         let scope = "user-read-currently-playing";
+
+        // å˜—è©¦ç¶å®šåˆ°ä¸åŒçš„ç«¯å£
+        let ports = vec![8888, 8889, 8890, 8891, 8892];
+        let mut local_listener = None;
+        let mut bound_port = 0;
+
+        for port in ports {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    bound_port = port;
+                    local_listener = Some(l);
+                    break;
+                }
+                Err(e) => {
+                    if debug_mode {
+                        info!("ç„¡æ³•ç¶å®šåˆ°ç«¯å£ {}: {}", port, e);
+                    }
+                }
+            }
+        }
+
+        let local_listener = local_listener
+            .ok_or_else(|| SpotifyError::IoError("ç„¡æ³•æ‰¾åˆ°å¯ç”¨çš„ç«¯å£".to_string()))?;
+
+        // æ›´æ–°é‡å®šå‘ URI
+        let redirect_uri = format!("http://localhost:{}/callback", bound_port);
 
         let mut url = Url::parse("https://accounts.spotify.com/authorize")
             .map_err(SpotifyError::UrlParseError)?;
         url.query_pairs_mut()
             .append_pair("client_id", client_id)
             .append_pair("response_type", "code")
-            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("redirect_uri", &redirect_uri)
             .append_pair("scope", scope)
             .append_pair("show_dialog", "true");
 
@@ -685,120 +773,231 @@ pub fn authorize_spotify(
             info!("Authorization URL: {}", auth_url);
         }
 
+        // å°‡ç›£è½å™¨å­˜å„²åœ¨å…±äº«ç‹€æ…‹ä¸­
         {
-            let mut status = auth_status.lock().map_err(|e| SpotifyError::IoError(e.to_string()))?;
-            *status = AuthStatus::WaitingForBrowser;
+            let mut listener_guard = listener.lock().await;
+            *listener_guard = Some(local_listener);
         }
+
+        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::WaitingForBrowser);
 
         open_url_default_browser(&auth_url).map_err(|e| SpotifyError::IoError(e.to_string()))?;
 
-        // ±Ò°Ê¥»¦a¦øªA¾¹¨Ó®·Àò¦^½Õ
-        let listener = TcpListener::bind("127.0.0.1:8888")
-            .map_err(|e| SpotifyError::IoError(format!("µLªk±Ò°Ê¥»¦a¦øªA¾¹: {}", e)))?;
+        // è¨­ç½®è¶…æ™‚æ™‚é–“ï¼Œä¾‹å¦‚ 2 åˆ†é˜
+        let timeout_duration = Duration::from_secs(5);
 
-        // µ¥«İ¦^½Õ
-        let (mut stream, _) = listener.accept()
-            .map_err(|e| SpotifyError::IoError(format!("µLªk±µ¨ü³s±µ: {}", e)))?;
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line)
-            .map_err(|e| SpotifyError::IoError(format!("µLªkÅª¨ú½Ğ¨D: {}", e)))?;
-
-        let redirect_url = request_line
-            .split_whitespace()
-            .nth(1)
-            .ok_or_else(|| SpotifyError::AuthorizationError("µL®Äªº½Ğ¨D".to_string()))?;
-        let url = format!("{}{}", REDIRECT_URI, redirect_url);
-
-        // ¦VÂsÄı¾¹µo°eÅTÀ³
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>±ÂÅv¦¨¥\¡A½ĞÃö³¬¦¹µ¡¤f¡C</body></html>";
-        stream.write_all(response.as_bytes())
-            .map_err(|e| SpotifyError::IoError(format!("µLªkµo°eÅTÀ³: {}", e)))?;
-
-        if debug_mode {
-            info!("Received callback URL: {}", url);
-        }
-
-        {
-            let mut status = auth_status.lock().map_err(|e| SpotifyError::IoError(e.to_string()))?;
-            *status = AuthStatus::Processing;
-        }
-
-        let parsed_url = Url::parse(&url).map_err(SpotifyError::UrlParseError)?;
-        let code = parsed_url
-            .query_pairs()
-            .find(|(key, _)| key == "code")
-            .map(|(_, value)| value.into_owned())
-            .ok_or_else(|| SpotifyError::AuthorizationError("µLªk±q¦^½Õ URL ¤¤¸ÑªR±ÂÅv½X".to_string()))?;
-
-        // ·íÀò¨ú¨ì±ÂÅv½X«á¡A¨Ï¥Î client_id ©M client_secret ½Ğ¨D³X°İ¥OµP
-        let token_url = "https://accounts.spotify.com/api/token";
-        let client = reqwest::Client::new();
-        let params = [
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("redirect_uri", "http://localhost:8888/callback"),
-        ];
-
-        match timeout(
-            Duration::from_secs(30),
-            client
-                .post(token_url)
-                .basic_auth(
-                    &config.spotify.client_id,
-                    Some(&config.spotify.client_secret),
-                )
-                .form(&params)
-                .send(),
-        )
-        .await
-        {
-            Ok(response_result) => {
-                let response = response_result.map_err(SpotifyError::RequestError)?;
-                if response.status().is_success() {
-                    let token_data: Token = response.json().await?; 
-
-                    {
-                        let mut status = auth_status.lock().map_err(|e| SpotifyError::IoError(e.to_string()))?;
-                        *status = AuthStatus::TokenObtained;
-                    }
-
-                    // ³Ğ«Ø·sªº AuthCodeSpotify ¹ê¨Ò
-                    let creds = Credentials::new(&config.spotify.client_id, &config.spotify.client_secret);
-                    let oauth = OAuth {
-                        redirect_uri: "http://localhost:8888/callback".to_string(),
-                        scopes: scopes!("user-read-currently-playing"),
-                        ..Default::default()
-                    };
-
-                    // ¨Ï¥Î from_token_with_config ¤èªk¡A¨Ã¨Ï¥Î§¹¥ş­­©wªº¸ô®|
-                    let new_spotify = AuthCodeSpotify::from_token_with_config(
-                        token_data,
-                        creds,
-                        oauth,
-                        rspotify::Config::default(), // ¨Ï¥Î rspotify::Config ¦Ó¤£¬O Config
-                    );
-
-                    // §ó·s spotify_client
-                    let mut client = spotify_client
-                        .lock()
-                        .map_err(|e| SpotifyError::IoError(format!("µLªkÀò¨ú Spotify «È¤áºİÂê: {}", e)))?;
-                    *client = Some(new_spotify);
-
-                    {
-                        let mut status = auth_status.lock().map_err(|e| SpotifyError::IoError(e.to_string()))?;
-                        *status = AuthStatus::Completed;
-                    }
-                } else {
-                    return Err(SpotifyError::ApiError(format!("Àò¨ú³X°İ¥OµP¥¢±Ñ: {}", response.status())));
-                }
+        match accept_connection(&listener, timeout_duration).await {
+            Ok(stream) => {
+                process_successful_connection(stream, &spotify_client, auth_manager.clone(), &config, bound_port, debug_mode).await?;
             }
-            Err(_) => return Err(SpotifyError::ApiError("½Ğ¨D³X°İ¥OµP¶W®É".to_string())),
+            Err(e) => {
+                // è™•ç†éŒ¯èª¤ï¼ˆåŒ…æ‹¬è¶…æ™‚å’Œç€è¦½å™¨é—œé–‰ï¼‰
+                let error_message = match e {
+                    SpotifyError::AuthorizationError(msg) => msg,
+                    _ => "æˆæ¬Šéç¨‹ä¸­æ–·".to_string(),
+                };
+                auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed(error_message.clone()));
+                return Err(SpotifyError::AuthorizationError(error_message));
+            }
+        }
+
+        // ç¢ºä¿åœ¨å‡½æ•¸çµæŸæ™‚é—œé–‰ç›£è½å™¨
+        {
+            let mut listener_guard = listener.lock().await;
+            *listener_guard = None;
         }
 
         Ok(())
     })
 }
+
+async fn process_successful_connection(
+    stream: TcpStream,
+    spotify_client: &Arc<Mutex<Option<AuthCodeSpotify>>>,
+    auth_manager: Arc<AuthManager>,
+    config: &Value,
+    port: u16,
+    debug_mode: bool,
+) -> Result<(), SpotifyError> {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .await
+        .map_err(|e| SpotifyError::IoError(format!("ç„¡æ³•è®€å–è«‹æ±‚: {}", e)))?;
+
+    let redirect_url = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| SpotifyError::AuthorizationError("ç„¡æ•ˆçš„è«‹æ±‚".to_string()))?;
+    let url = format!("http://localhost:{}{}", port, redirect_url);
+
+    // å‘ç€è¦½å™¨ç™¼é€éŸ¿æ‡‰
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>æˆæ¬ŠæˆåŠŸï¼Œè«‹é—œé–‰æ­¤çª—å£ã€‚</body></html>";
+    reader
+        .into_inner()
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| SpotifyError::IoError(format!("ç„¡æ³•ç™¼é€éŸ¿æ‡‰: {}", e)))?;
+
+    if debug_mode {
+        info!("Received callback URL: {}", url);
+    }
+
+    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Processing);
+
+    // è™•ç†æˆæ¬Šå›èª¿
+    process_authorization_callback(
+        url,
+        spotify_client,
+        auth_manager,
+        config,
+    )
+    .await
+}
+
+async fn process_authorization_callback(
+    url: String,
+    spotify_client: &Arc<Mutex<Option<AuthCodeSpotify>>>,
+    auth_manager: Arc<AuthManager>,
+    config: &Value,
+) -> Result<(), SpotifyError> {
+    let parsed_url = Url::parse(&url).map_err(SpotifyError::UrlParseError)?;
+    let code = parsed_url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| {
+            SpotifyError::AuthorizationError("ç„¡æ³•å¾å›èª¿ URL ä¸­è§£ææˆæ¬Šç¢¼".to_string())
+        })?;
+
+    // ç•¶ç²å–åˆ°æˆæ¬Šç¢¼å¾Œï¼Œä½¿ç”¨ client_id å’Œ client_secret è«‹æ±‚è¨ªå•ä»¤ç‰Œ
+    let token_url = "https://accounts.spotify.com/api/token";
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", &code),
+        ("redirect_uri", REDIRECT_URI), 
+    ];
+
+    match timeout(
+        Duration::from_secs(30),
+        client
+            .post(token_url)
+            .basic_auth(
+                config["spotify"]["client_id"].as_str().ok_or_else(|| {
+                    SpotifyError::ConfigError("Missing Spotify client ID".to_string())
+                })?,
+                Some(config["spotify"]["client_secret"].as_str().ok_or_else(|| {
+                    SpotifyError::ConfigError("Missing Spotify client secret".to_string())
+                })?),
+            )
+            .form(&params)
+            .send(),
+    )
+    .await
+    {
+        Ok(response_result) => {
+            match response_result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        let token_data: Token = response.json().await?;
+
+                        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::TokenObtained);
+
+                        // å‰µå»ºæ–°çš„ AuthCodeSpotify å¯¦ä¾‹
+                        let creds = Credentials::new(
+                            config["spotify"]["client_id"].as_str().ok_or_else(|| {
+                                SpotifyError::ConfigError("Missing Spotify client ID".to_string())
+                            })?,
+                            config["spotify"]["client_secret"].as_str().ok_or_else(|| {
+                                SpotifyError::ConfigError(
+                                    "Missing Spotify client secret".to_string(),
+                                )
+                            })?,
+                        );
+                        let oauth = OAuth {
+                            redirect_uri: REDIRECT_URI.to_string(), // ä½¿ç”¨ REDIRECT_URI å¸¸æ•¸
+                            scopes: scopes!("user-read-currently-playing"),
+                            ..Default::default()
+                        };
+
+                        let new_spotify = AuthCodeSpotify::from_token_with_config(
+                            token_data,
+                            creds,
+                            oauth,
+                            rspotify::Config::default(),
+                        );
+
+                        // æ›´æ–° spotify_client
+                        let mut client = spotify_client.lock().map_err(|e| {
+                            SpotifyError::IoError(format!("ç„¡æ³•ç²å– Spotify å®¢æˆ¶ç«¯é–: {}", e))
+                        })?;
+                        *client = Some(new_spotify);
+
+                        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+                    } else {
+                        let error_body =
+                            response.text().await.map_err(SpotifyError::RequestError)?;
+                        error!(
+                            "ç²å–è¨ªå•ä»¤ç‰Œå¤±æ•—. ç‹€æ…‹ç¢¼: {}, éŒ¯èª¤å…§å®¹: {}",
+                            status, error_body
+                        );
+                        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed(format!(
+                            "ç²å–è¨ªå•ä»¤ç‰Œå¤±æ•—: {} - {}",
+                            status, error_body
+                        )));
+                        return Err(SpotifyError::ApiError(format!(
+                            "ç²å–è¨ªå•ä»¤ç‰Œå¤±æ•—: {} - {}",
+                            status, error_body
+                        )));
+                    }
+                }
+                Err(e) => {
+                    error!("è«‹æ±‚è¨ªå•ä»¤ç‰Œæ™‚ç™¼ç”ŸéŒ¯èª¤: {}", e);
+                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed(format!(
+                        "è«‹æ±‚è¨ªå•ä»¤ç‰Œæ™‚ç™¼ç”ŸéŒ¯èª¤: {}",
+                        e
+                    )));
+                    return Err(SpotifyError::RequestError(e));
+                }
+            }
+        }
+        Err(_) => {
+            error!("è«‹æ±‚è¨ªå•ä»¤ç‰Œè¶…æ™‚");
+            auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed("è«‹æ±‚è¨ªå•ä»¤ç‰Œè¶…æ™‚".to_string()));
+            return Err(SpotifyError::ApiError("è«‹æ±‚è¨ªå•ä»¤ç‰Œè¶…æ™‚".to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+async fn accept_connection(
+    listener: &Arc<TokioMutex<Option<TcpListener>>>,
+    timeout_duration: Duration,
+) -> Result<TcpStream, SpotifyError> {
+    let start_time = Instant::now();
+    loop {
+        if start_time.elapsed() >= timeout_duration {
+            return Err(SpotifyError::AuthorizationError("æˆæ¬Šè¶…æ™‚ï¼Œè«‹å˜—è©¦é‡æ–°æˆæ¬Š".to_string()));
+        }
+
+        if let Some(listener) = listener.lock().await.as_ref() {
+            match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+                Ok(Ok((stream, _))) => return Ok(stream),
+                Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Ok(Err(e)) => return Err(SpotifyError::IoError(format!("æ¥å—é€£æ¥å¤±æ•—: {}", e))),
+                Err(_) => continue, // è¶…æ™‚ï¼Œç¹¼çºŒå¾ªç’°
+            }
+        } else {
+            return Err(SpotifyError::AuthorizationError("ç›£è½å™¨å·²é—œé–‰".to_string()));
+        }
+    }
+}
+
+
 
 pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let is_dark = ctx.style().visuals.dark_mode;
@@ -809,14 +1008,14 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         "spotify_icon_black.png"
     };
 
-    // Àò¨ú¥i°õ¦æ¤å¥óªº¥Ø¿ı
+    // ç²å–å¯åŸ·è¡Œæ–‡ä»¶çš„ç›®éŒ„
     let exe_dir = std::env::current_exe().ok()?;
     let exe_dir = exe_dir.parent()?;
 
-    // icon ¸ê®Æ§¨»P exe ÀÉ¦b¦P¤@¥Ø¿ı
+    // icon è³‡æ–™å¤¾èˆ‡ exe æª”åœ¨åŒä¸€ç›®éŒ„
     let icon_dir = exe_dir.join("icon");
 
-    // ºc«Ø¹Ï¼Ğªºµ´¹ï¸ô®|
+    // æ§‹å»ºåœ–æ¨™çš„çµ•å°è·¯å¾‘
     let icon_path = icon_dir.join(icon_name);
 
     println!("Trying to load icon from: {:?}", icon_path);
@@ -832,7 +1031,7 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         }
         Err(e) => {
             eprintln!("Failed to load Spotify icon ({}): {:?}", icon_name, e);
-            // ¹Á¸Õ¥[¸ü¥t¤@­Ó¹Ï¼Ğ§@¬°³Æ¥Î
+            // å˜—è©¦åŠ è¼‰å¦ä¸€å€‹åœ–æ¨™ä½œç‚ºå‚™ç”¨
             let fallback_icon_name = if is_dark {
                 "spotify_icon_black.png"
             } else {
@@ -850,21 +1049,21 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
                     Some(ctx.load_texture("spotify_icon", fallback_image, Default::default()))
                 }
                 Err(e) => {
-                    eprintln!("µLªk¸ü¤J³Æ¥Î Spotify ¹Ï¼Ğ¡G{:?}", e);
+                    eprintln!("ç„¡æ³•è¼‰å…¥å‚™ç”¨ Spotify åœ–æ¨™ï¼š{:?}", e);
                     None
                 }
             }
         }
     }
 }
-// »²§U¨ç¼Æ¨Ó¥[¸ü¹Ï¤ù
+// è¼”åŠ©å‡½æ•¸ä¾†åŠ è¼‰åœ–ç‰‡
 fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
     let image = image::io::Reader::open(path)?.decode()?;
     let size = [image.width() as _, image.height() as _];
     let image_buffer = image.into_rgba8();
     let pixels = image_buffer.as_flat_samples();
 
-    // ¤â°Ê³B²z³z©ú«×
+    // æ‰‹å‹•è™•ç†é€æ˜åº¦
     let mut color_image = egui::ColorImage::new(size, egui::Color32::TRANSPARENT);
     for (i, pixel) in pixels.as_slice().chunks_exact(4).enumerate() {
         let [r, g, b, a] = pixel else { continue };
