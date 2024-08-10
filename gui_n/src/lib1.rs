@@ -1,6 +1,6 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 use lazy_static::lazy_static;
-use log::{debug, error};
+use log::{debug, error,LevelFilter};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -48,8 +48,7 @@ pub fn read_config(debug_mode: bool) -> Result<Config, ConfigError> {
     }
 
     let file_path = "config.json";
-    let mut file = File::open(file_path)
-        .map_err(|e| ConfigError::FileOpenError(e.to_string()))?;
+    let mut file = File::open(file_path).map_err(|e| ConfigError::FileOpenError(e.to_string()))?;
 
     if debug_mode {
         debug!("成功開啟配置文件: {}", file_path);
@@ -63,8 +62,8 @@ pub fn read_config(debug_mode: bool) -> Result<Config, ConfigError> {
         debug!("成功讀取配置文件內容");
     }
 
-    let config_value: Value = serde_json::from_str(&content)
-        .map_err(|e| ConfigError::JsonParseError(e.to_string()))?;
+    let config_value: Value =
+        serde_json::from_str(&content).map_err(|e| ConfigError::JsonParseError(e.to_string()))?;
 
     if debug_mode {
         debug!("成功解析 JSON 格式");
@@ -168,6 +167,12 @@ fn check_osu_config(config_value: &Value) -> Result<(), Vec<String>> {
     }
 }
 
-
-
-
+//設置日誌級別
+pub fn set_log_level(debug_mode: bool) {
+    let log_level = if debug_mode {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Info
+    };
+    log::set_max_level(log_level);
+}
