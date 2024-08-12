@@ -1,6 +1,36 @@
+// 本地模組
 mod osu;
 mod spotify;
 
+// 標準庫導入
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::default::Default;
+use std::env;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+// 第三方庫導入
+use anyhow::{anyhow, Context, Result};
+use clipboard::{ClipboardContext, ClipboardProvider};
+use eframe::{self, egui};
+use egui::{
+    FontData, FontDefinitions, FontFamily, TextureHandle, TextureWrapMode, ViewportBuilder,
+};
+use log::{debug, error, info, LevelFilter};
+use reqwest::Client;
+use rspotify::{scopes, AuthCodeSpotify, Credentials, OAuth};
+use simplelog::*;
+use thiserror::Error;
+use tokio::{
+    self,
+    net::TcpListener,
+    sync::{mpsc::Sender, Mutex as TokioMutex, RwLock},
+    task::JoinHandle,
+};
+
+// 本地模組導入
 use crate::osu::{
     get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers,
     parse_osu_url, print_beatmap_info_gui, Beatmapset,
@@ -11,47 +41,6 @@ use crate::spotify::{
     AuthStatus, CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{read_config, set_log_level, ConfigError};
-
-use anyhow::{anyhow, Context, Result};
-use clipboard::{ClipboardContext, ClipboardProvider};
-use eframe::{self, egui};
-use egui::TextureHandle;
-use egui::TextureWrapMode;
-use egui::ViewportBuilder;
-use egui::{FontData, FontDefinitions, FontFamily};
-use tokio;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
-
-use log::{debug, error, info, LevelFilter};
-use reqwest::Client;
-use simplelog::*;
-
-use std::default::Default;
-
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use std::sync::{Arc, Mutex};
-
-use std::cell::RefCell;
-use std::time::{Duration, Instant};
-
-use std::collections::HashMap;
-
-//use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-
-use tokio::sync::mpsc::Sender;
-
-use std::env;
-
-use rspotify::scopes;
-use rspotify::AuthCodeSpotify;
-
-use rspotify::{Credentials, OAuth};
-
-use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -567,9 +556,7 @@ impl eframe::App for SearchApp {
                 )
                 .await
                 {
-                    Ok(_) => {
-                        spotify_authorized.store(true, Ordering::SeqCst);
-                    }
+                    Ok(_) => {}
                     Err(e) => {
                         error!("更新當前播放失敗: {:?}", e);
                         if e.to_string().contains("Token 無效")
@@ -816,10 +803,17 @@ impl SearchApp {
         let auth_manager = self.auth_manager.clone();
         let listener = self.listener.clone();
         let debug_mode = self.debug_mode;
+        let spotify_authorized = self.spotify_authorized.clone(); // 添加這行
 
         tokio::spawn(async move {
-            if let Err(e) =
-                authorize_spotify(spotify_client, debug_mode, auth_manager, listener).await
+            if let Err(e) = authorize_spotify(
+                spotify_client,
+                debug_mode,
+                auth_manager,
+                listener,
+                spotify_authorized, // 添加這個參數
+            )
+            .await
             {
                 error!("重試授權失敗: {:?}", e);
             }
@@ -882,6 +876,10 @@ impl SearchApp {
     }
 
     fn should_update_current_playing(&self) -> bool {
+        if !self.spotify_authorized.load(Ordering::SeqCst) {
+            return false; // 如果未授權，不更新
+        }
+
         let mut last_update = self.last_update.lock().unwrap();
         if last_update.is_none() || last_update.unwrap().elapsed() > Duration::from_secs(10) {
             *last_update = Some(Instant::now());
@@ -1557,48 +1555,42 @@ impl SearchApp {
                 .clicked()
             {
                 if !self.spotify_authorized.load(Ordering::SeqCst) && !self.auth_in_progress {
-                    self.auth_in_progress = true;
-                    self.show_auth_progress = true;
-                    self.auth_manager.reset(&AuthPlatform::Spotify);
-                    let spotify_client = self.spotify_client.clone();
-                    let debug_mode = self.debug_mode;
-                    let spotify_authorized = self.spotify_authorized.clone();
-                    let auth_manager = self.auth_manager.clone();
-                    let listener = self.listener.clone();
-                    let ctx = ctx.clone();
-                    let auth_in_progress = Arc::new(AtomicBool::new(true));
-                    let auth_in_progress_clone = auth_in_progress.clone();
-
-                    tokio::spawn(async move {
-                        let result = authorize_spotify(
-                            spotify_client,
-                            debug_mode,
-                            auth_manager.clone(),
-                            listener,
-                        )
-                        .await;
-
-                        match result {
-                            Ok(()) => {
-                                info!("Spotify 授權成功");
-                                spotify_authorized.store(true, Ordering::SeqCst);
-                                auth_manager
-                                    .update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
-                            }
-                            Err(e) => {
-                                error!("Spotify 授權失敗: {:?}", e);
-                                auth_manager.update_status(
-                                    &AuthPlatform::Spotify,
-                                    AuthStatus::Failed(e.to_string()),
-                                );
-                            }
-                        }
-
-                        auth_in_progress_clone.store(false, Ordering::SeqCst);
-                        ctx.request_repaint();
-                    });
+                    self.start_spotify_authorization(ctx.clone());
                 }
             }
+        });
+    }
+
+    fn start_spotify_authorization(&mut self, ctx: egui::Context) {
+        self.show_auth_progress = true;
+        self.auth_in_progress = true;
+        self.auth_manager.reset(&AuthPlatform::Spotify);
+
+        let spotify_client = self.spotify_client.clone();
+        let debug_mode = self.debug_mode;
+        let spotify_authorized = self.spotify_authorized.clone();
+        let auth_manager = self.auth_manager.clone();
+        let listener = self.listener.clone();
+        let ctx_clone = ctx.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = authorize_spotify(
+                spotify_client,
+                debug_mode,
+                auth_manager.clone(),
+                listener,
+                spotify_authorized.clone(),
+            )
+            .await
+            {
+                error!("Spotify 授權失敗: {:?}", e);
+                auth_manager
+                    .update_status(&AuthPlatform::Spotify, AuthStatus::Failed(e.to_string()));
+            } else {
+                spotify_authorized.store(true, Ordering::SeqCst);
+                auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+            }
+            ctx_clone.request_repaint();
         });
     }
 }

@@ -1,16 +1,19 @@
-use crate::read_config;
-use anyhow::{anyhow, Result};
+// 標準庫導入
+use std::sync::Arc;
+
+// 第三方庫導入
+use anyhow::Result;
+use egui::{ColorImage, TextureHandle};
+use image::load_from_memory;
 use log::{debug, error, info};
+use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
-use regex::Regex;
-use image::load_from_memory;
-use tokio::sync::mpsc::Sender;
-use tokio::try_join;
-use std::sync::Arc;
-use egui::TextureHandle;
-use egui::ColorImage;
 use thiserror::Error;
+use tokio::{sync::mpsc::Sender, try_join};
+
+// 本地模組導入
+use crate::read_config;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Covers {
@@ -84,15 +87,14 @@ pub async fn get_beatmapsets(
         .await
         .map_err(OsuError::RequestError)?;
 
-    let response_text = response.text().await
-        .map_err(OsuError::RequestError)?;
+    let response_text = response.text().await.map_err(OsuError::RequestError)?;
 
     if debug_mode {
         info!("Osu API 回應 JSON: {}", response_text);
     }
 
-    let search_response: SearchResponse = serde_json::from_str(&response_text)
-        .map_err(OsuError::JsonError)?;
+    let search_response: SearchResponse =
+        serde_json::from_str(&response_text).map_err(OsuError::JsonError)?;
 
     Ok(search_response.beatmapsets)
 }
@@ -112,15 +114,14 @@ pub async fn get_beatmapset_by_id(
         .await
         .map_err(OsuError::RequestError)?;
 
-    let response_text = response.text().await
-        .map_err(OsuError::RequestError)?;
+    let response_text = response.text().await.map_err(OsuError::RequestError)?;
 
     if debug_mode {
         info!("Osu API 回應 JSON: {}", response_text);
     }
 
-    let beatmapset: Beatmapset = serde_json::from_str(&response_text)
-        .map_err(OsuError::JsonError)?;
+    let beatmapset: Beatmapset =
+        serde_json::from_str(&response_text).map_err(OsuError::JsonError)?;
 
     Ok(beatmapset)
 }
@@ -140,18 +141,29 @@ pub async fn get_beatmapset_details(
         .await
         .map_err(OsuError::RequestError)?;
 
-    let beatmapset: serde_json::Value = response
-        .json()
-        .await
-        .map_err(OsuError::RequestError)?;
+    let beatmapset: serde_json::Value = response.json().await.map_err(OsuError::RequestError)?;
 
     if debug_mode {
         println!("Beatmapset details: {:?}", beatmapset);
     }
 
     let (artist, title) = try_join!(
-        async { Ok::<_, OsuError>(beatmapset["artist"].as_str().unwrap_or("Unknown Artist").to_string()) },
-        async { Ok::<_, OsuError>(beatmapset["title"].as_str().unwrap_or("Unknown Title").to_string()) }
+        async {
+            Ok::<_, OsuError>(
+                beatmapset["artist"]
+                    .as_str()
+                    .unwrap_or("Unknown Artist")
+                    .to_string(),
+            )
+        },
+        async {
+            Ok::<_, OsuError>(
+                beatmapset["title"]
+                    .as_str()
+                    .unwrap_or("Unknown Title")
+                    .to_string(),
+            )
+        }
     )?;
 
     Ok((artist, title))
@@ -185,23 +197,15 @@ pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, 
         debug!("準備發送 Osu token 請求");
     }
 
-    let response = client
-        .post(url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            error!("發送 Osu token 請求時出錯: {}", e);
-            OsuError::RequestError(e)
-        })?;
+    let response = client.post(url).form(&params).send().await.map_err(|e| {
+        error!("發送 Osu token 請求時出錯: {}", e);
+        OsuError::RequestError(e)
+    })?;
 
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| {
-            error!("解析 Osu token 回應時出錯: {}", e);
-            OsuError::RequestError(e)
-        })?;
+    let token_response: TokenResponse = response.json().await.map_err(|e| {
+        error!("解析 Osu token 回應時出錯: {}", e);
+        OsuError::RequestError(e)
+    })?;
 
     if debug_mode {
         debug!("成功獲取 Osu token");
@@ -281,24 +285,33 @@ pub async fn load_osu_covers(
                                 let size = (image.width() as f32, image.height() as f32);
                                 if let Err(e) = sender.send((index, texture, size)).await {
                                     error!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e);
-                                    errors.push(format!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e));
+                                    errors
+                                        .push(format!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e));
                                 } else {
                                     debug!("成功發送紋理，URL: {}", url);
                                 }
                             }
                             Err(e) => {
                                 error!("從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}", url, e);
-                                errors.push(format!("從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}", url, e));
+                                errors.push(format!(
+                                    "從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}",
+                                    url, e
+                                ));
                             }
                         },
                         Err(e) => {
                             error!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e);
-                            errors.push(format!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e));
+                            errors
+                                .push(format!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e));
                         }
                     }
                 } else {
                     error!("載入封面失敗，URL: {}, 狀態碼: {}", url, response.status());
-                    errors.push(format!("載入封面失敗，URL: {}, 狀態碼: {}", url, response.status()));
+                    errors.push(format!(
+                        "載入封面失敗，URL: {}, 狀態碼: {}",
+                        url,
+                        response.status()
+                    ));
                 }
             }
             Err(e) => {
