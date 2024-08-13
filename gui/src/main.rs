@@ -490,10 +490,7 @@ impl eframe::App for SearchApp {
                     // Osu 結果
                     columns[1].vertical(|ui| {
                         ui.set_min_width(0.45 * window_size.x);
-                        ui.heading(
-                            egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
-                        );
-                        self.display_osu_results(ui);
+                        self.display_osu_results(ui, window_size);
                     });
                 });
             } else {
@@ -511,7 +508,7 @@ impl eframe::App for SearchApp {
                 )
                 .default_open(true)
                 .show(ui, |ui| {
-                    self.display_osu_results(ui);
+                    self.display_osu_results(ui, window_size);
                 });
             }
         });
@@ -1278,17 +1275,16 @@ impl SearchApp {
                     if !search_results_guard.is_empty() {
                         for track in search_results_guard.iter() {
                             ui.horizontal(|ui| {
-                                ui.set_min_height(100.0); // 增加最小高度
-                                                          // 顯示專輯封面
-                                if let Some(cover_url) =
-                                    &track.album.images.first().map(|img| &img.url)
-                                {
+                                ui.set_min_height(100.0);
+                                
+                                // 顯示專輯封面
+                                if let Some(cover_url) = &track.album.images.first().map(|img| &img.url) {
                                     let texture_cache = self.texture_cache.clone();
                                     let texture_load_queue = self.texture_load_queue.clone();
-
+    
                                     if let Ok(cache) = texture_cache.try_read() {
                                         if let Some(texture) = cache.get(*cover_url) {
-                                            let size = egui::Vec2::new(100.0, 100.0); // 增加圖片大小
+                                            let size = egui::Vec2::new(100.0, 100.0);
                                             ui.add(egui::Image::new(
                                                 egui::load::SizedTexture::new(texture.id(), size),
                                             ));
@@ -1298,49 +1294,44 @@ impl SearchApp {
                                                     queue.push(cover_url.to_string());
                                                 }
                                             }
-                                            ui.add_sized(
-                                                [100.0, 100.0],
-                                                egui::Label::new(
-                                                    egui::RichText::new("Loading...")
-                                                        .size(self.global_font_size)
-                                                        .text_style(egui::TextStyle::Monospace)
-                                                        .color(egui::Color32::LIGHT_GRAY),
-                                                ),
-                                            )
-                                            .on_hover_text("Loading album cover");
+                                            // 使用轉圈圈的加載動畫
+                                            ui.add_sized([100.0, 100.0], egui::Spinner::new().size(32.0));
                                         }
+                                    } else {
+                                        // 如果無法讀取緩存，也顯示轉圈圈
+                                        ui.add_sized([100.0, 100.0], egui::Spinner::new().size(32.0));
                                     };
                                     ui.add_space(10.0);
                                 }
-
+    
                                 ui.vertical(|ui| {
                                     let (track_info, spotify_url) = print_track_info_gui(track);
-
+    
                                     // 顯示曲目名稱
                                     ui.label(
                                         egui::RichText::new(&track_info.name)
                                             .strong()
                                             .size(self.global_font_size * 1.2),
                                     );
-
+    
                                     // 顯示藝術家
                                     ui.label(
                                         egui::RichText::new(&track_info.artists)
                                             .size(self.global_font_size),
                                     );
-
+    
                                     // 顯示專輯名稱
                                     ui.label(
                                         egui::RichText::new(&track_info.album)
                                             .size(self.global_font_size * 0.9),
                                     );
-
+    
                                     // 添加點擊和拖動的響應
                                     let response = ui.allocate_rect(
                                         ui.min_rect(),
                                         egui::Sense::click_and_drag(),
                                     );
-
+    
                                     // 雙擊
                                     if response.double_clicked() {
                                         if let Some(url) = &spotify_url {
@@ -1349,14 +1340,13 @@ impl SearchApp {
                                             }
                                         }
                                     }
-
+    
                                     // 右鍵菜單
-                                    // Spotify 結果的右鍵菜單
                                     response.context_menu(|ui| {
                                         self.create_context_menu(ui, |add_button| {
                                             if let Some(url) = &spotify_url {
                                                 add_button(
-                                                    "? Copy",
+                                                    "Copy Link",
                                                     Box::new({
                                                         let url = url.clone();
                                                         move || {
@@ -1385,8 +1375,8 @@ impl SearchApp {
                                     });
                                 });
                             });
-
-                            ui.add_space(15.0); // 增加間距
+    
+                            ui.add_space(15.0);
                             ui.separator();
                             ui.add_space(15.0);
                         }
@@ -1395,31 +1385,49 @@ impl SearchApp {
             });
         });
     }
-    fn display_osu_results(&mut self, ui: &mut egui::Ui) {
+    fn display_osu_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         let mut scroll_area = egui::ScrollArea::vertical().id_source("osu_results_scroll");
-
+    
         if self.scroll_to_top {
             scroll_area = scroll_area.scroll_offset(egui::vec2(0.0, 0.0));
-            self.scroll_to_top = false; // 重置標誌
+            self.scroll_to_top = false;
         }
-
+    
         scroll_area.show(ui, |ui| {
             let mut should_load_more = false;
             let mut new_displayed_results = self.displayed_osu_results;
-
+    
             if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
                 let total_results = osu_search_results_guard.len();
                 let displayed_results = self.displayed_osu_results.min(total_results);
-
-                // 顯示調試信息
-                ui.label(format!("總結果數: {}", total_results));
-                ui.label(format!("當前顯示結果數: {}", displayed_results));
-
+    
+                ui.horizontal(|ui| {
+                    // 使用 window_size 來決定是否顯示完整標題
+                    if window_size.x >= 1000.0 {
+                        ui.heading(
+                            egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
+                        );
+                        ui.add_space(10.0);
+                    }
+                    
+                    ui.label(
+                        egui::RichText::new(format!("總結果數: {}", total_results))
+                            .size(self.global_font_size),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
+                            .size(self.global_font_size),
+                    );
+                });
+    
+                ui.add_space(10.0);
+    
                 if !osu_search_results_guard.is_empty() {
                     if let Some(selected_index) = self.selected_beatmapset {
                         let selected_beatmapset = &osu_search_results_guard[selected_index];
                         let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
-
+    
                         ui.heading(
                             egui::RichText::new(format!(
                                 "{} - {}",
@@ -1432,7 +1440,7 @@ impl SearchApp {
                                 .font(egui::FontId::proportional(self.global_font_size * 0.9)),
                         );
                         ui.add_space(10.0);
-
+    
                         for beatmap_info in beatmap_info.beatmaps {
                             ui.add_space(10.0);
                             ui.label(
@@ -1466,18 +1474,16 @@ impl SearchApp {
                                     .frame(false)
                                     .min_size(egui::vec2(ui.available_width(), 100.0)),
                             );
-
+    
                             if response.clicked() {
                                 self.selected_beatmapset = Some(index);
                             }
-
+    
                             ui.allocate_ui_at_rect(response.rect, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.vertical(|ui| {
                                         if let Ok(textures) = self.cover_textures.try_read() {
-                                            if let Some(Some((texture, size))) =
-                                                textures.get(&index)
-                                            {
+                                            if let Some(Some((texture, size))) = textures.get(&index) {
                                                 let max_height = 100.0;
                                                 let aspect_ratio = size.0 / size.1;
                                                 let image_size = egui::Vec2::new(
@@ -1485,8 +1491,7 @@ impl SearchApp {
                                                     max_height,
                                                 );
                                                 ui.image((texture.id(), image_size));
-                                            } else if let Ok(errors) =
-                                                self.cover_load_errors.try_read()
+                                            } else if let Ok(errors) = self.cover_load_errors.try_read()
                                             {
                                                 if let Some(error_msg) = errors.get(&index) {
                                                     ui.label(
@@ -1503,9 +1508,9 @@ impl SearchApp {
                                             ui.spinner();
                                         }
                                     });
-
+    
                                     ui.add_space(10.0);
-
+    
                                     ui.vertical(|ui| {
                                         ui.label(
                                             egui::RichText::new(&beatmapset.title)
@@ -1514,38 +1519,32 @@ impl SearchApp {
                                                 ))
                                                 .strong(),
                                         );
-                                        ui.label(egui::RichText::new(&beatmapset.artist).font(
-                                            egui::FontId::proportional(self.global_font_size * 0.9),
-                                        ));
                                         ui.label(
-                                            egui::RichText::new(format!(
-                                                "by {}",
-                                                beatmapset.creator
-                                            ))
-                                            .font(
-                                                egui::FontId::proportional(
-                                                    self.global_font_size * 0.8,
-                                                ),
+                                            egui::RichText::new(&beatmapset.artist).font(
+                                                egui::FontId::proportional(self.global_font_size * 0.9),
                                             ),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("by {}", beatmapset.creator))
+                                                .font(egui::FontId::proportional(
+                                                    self.global_font_size * 0.8,
+                                                )),
                                         );
                                     });
                                 });
                             });
-
+    
                             ui.add_space(5.0);
                             ui.separator();
                         }
-
-                        // 確保"顯示更多"按鈕在所有結果之後顯示，並增加間距
+    
                         ui.add_space(30.0);
                         if displayed_results < total_results {
                             ui.vertical_centered(|ui| {
                                 if ui
                                     .add_sized(
                                         [200.0, 40.0],
-                                        egui::Button::new(
-                                            egui::RichText::new("顯示更多").size(18.0),
-                                        ),
+                                        egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
                                     )
                                     .clicked()
                                 {
@@ -1559,26 +1558,22 @@ impl SearchApp {
                                 if ui
                                     .add_sized(
                                         [120.0, 40.0],
-                                        egui::Button::new(
-                                            egui::RichText::new("回到頂部").size(18.0),
-                                        ),
+                                        egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
                                     )
                                     .clicked()
                                 {
                                     self.scroll_to_top = true;
-                                    ui.ctx().request_repaint(); // 請求重新繪製以立即更新滾動位置
+                                    ui.ctx().request_repaint();
                                 }
                             });
                         }
-                        // 在按鈕下方添加額外的空間，以防止被底部面板遮擋
                         ui.add_space(50.0);
                     }
                 } else {
                     ui.label("沒有搜索結果");
                 }
             }
-
-            // 在 osu_search_results_guard 的作用域之外更新 self
+    
             if should_load_more {
                 self.displayed_osu_results = new_displayed_results;
                 self.load_more_osu_covers(
