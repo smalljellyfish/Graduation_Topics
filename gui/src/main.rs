@@ -118,6 +118,7 @@ impl AuthManager {
 // 定義 SpotifySearchApp結構，儲存程式狀態和數據
 struct SearchApp {
     client: Arc<tokio::sync::Mutex<Client>>,
+    ctx: egui::Context,
     access_token: Arc<tokio::sync::Mutex<String>>,
     search_query: String,
     search_results: Arc<tokio::sync::Mutex<Vec<Track>>>,
@@ -152,6 +153,8 @@ struct SearchApp {
     auth_start_time: Option<Instant>,
     auth_manager: Arc<AuthManager>,
     auth_error: Option<String>,
+    displayed_osu_results: usize,
+    scroll_to_top: bool,
 }
 
 impl eframe::App for SearchApp {
@@ -648,6 +651,7 @@ impl SearchApp {
 
         Ok(Self {
             client,
+            ctx,
             access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
             search_query: String::new(),
             search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -682,6 +686,8 @@ impl SearchApp {
             auth_start_time: None,
             auth_manager: Arc::new(AuthManager::new()),
             auth_error: None,
+            displayed_osu_results: 10,
+            scroll_to_top: false,
         })
     }
     //授權過程
@@ -958,6 +964,7 @@ impl SearchApp {
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
         let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
+        self.displayed_osu_results = 10;
 
         info!("使用者搜尋: {}", query);
 
@@ -1389,127 +1396,227 @@ impl SearchApp {
         });
     }
     fn display_osu_results(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("osu_results", |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
-                    if !osu_search_results_guard.is_empty() {
-                        if let Some(selected_index) = self.selected_beatmapset {
-                            let selected_beatmapset = &osu_search_results_guard[selected_index];
-                            let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
+        let mut scroll_area = egui::ScrollArea::vertical().id_source("osu_results_scroll");
 
-                            ui.heading(
-                                egui::RichText::new(format!(
-                                    "{} - {}",
-                                    beatmap_info.title, beatmap_info.artist
-                                ))
-                                .font(egui::FontId::proportional(self.global_font_size * 1.1)),
-                            );
+        if self.scroll_to_top {
+            scroll_area = scroll_area.scroll_offset(egui::vec2(0.0, 0.0));
+            self.scroll_to_top = false; // 重置標誌
+        }
+
+        scroll_area.show(ui, |ui| {
+            let mut should_load_more = false;
+            let mut new_displayed_results = self.displayed_osu_results;
+
+            if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
+                let total_results = osu_search_results_guard.len();
+                let displayed_results = self.displayed_osu_results.min(total_results);
+
+                // 顯示調試信息
+                ui.label(format!("總結果數: {}", total_results));
+                ui.label(format!("當前顯示結果數: {}", displayed_results));
+
+                if !osu_search_results_guard.is_empty() {
+                    if let Some(selected_index) = self.selected_beatmapset {
+                        let selected_beatmapset = &osu_search_results_guard[selected_index];
+                        let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
+
+                        ui.heading(
+                            egui::RichText::new(format!(
+                                "{} - {}",
+                                beatmap_info.title, beatmap_info.artist
+                            ))
+                            .font(egui::FontId::proportional(self.global_font_size * 1.1)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("by {}", beatmap_info.creator))
+                                .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+                        );
+                        ui.add_space(10.0);
+
+                        for beatmap_info in beatmap_info.beatmaps {
+                            ui.add_space(10.0);
                             ui.label(
-                                egui::RichText::new(format!("by {}", beatmap_info.creator))
-                                    .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+                                egui::RichText::new(beatmap_info)
+                                    .font(egui::FontId::proportional(self.global_font_size * 1.0)),
                             );
                             ui.add_space(10.0);
-
-                            for beatmap_info in beatmap_info.beatmaps {
-                                ui.add_space(10.0);
-                                ui.label(
-                                    egui::RichText::new(beatmap_info).font(
-                                        egui::FontId::proportional(self.global_font_size * 1.0),
-                                    ),
-                                );
-                                ui.add_space(10.0);
-                                ui.separator();
-                            }
-                            if ui
-                                .add_sized(
-                                    [100.0, 40.0],
-                                    egui::Button::new(egui::RichText::new("Back").font(
-                                        egui::FontId::proportional(self.global_font_size * 1.0),
+                            ui.separator();
+                        }
+                        if ui
+                            .add_sized(
+                                [100.0, 40.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Back").font(egui::FontId::proportional(
+                                        self.global_font_size * 1.0,
                                     )),
-                                )
-                                .clicked()
-                            {
-                                self.selected_beatmapset = None;
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.selected_beatmapset = None;
+                        }
+                    } else {
+                        for (index, beatmapset) in osu_search_results_guard
+                            .iter()
+                            .take(displayed_results)
+                            .enumerate()
+                        {
+                            let response = ui.add(
+                                egui::Button::new("")
+                                    .frame(false)
+                                    .min_size(egui::vec2(ui.available_width(), 100.0)),
+                            );
+
+                            if response.clicked() {
+                                self.selected_beatmapset = Some(index);
                             }
-                        } else {
-                            for (index, beatmapset) in osu_search_results_guard.iter().enumerate() {
-                                let response = ui.add(
-                                    egui::Button::new("")
-                                        .frame(false)
-                                        .min_size(egui::vec2(ui.available_width(), 100.0)),
-                                );
 
-                                if response.clicked() {
-                                    self.selected_beatmapset = Some(index);
-                                }
-
-                                ui.allocate_ui_at_rect(response.rect, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            if let Ok(textures) = self.cover_textures.try_read() {
-                                                if let Some(Some((texture, size))) =
-                                                    textures.get(&index)
-                                                {
-                                                    let max_height = 100.0;
-                                                    let aspect_ratio = size.0 / size.1;
-                                                    let image_size = egui::Vec2::new(
-                                                        max_height * aspect_ratio,
-                                                        max_height,
+                            ui.allocate_ui_at_rect(response.rect, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        if let Ok(textures) = self.cover_textures.try_read() {
+                                            if let Some(Some((texture, size))) =
+                                                textures.get(&index)
+                                            {
+                                                let max_height = 100.0;
+                                                let aspect_ratio = size.0 / size.1;
+                                                let image_size = egui::Vec2::new(
+                                                    max_height * aspect_ratio,
+                                                    max_height,
+                                                );
+                                                ui.image((texture.id(), image_size));
+                                            } else if let Ok(errors) =
+                                                self.cover_load_errors.try_read()
+                                            {
+                                                if let Some(error_msg) = errors.get(&index) {
+                                                    ui.label(
+                                                        egui::RichText::new(error_msg)
+                                                            .color(egui::Color32::RED),
                                                     );
-                                                    ui.image((texture.id(), image_size));
-                                                } else if let Ok(errors) =
-                                                    self.cover_load_errors.try_read()
-                                                {
-                                                    if let Some(error_msg) = errors.get(&index) {
-                                                        ui.label(
-                                                            egui::RichText::new(error_msg)
-                                                                .color(egui::Color32::RED),
-                                                        );
-                                                    } else {
-                                                        ui.label("Loading...");
-                                                    }
                                                 } else {
-                                                    ui.label("Loading...");
+                                                    ui.spinner();
                                                 }
+                                            } else {
+                                                ui.spinner();
                                             }
-                                        });
+                                        } else {
+                                            ui.spinner();
+                                        }
+                                    });
 
-                                        ui.add_space(10.0);
+                                    ui.add_space(10.0);
 
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(&beatmapset.title)
-                                                    .font(egui::FontId::proportional(
-                                                        self.global_font_size * 1.0,
-                                                    ))
-                                                    .strong(),
-                                            );
-                                            ui.label(egui::RichText::new(&beatmapset.artist).font(
-                                                egui::FontId::proportional(
-                                                    self.global_font_size * 0.9,
-                                                ),
-                                            ));
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "by {}",
-                                                    beatmapset.creator
-                                                ))
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(&beatmapset.title)
                                                 .font(egui::FontId::proportional(
+                                                    self.global_font_size * 1.0,
+                                                ))
+                                                .strong(),
+                                        );
+                                        ui.label(egui::RichText::new(&beatmapset.artist).font(
+                                            egui::FontId::proportional(self.global_font_size * 0.9),
+                                        ));
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "by {}",
+                                                beatmapset.creator
+                                            ))
+                                            .font(
+                                                egui::FontId::proportional(
                                                     self.global_font_size * 0.8,
-                                                )),
-                                            );
-                                        });
+                                                ),
+                                            ),
+                                        );
                                     });
                                 });
+                            });
 
-                                ui.add_space(5.0);
-                                ui.separator();
-                            }
+                            ui.add_space(5.0);
+                            ui.separator();
                         }
+
+                        // 確保"顯示更多"按鈕在所有結果之後顯示，並增加間距
+                        ui.add_space(30.0);
+                        if displayed_results < total_results {
+                            ui.vertical_centered(|ui| {
+                                if ui
+                                    .add_sized(
+                                        [200.0, 40.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("顯示更多").size(18.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    new_displayed_results += 10;
+                                    should_load_more = true;
+                                }
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+                                if ui
+                                    .add_sized(
+                                        [120.0, 40.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("回到頂部").size(18.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.scroll_to_top = true;
+                                    ui.ctx().request_repaint(); // 請求重新繪製以立即更新滾動位置
+                                }
+                            });
+                        }
+                        // 在按鈕下方添加額外的空間，以防止被底部面板遮擋
+                        ui.add_space(50.0);
+                    }
+                } else {
+                    ui.label("沒有搜索結果");
+                }
+            }
+
+            // 在 osu_search_results_guard 的作用域之外更新 self
+            if should_load_more {
+                self.displayed_osu_results = new_displayed_results;
+                self.load_more_osu_covers(
+                    self.displayed_osu_results - 10,
+                    self.displayed_osu_results,
+                );
+            }
+        });
+    }
+    // 新增函數來加載更多封面
+    fn load_more_osu_covers(&self, start: usize, end: usize) {
+        if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
+            let mut osu_urls = Vec::new();
+            for beatmapset in osu_search_results_guard
+                .iter()
+                .skip(start)
+                .take(end - start)
+            {
+                if let Some(cover_url) = &beatmapset.covers.cover {
+                    osu_urls.push(cover_url.clone());
+                }
+            }
+
+            let sender_clone = self.sender.clone();
+            let debug_mode = self.debug_mode;
+            let need_repaint = self.need_repaint.clone();
+            let ctx = self.ctx.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = load_osu_covers(osu_urls, ctx, sender_clone).await {
+                    error!("載入更多 osu 封面時發生錯誤: {:?}", e);
+                    if debug_mode {
+                        error!("載入更多 osu 封面錯誤: {:?}", e);
                     }
                 }
+                need_repaint.store(true, std::sync::atomic::Ordering::SeqCst);
             });
-        });
+        }
     }
 
     // 渲染底部面板
