@@ -1,67 +1,57 @@
-use crate::{AuthManager, AuthPlatform};
+// 標準庫導入
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::future::Future;
+use std::io::{self, Write};
+use std::net::SocketAddr;
+use std::os::windows::ffi::OsStrExt;
+use std::pin::Pin;
+use std::process::Command;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+// 第三方庫導入
 use anyhow::{anyhow, Error, Result};
+use chrono::Local;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use regex::Regex;
-
 use reqwest::Client;
+use rspotify::{
+    clients::OAuthClient, model::PlayableItem, scopes, AuthCodeSpotify, ClientError, Credentials,
+    OAuth, Token,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-use std::ffi::OsString;
-use std::fs::OpenOptions;
-
-use std::os::windows::ffi::OsStrExt;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
-use std::time::Instant;
-
-use std::fs;
-use std::net::SocketAddr;
-use std::process::Command;
-use std::ptr;
-
-use tokio::sync::Mutex as TokioMutex;
-
 use serde_json::Value;
-
-use std::future::Future;
-use std::io::{self, Write};
-use std::pin::Pin;
+use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as TokioMutex;
 use tokio::time::timeout;
 use url::Url;
-
 use winapi::{
     shared::{minwindef::HKEY, ntdef::LPCWSTR},
     um::{
         shellapi::ShellExecuteA,
-        //winnt::KEY_READ,
         winreg::{RegCloseKey, RegOpenKeyExW, HKEY_CLASSES_ROOT},
         winuser::SW_SHOW,
     },
 };
 
-use crate::read_config;
-use chrono::Local;
-use rspotify::model::PlayableItem;
+// 本地模組導入
+use crate::{read_config, AuthManager, AuthPlatform};
 
-use rspotify::AuthCodeSpotify;
+// 常量定義
+const SPOTIFY_API_BASE_URL: &str = "https://api.spotify.com/v1";
+const SPOTIFY_AUTH_URL: &str = "https://accounts.spotify.com/api/token";
 
-use rspotify::{clients::OAuthClient, scopes, Credentials, OAuth, Token};
-
+// 靜態變量
 lazy_static! {
     static ref ERR_MSG: Mutex<String> = Mutex::new(String::new());
 }
-
-const SPOTIFY_API_BASE_URL: &str = "https://api.spotify.com/v1";
-const SPOTIFY_AUTH_URL: &str = "https://accounts.spotify.com/api/token";
-const REDIRECT_URI: &str = "http://localhost:8888/callback";
-
-use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SpotifyError {
@@ -81,6 +71,8 @@ pub enum SpotifyError {
     AuthorizationError(String),
     #[error("配置錯誤: {0}")]
     ConfigError(String),
+    #[error("Spotify 客戶端錯誤: {0}")]
+    ClientError(#[from] ClientError),
 }
 //將std::io::Error轉換為SpotifyError的io error
 impl From<io::Error> for SpotifyError {
@@ -89,7 +81,7 @@ impl From<io::Error> for SpotifyError {
     }
 }
 
-#[derive(Clone,PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum AuthStatus {
     NotStarted,
     WaitingForBrowser,
@@ -707,18 +699,11 @@ pub fn authorize_spotify(
     debug_mode: bool,
     auth_manager: Arc<AuthManager>,
     listener: Arc<TokioMutex<Option<TcpListener>>>,
-) -> Pin<Box<dyn Future<Output = Result<(), SpotifyError>> + Send>> {
+    spotify_authorized: Arc<AtomicBool>,
+) -> Pin<Box<dyn Future<Output = Result<(Option<String>, Option<String>), SpotifyError>> + Send>> {
     Box::pin(async move {
         // 重置授權狀態
         auth_manager.reset(&AuthPlatform::Spotify);
-
-        // 確保關閉之前的監聽器
-        {
-            let mut listener_guard = listener.lock().await;
-            if let Some(l) = listener_guard.take() {
-                drop(l); // 顯式關閉監聽器
-            }
-        }
 
         // 讀取和解析 JSON 文件
         let config_str = fs::read_to_string("config.json")
@@ -729,86 +714,101 @@ pub fn authorize_spotify(
         let client_id = config["spotify"]["client_id"]
             .as_str()
             .ok_or_else(|| SpotifyError::ConfigError("Missing Spotify client ID".to_string()))?;
-        let scope = "user-read-currently-playing";
+        let scope = "user-read-currently-playing user-read-private user-read-email";
 
-        // 嘗試綁定到不同的端口
-        let ports = vec![8888, 8889, 8890, 8891, 8892];
-        let mut local_listener = None;
-        let mut bound_port = 0;
-
-        for port in ports {
-            let addr = SocketAddr::from(([127, 0, 0, 1], port));
-            match TcpListener::bind(addr).await {
-                Ok(l) => {
-                    bound_port = port;
-                    local_listener = Some(l);
-                    break;
-                }
-                Err(e) => {
-                    if debug_mode {
-                        info!("無法綁定到端口 {}: {}", port, e);
-                    }
-                }
+        // 檢查是否已有監聽器，如果沒有則創建新的
+        let bound_port = {
+            let mut listener_guard = listener.lock().await;
+            if listener_guard.is_none() {
+                let (new_listener, port) = create_listener(debug_mode).await?;
+                *listener_guard = Some(new_listener);
+                port
+            } else {
+                listener_guard.as_ref().unwrap().local_addr()?.port()
             }
-        }
-
-        let local_listener = local_listener
-            .ok_or_else(|| SpotifyError::IoError("無法找到可用的端口".to_string()))?;
+        };
 
         // 更新重定向 URI
         let redirect_uri = format!("http://localhost:{}/callback", bound_port);
 
-        let mut url = Url::parse("https://accounts.spotify.com/authorize")
-            .map_err(SpotifyError::UrlParseError)?;
-        url.query_pairs_mut()
-            .append_pair("client_id", client_id)
-            .append_pair("response_type", "code")
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", scope)
-            .append_pair("show_dialog", "true");
-
-        let auth_url = url.to_string();
+        let auth_url = create_spotify_auth_url(client_id, &redirect_uri, scope)?;
 
         if debug_mode {
             info!("Authorization URL: {}", auth_url);
-        }
-
-        // 將監聽器存儲在共享狀態中
-        {
-            let mut listener_guard = listener.lock().await;
-            *listener_guard = Some(local_listener);
+            info!("Redirect URI: {}", redirect_uri);
         }
 
         auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::WaitingForBrowser);
 
         open_url_default_browser(&auth_url).map_err(|e| SpotifyError::IoError(e.to_string()))?;
 
-        // 設置超時時間，例如 2 分鐘
-        let timeout_duration = Duration::from_secs(5);
+        // 設置超時時間，增加到 3 分鐘
+        let timeout_duration = Duration::from_secs(180);
 
-        match accept_connection(&listener, timeout_duration).await {
+        let result = match accept_connection(&listener, timeout_duration).await {
             Ok(stream) => {
-                process_successful_connection(stream, &spotify_client, auth_manager.clone(), &config, bound_port, debug_mode).await?;
+                process_successful_connection(
+                    stream,
+                    &spotify_client,
+                    auth_manager.clone(),
+                    &config,
+                    &redirect_uri,
+                    bound_port,
+                    debug_mode,
+                    spotify_authorized,
+                )
+                .await
             }
             Err(e) => {
-                // 處理錯誤（包括超時和瀏覽器關閉）
-                let error_message = match e {
-                    SpotifyError::AuthorizationError(msg) => msg,
-                    _ => "授權過程中斷".to_string(),
-                };
-                auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed(error_message.clone()));
-                return Err(SpotifyError::AuthorizationError(error_message));
+                let error_message = format!("授權過程中斷: {}", e);
+                auth_manager.update_status(
+                    &AuthPlatform::Spotify,
+                    AuthStatus::Failed(error_message.clone()),
+                );
+                Err(SpotifyError::AuthorizationError(error_message))
             }
-        }
+        };
 
-        // 確保在函數結束時關閉監聽器
+        // 無論成功與否，都關閉監聽器
         {
             let mut listener_guard = listener.lock().await;
             *listener_guard = None;
         }
 
-        Ok(())
+        result
     })
+}
+
+// 輔助函數來創建監聽器
+async fn create_listener(debug_mode: bool) -> Result<(TcpListener, u16), SpotifyError> {
+    let ports = vec![8888, 8889, 8890, 8891, 8892];
+    for port in ports {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok((listener, port)),
+            Err(e) if debug_mode => {
+                info!("無法綁定到端口 {}: {}", port, e);
+            }
+            _ => {}
+        }
+    }
+    Err(SpotifyError::IoError("無法找到可用的端口".to_string()))
+}
+// 新增的輔助函數來創建 Spotify 授權 URL
+fn create_spotify_auth_url(
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+) -> Result<String, SpotifyError> {
+    let mut url = Url::parse("https://accounts.spotify.com/authorize")
+        .map_err(SpotifyError::UrlParseError)?;
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("scope", scope)
+        .append_pair("show_dialog", "true");
+    Ok(url.to_string())
 }
 
 async fn process_successful_connection(
@@ -816,9 +816,11 @@ async fn process_successful_connection(
     spotify_client: &Arc<Mutex<Option<AuthCodeSpotify>>>,
     auth_manager: Arc<AuthManager>,
     config: &Value,
+    redirect_uri: &str,
     port: u16,
     debug_mode: bool,
-) -> Result<(), SpotifyError> {
+    spotify_authorized: Arc<AtomicBool>,
+) -> Result<(Option<String>, Option<String>), SpotifyError> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader
@@ -852,6 +854,8 @@ async fn process_successful_connection(
         spotify_client,
         auth_manager,
         config,
+        redirect_uri,
+        spotify_authorized,
     )
     .await
 }
@@ -861,7 +865,9 @@ async fn process_authorization_callback(
     spotify_client: &Arc<Mutex<Option<AuthCodeSpotify>>>,
     auth_manager: Arc<AuthManager>,
     config: &Value,
-) -> Result<(), SpotifyError> {
+    redirect_uri: &str,
+    spotify_authorized: Arc<AtomicBool>,
+) -> Result<(Option<String>, Option<String>), SpotifyError> {
     let parsed_url = Url::parse(&url).map_err(SpotifyError::UrlParseError)?;
     let code = parsed_url
         .query_pairs()
@@ -871,13 +877,12 @@ async fn process_authorization_callback(
             SpotifyError::AuthorizationError("無法從回調 URL 中解析授權碼".to_string())
         })?;
 
-    // 當獲取到授權碼後，使用 client_id 和 client_secret 請求訪問令牌
     let token_url = "https://accounts.spotify.com/api/token";
     let client = reqwest::Client::new();
     let params = [
         ("grant_type", "authorization_code"),
         ("code", &code),
-        ("redirect_uri", REDIRECT_URI), 
+        ("redirect_uri", redirect_uri),
     ];
 
     match timeout(
@@ -897,81 +902,104 @@ async fn process_authorization_callback(
     )
     .await
     {
-        Ok(response_result) => {
-            match response_result {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        let token_data: Token = response.json().await?;
+        Ok(response_result) => match response_result {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    let token_data: Token = response.json().await?;
 
-                        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::TokenObtained);
+                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::TokenObtained);
 
-                        // 創建新的 AuthCodeSpotify 實例
-                        let creds = Credentials::new(
-                            config["spotify"]["client_id"].as_str().ok_or_else(|| {
-                                SpotifyError::ConfigError("Missing Spotify client ID".to_string())
-                            })?,
-                            config["spotify"]["client_secret"].as_str().ok_or_else(|| {
-                                SpotifyError::ConfigError(
-                                    "Missing Spotify client secret".to_string(),
-                                )
-                            })?,
-                        );
-                        let oauth = OAuth {
-                            redirect_uri: REDIRECT_URI.to_string(), // 使用 REDIRECT_URI 常數
-                            scopes: scopes!("user-read-currently-playing"),
-                            ..Default::default()
-                        };
+                    let creds = Credentials::new(
+                        config["spotify"]["client_id"].as_str().ok_or_else(|| {
+                            SpotifyError::ConfigError("Missing Spotify client ID".to_string())
+                        })?,
+                        config["spotify"]["client_secret"].as_str().ok_or_else(|| {
+                            SpotifyError::ConfigError("Missing Spotify client secret".to_string())
+                        })?,
+                    );
+                    let oauth = OAuth {
+                        redirect_uri: redirect_uri.to_string(),
+                        scopes: scopes!(
+                            "user-read-currently-playing",
+                            "user-read-private",
+                            "user-read-email"
+                        ),
+                        ..Default::default()
+                    };
 
-                        let new_spotify = AuthCodeSpotify::from_token_with_config(
-                            token_data,
-                            creds,
-                            oauth,
-                            rspotify::Config::default(),
-                        );
+                    let new_spotify = AuthCodeSpotify::from_token_with_config(
+                        token_data,
+                        creds,
+                        oauth,
+                        rspotify::Config::default(),
+                    );
 
-                        // 更新 spotify_client
-                        let mut client = spotify_client.lock().map_err(|e| {
-                            SpotifyError::IoError(format!("無法獲取 Spotify 客戶端鎖: {}", e))
-                        })?;
-                        *client = Some(new_spotify);
+                    // 每次授權成功後都獲取用戶信息和頭像 URL
 
-                        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+                    let user = new_spotify
+                        .current_user()
+                        .await
+                        .map_err(|e| SpotifyError::ApiError(format!("無法獲取用戶信息: {}", e)))?;
+
+                    let user_name = user.display_name.unwrap_or_else(|| "未知用戶".to_string());
+                    let user_avatar_url = user
+                        .images
+                        .and_then(|images| images.first().map(|image| image.url.clone()));
+
+                    if let Some(url) = &user_avatar_url {
+                        info!("成功獲取用戶頭像 URL: {}", url);
                     } else {
-                        let error_body =
-                            response.text().await.map_err(SpotifyError::RequestError)?;
-                        error!(
-                            "獲取訪問令牌失敗. 狀態碼: {}, 錯誤內容: {}",
-                            status, error_body
-                        );
-                        auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed(format!(
-                            "獲取訪問令牌失敗: {} - {}",
-                            status, error_body
-                        )));
-                        return Err(SpotifyError::ApiError(format!(
-                            "獲取訪問令牌失敗: {} - {}",
-                            status, error_body
-                        )));
+                        error!("用戶沒有頭像 URL");
                     }
-                }
-                Err(e) => {
-                    error!("請求訪問令牌時發生錯誤: {}", e);
-                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed(format!(
-                        "請求訪問令牌時發生錯誤: {}",
-                        e
-                    )));
-                    return Err(SpotifyError::RequestError(e));
+                    let mut client = spotify_client.lock().map_err(|e| {
+                        SpotifyError::IoError(format!("無法獲取 Spotify 客戶端鎖: {}", e))
+                    })?;
+                    *client = Some(new_spotify);
+
+                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+                    spotify_authorized.store(true, Ordering::SeqCst);
+
+                    info!("Spotify 授權成功完成");
+
+                    Ok((user_avatar_url, Some(user_name)))
+                } else {
+                    let error_body = response.text().await.map_err(SpotifyError::RequestError)?;
+                    error!(
+                        "獲取訪問令牌失敗. 狀態碼: {}, 錯誤內容: {}",
+                        status, error_body
+                    );
+                    auth_manager.update_status(
+                        &AuthPlatform::Spotify,
+                        AuthStatus::Failed(format!(
+                            "獲取訪問令牌失敗: {} - {}",
+                            status, error_body
+                        )),
+                    );
+                    Err(SpotifyError::ApiError(format!(
+                        "獲取訪問令牌失敗: {} - {}",
+                        status, error_body
+                    )))
                 }
             }
-        }
+            Err(e) => {
+                error!("請求訪問令牌時發生錯誤: {}", e);
+                auth_manager.update_status(
+                    &AuthPlatform::Spotify,
+                    AuthStatus::Failed(format!("請求訪問令牌時發生錯誤: {}", e)),
+                );
+                Err(SpotifyError::RequestError(e))
+            }
+        },
         Err(_) => {
             error!("請求訪問令牌超時");
-            auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Failed("請求訪問令牌超時".to_string()));
-            return Err(SpotifyError::ApiError("請求訪問令牌超時".to_string()));
+            auth_manager.update_status(
+                &AuthPlatform::Spotify,
+                AuthStatus::Failed("請求訪問令牌超時".to_string()),
+            );
+            Err(SpotifyError::ApiError("請求訪問令牌超時".to_string()))
         }
     }
-
-    Ok(())
 }
 
 async fn accept_connection(
@@ -981,7 +1009,9 @@ async fn accept_connection(
     let start_time = Instant::now();
     loop {
         if start_time.elapsed() >= timeout_duration {
-            return Err(SpotifyError::AuthorizationError("授權超時，請嘗試重新授權".to_string()));
+            return Err(SpotifyError::AuthorizationError(
+                "授權超時，請嘗試重新授權".to_string(),
+            ));
         }
 
         if let Some(listener) = listener.lock().await.as_ref() {
@@ -997,80 +1027,31 @@ async fn accept_connection(
     }
 }
 
-
-
 pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let is_dark = ctx.style().visuals.dark_mode;
-
-    let icon_name = if is_dark {
-        "spotify_icon_black.png"
-    } else {
-        "spotify_icon_black.png"
-    };
-
-    // 獲取可執行文件的目錄
-    let exe_dir = std::env::current_exe().ok()?;
-    let exe_dir = exe_dir.parent()?;
-
-    // icon 資料夾與 exe 檔在同一目錄
-    let icon_dir = exe_dir.join("icon");
-
-    // 構建圖標的絕對路徑
-    let icon_path = icon_dir.join(icon_name);
-
-    println!("Trying to load icon from: {:?}", icon_path);
-
-    match load_image_from_path(&icon_path) {
+    let icon_bytes = include_bytes!("assets/spotify_icon_black.png");
+    
+    match image::load_from_memory(icon_bytes) {
         Ok(image) => {
+            let size = [image.width() as _, image.height() as _];
+            let image_buffer = image.to_rgba8();
+            let pixels = image_buffer.as_flat_samples();
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                size,
+                pixels.as_slice(),
+            );
+
             let texture_options = egui::TextureOptions {
                 magnification: egui::TextureFilter::Linear,
                 minification: egui::TextureFilter::Linear,
                 wrap_mode: egui::TextureWrapMode::ClampToEdge,
             };
+            
             Some(ctx.load_texture("spotify_icon", image, texture_options))
         }
         Err(e) => {
-            eprintln!("Failed to load Spotify icon ({}): {:?}", icon_name, e);
-            // 嘗試加載另一個圖標作為備用
-            let fallback_icon_name = if is_dark {
-                "spotify_icon_black.png"
-            } else {
-                "spotify_icon.png"
-            };
-            let fallback_icon_path = icon_dir.join(fallback_icon_name);
-
-            println!(
-                "Trying to load fallback icon from: {:?}",
-                fallback_icon_path
-            );
-
-            match load_image_from_path(&fallback_icon_path) {
-                Ok(fallback_image) => {
-                    Some(ctx.load_texture("spotify_icon", fallback_image, Default::default()))
-                }
-                Err(e) => {
-                    eprintln!("無法載入備用 Spotify 圖標：{:?}", e);
-                    None
-                }
-            }
+            error!("無法載入 Spotify 圖標：{:?}", e);
+            None
         }
     }
 }
-// 輔助函數來加載圖片
-fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
-    let image = image::io::Reader::open(path)?.decode()?;
-    let size = [image.width() as _, image.height() as _];
-    let image_buffer = image.into_rgba8();
-    let pixels = image_buffer.as_flat_samples();
 
-    // 手動處理透明度
-    let mut color_image = egui::ColorImage::new(size, egui::Color32::TRANSPARENT);
-    for (i, pixel) in pixels.as_slice().chunks_exact(4).enumerate() {
-        let [r, g, b, a] = pixel else { continue };
-        if *a > 0 {
-            color_image.pixels[i] = egui::Color32::from_rgba_unmultiplied(*r, *g, *b, *a);
-        }
-    }
-
-    Ok(color_image)
-}

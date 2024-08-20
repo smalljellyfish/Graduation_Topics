@@ -1,15 +1,18 @@
-use anyhow::Result;
-use lazy_static::lazy_static;
-use log::{debug, error,LevelFilter};
-use regex::Regex;
-use serde::Deserialize;
-use serde_json::Value;
+// 標準庫導入
 use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
+
+// 第三方庫導入
+use anyhow::Result;
+use lazy_static::lazy_static;
+use log::{debug, error, LevelFilter};
+use regex::Regex;
+use serde::Deserialize;
+use serde_json::Value;
 use thiserror::Error;
 
-
+// 靜態變量
 lazy_static! {
     static ref LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 }
