@@ -638,10 +638,9 @@ pub async fn update_current_playing(
                         .join(", "),
                     album: track.album.name,
                 };
-                let spotify_url = track.external_urls.get("spotify").cloned();
                 let new_currently_playing = CurrentlyPlaying {
                     track_info,
-                    spotify_url,
+                    spotify_url: track.external_urls.get("spotify").cloned(),
                 };
                 Ok(Some(new_currently_playing))
             } else {
@@ -655,6 +654,7 @@ pub async fn update_current_playing(
         }
     }
 }
+
 pub async fn update_currently_playing_wrapper(
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
