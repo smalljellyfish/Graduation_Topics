@@ -3,7 +3,6 @@ mod osu;
 mod spotify;
 
 // 標準庫導入
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::default::Default;
 use std::env;
@@ -119,7 +118,6 @@ impl AuthManager {
 // 定義 SpotifySearchApp結構，儲存程式狀態和數據
 struct SearchApp {
     access_token: Arc<tokio::sync::Mutex<String>>,
-    auth_complete_time: Option<std::time::Instant>,
     auth_error: Option<String>,
     auth_in_progress: Arc<AtomicBool>,
     auth_manager: Arc<AuthManager>,
@@ -299,16 +297,6 @@ impl eframe::App for SearchApp {
                 });
             }
         }
-
-        // 顯示授權進度
-        if self.show_auth_progress {
-            self.show_auth_progress(ctx);
-        }
-
-        // 如果沒有錯誤且授權進度窗口應該顯示，則顯示授權進度
-        if self.auth_error.is_none() && self.show_auth_progress {
-            self.show_auth_progress(ctx);
-        }
         // 檢查授權狀態並更新 auth_in_progress
         if !self.auth_in_progress.load(Ordering::SeqCst) {
             match self.auth_manager.get_status(&AuthPlatform::Spotify) {
@@ -406,14 +394,16 @@ impl eframe::App for SearchApp {
             info!("Debug mode: {}", self.debug_mode);
         }
 
-        if self.should_update_current_playing() && self.should_detect_now_playing.load(Ordering::SeqCst) {
+        if self.should_update_current_playing()
+            && self.should_detect_now_playing.load(Ordering::SeqCst)
+        {
             let spotify_client = self.spotify_client.clone();
             let currently_playing = self.currently_playing.clone();
             let debug_mode = self.debug_mode;
             let ctx = ctx.clone();
             let spotify_authorized = self.spotify_authorized.clone();
             let should_detect_now_playing = self.should_detect_now_playing.clone();
-    
+
             tokio::spawn(async move {
                 match update_currently_playing_wrapper(
                     spotify_client.clone(),
@@ -434,7 +424,7 @@ impl eframe::App for SearchApp {
                         }
                     }
                 }
-    
+
                 ctx.request_repaint_after(std::time::Duration::from_secs(1));
             });
         }
@@ -507,7 +497,8 @@ impl SearchApp {
         let mut preloaded_icons = HashMap::new();
         let icon_paths = vec!["spotify_icon_black.png", "osu!logo.png"];
         for path in icon_paths {
-            if let Some(texture) = Self::load_icon(&ctx, path) {  // 注意這裡的 &ctx
+            if let Some(texture) = Self::load_icon(&ctx, path) {
+                // 注意這裡的 &ctx
                 preloaded_icons.insert(path.to_string(), texture);
             }
         }
@@ -538,7 +529,6 @@ impl SearchApp {
 
         let mut app = Self {
             access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
-            auth_complete_time: None,
             auth_error: None,
             auth_in_progress: Arc::new(AtomicBool::new(false)),
             auth_manager: Arc::new(AuthManager::new()),
@@ -590,149 +580,12 @@ impl SearchApp {
 
         Ok(app)
     }
-    //授權過程
-    fn show_auth_progress(&mut self, ctx: &egui::Context) {
-        let mut should_retry = false;
-        let mut should_cancel = false;
-
-        let current_status = self.auth_manager.get_status(&AuthPlatform::Spotify);
-
-        // 檢查是否超時
-        if let Some(start_time) = self.auth_start_time {
-            if start_time.elapsed() > Duration::from_secs(5)
-                && matches!(
-                    current_status,
-                    AuthStatus::NotStarted | AuthStatus::WaitingForBrowser
-                )
-            {
-                self.auth_manager.update_status(
-                    &AuthPlatform::Spotify,
-                    AuthStatus::Failed("授權超時".to_string()),
-                );
-            }
-        }
-
-        let open = RefCell::new(true); // 始終保持視窗開啟
-        egui::Window::new("Spotify 授權進度")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut *open.borrow_mut())
-            .show(ctx, |ui| {
-                match current_status {
-                    AuthStatus::NotStarted | AuthStatus::WaitingForBrowser => {
-                        ui.label("請於5秒內完成授權");
-                        if let Some(start_time) = self.auth_start_time {
-                            let elapsed = start_time.elapsed();
-                            let remaining = Duration::from_secs(5)
-                                .checked_sub(elapsed)
-                                .unwrap_or_default();
-                            if remaining.as_secs() > 0 {
-                                ui.label(format!("剩餘時間: {} 秒", remaining.as_secs()));
-                                ui.add(
-                                    egui::ProgressBar::new(
-                                        1.0 - (remaining.as_secs() as f32 / 5.0),
-                                    )
-                                    .animate(true),
-                                );
-                            }
-                        } else {
-                            self.auth_start_time = Some(Instant::now());
-                        }
-                    }
-                    AuthStatus::Processing => {
-                        ui.label("正在處理授權...");
-                        ui.add(egui::ProgressBar::new(0.5).animate(true));
-                    }
-                    AuthStatus::TokenObtained => {
-                        ui.label("成功獲取訪問令牌！");
-                        ui.add(egui::ProgressBar::new(0.75).animate(true));
-                    }
-                    AuthStatus::Completed => {
-                        ui.label("Spotify 授權成功！");
-                        ui.add(egui::ProgressBar::new(1.0));
-                        if ui.button("關閉").clicked() {
-                            self.show_auth_progress = false;
-                        }
-                    }
-                    AuthStatus::Failed(ref error) => {
-                        ui.label(
-                            egui::RichText::new(format!("授權失敗: {}", error))
-                                .color(egui::Color32::RED),
-                        );
-                        ui.add(egui::ProgressBar::new(1.0).fill(egui::Color32::RED));
-                        if ui.button("重新嘗試").clicked() {
-                            should_retry = true;
-                        }
-                        ui.add_space(10.0);
-                        if ui.button("關閉").clicked() {
-                            self.show_auth_progress = false;
-                        }
-                    }
-                }
-
-                if matches!(
-                    current_status,
-                    AuthStatus::WaitingForBrowser
-                        | AuthStatus::Processing
-                        | AuthStatus::TokenObtained
-                ) {
-                    ui.add_space(10.0);
-                    if ui.button("取消授權").clicked() {
-                        should_cancel = true;
-                    }
-                    ui.add_space(10.0);
-                    if ui.button("重試授權").clicked() {
-                        should_retry = true;
-                    }
-                }
-            });
-
-        if should_retry {
-            self.retry_authorization();
-            self.auth_start_time = Some(Instant::now());
-        }
-
-        if should_cancel {
-            self.cancel_authorization();
-            self.show_auth_progress = false;
-        }
-
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
-    }
-
-    fn retry_authorization(&mut self) {
-        self.auth_manager.reset(&AuthPlatform::Spotify);
-        self.auth_start_time = Some(Instant::now());
-        self.auth_complete_time = None;
-
-        let spotify_client = self.spotify_client.clone();
-        let auth_manager = self.auth_manager.clone();
-        let listener = self.listener.clone();
-        let debug_mode = self.debug_mode;
-        let spotify_authorized = self.spotify_authorized.clone(); // 添加這行
-
-        tokio::spawn(async move {
-            if let Err(e) = authorize_spotify(
-                spotify_client,
-                debug_mode,
-                auth_manager,
-                listener,
-                spotify_authorized, // 添加這個參數
-            )
-            .await
-            {
-                error!("重試授權失敗: {:?}", e);
-            }
-        });
-    }
 
     fn cancel_authorization(&mut self) {
-        self.auth_manager.update_status(
-            &AuthPlatform::Spotify,
-            AuthStatus::Failed("用戶取消授權".to_string()),
-        );
+        self.auth_manager.reset(&AuthPlatform::Spotify);
         self.auth_start_time = None;
-        self.auth_complete_time = None;
+        self.auth_in_progress.store(false, Ordering::SeqCst);
+        self.show_auth_progress = false;
 
         if let Ok(mut listener_guard) = self.listener.try_lock() {
             *listener_guard = None;
@@ -742,10 +595,102 @@ impl SearchApp {
             *spotify_client = None;
         }
 
-        error!("用戶取消了授權流程");
+        // 確保將狀態設置為 NotStarted
+        self.auth_manager
+            .update_status(&AuthPlatform::Spotify, AuthStatus::NotStarted);
 
-        // 確保取消授權後窗口保持開啟
+        error!("用戶取消了授權流程");
+    }
+
+    fn start_spotify_authorization(&mut self, ctx: egui::Context) {
+        if self.auth_in_progress.load(Ordering::SeqCst) {
+            info!("Spotify 授權已在進行中，請等待");
+            return;
+        }
+
+        info!("開始 Spotify 授權流程");
         self.show_auth_progress = true;
+        self.auth_in_progress.store(true, Ordering::SeqCst);
+        self.auth_manager.reset(&AuthPlatform::Spotify);
+        self.auth_start_time = Some(Instant::now());
+
+        // 重置相關狀態
+        self.spotify_authorized.store(false, Ordering::SeqCst);
+        *self.spotify_user_avatar_url.lock().unwrap() = None;
+        self.need_reload_avatar.store(true, Ordering::SeqCst);
+
+        let spotify_client = self.spotify_client.clone();
+        let debug_mode = self.debug_mode;
+        let spotify_authorized = self.spotify_authorized.clone();
+        let auth_manager = self.auth_manager.clone();
+        let listener = self.listener.clone();
+        let ctx_clone = ctx.clone();
+        let spotify_user_avatar_url = self.spotify_user_avatar_url.clone();
+        let need_reload_avatar = self.need_reload_avatar.clone();
+        let spotify_user_avatar = self.spotify_user_avatar.clone();
+        let spotify_user_name = self.spotify_user_name.clone();
+        let auth_in_progress = self.auth_in_progress.clone();
+
+        tokio::spawn(async move {
+            // 關閉之前的監聽器（如果有的話）
+            {
+                let mut listener_guard = listener.lock().await;
+                if let Some(l) = listener_guard.take() {
+                    drop(l);
+                }
+            }
+
+            let result = authorize_spotify(
+                spotify_client.clone(),
+                debug_mode,
+                auth_manager.clone(),
+                listener.clone(),
+                spotify_authorized.clone(),
+            )
+            .await;
+
+            match result {
+                Ok((avatar_url, Some(user_name))) => {
+                    info!(
+                        "Spotify 授權成功，獲取到頭像 URL: {:?} 和用戶名稱: {}",
+                        avatar_url, user_name
+                    );
+                    let avatar_url_clone = avatar_url.clone();
+                    *spotify_user_avatar_url.lock().unwrap() = avatar_url;
+                    *spotify_user_name.lock().unwrap() = Some(user_name);
+                    need_reload_avatar.store(true, Ordering::SeqCst);
+                    spotify_authorized.store(true, Ordering::SeqCst);
+                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+
+                    // 使用克隆的 avatar_url_clone
+                    if let Some(url) = avatar_url_clone {
+                        if let Err(e) = SearchApp::load_spotify_avatar(
+                            &ctx_clone,
+                            &url,
+                            spotify_user_avatar.clone(),
+                            need_reload_avatar.clone(),
+                        )
+                        .await
+                        {
+                            error!("加載 Spotify 頭像失敗: {:?}", e);
+                        }
+                    }
+                }
+                Ok((_, None)) => {
+                    error!("Spotify 授權成功，但未獲取到用戶 ID");
+                    spotify_authorized.store(true, Ordering::SeqCst);
+                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
+                }
+                Err(e) => {
+                    error!("Spotify 授權失敗: {:?}", e);
+                    auth_manager
+                        .update_status(&AuthPlatform::Spotify, AuthStatus::Failed(e.to_string()));
+                }
+            }
+
+            auth_in_progress.store(false, Ordering::SeqCst);
+            ctx_clone.request_repaint();
+        });
     }
 
     //顯示SETTINGS
@@ -1562,18 +1507,19 @@ impl SearchApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.spotify_authorized.load(Ordering::SeqCst) {
                             self.render_logged_in_user(ui);
-    
+
                             let button = egui::Button::new(egui::RichText::new("🎵").size(16.0))
                                 .min_size(egui::vec2(32.0, 32.0))
                                 .frame(false);
-    
+
                             let response = ui.add(button);
-    
+
                             if response.clicked() {
                                 self.show_spotify_now_playing = !self.show_spotify_now_playing;
-                                self.should_detect_now_playing.store(self.show_spotify_now_playing, Ordering::SeqCst);
+                                self.should_detect_now_playing
+                                    .store(self.show_spotify_now_playing, Ordering::SeqCst);
                             }
-    
+
                             if response.hovered() {
                                 ui.painter().rect_stroke(
                                     response.rect,
@@ -1588,7 +1534,7 @@ impl SearchApp {
                 },
             );
         });
-    
+
         if self.show_spotify_now_playing && self.spotify_authorized.load(Ordering::SeqCst) {
             self.render_now_playing(ui);
         }
@@ -1596,8 +1542,12 @@ impl SearchApp {
 
     fn render_now_playing(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let current_playing = self.currently_playing.lock().ok().and_then(|guard| guard.clone());
-            
+            let current_playing = self
+                .currently_playing
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+
             match current_playing {
                 Some(current_playing) => {
                     if let Some(spotify_icon) = &self.spotify_icon {
@@ -1611,16 +1561,23 @@ impl SearchApp {
                         "正在播放: {} - {}",
                         current_playing.track_info.artists, current_playing.track_info.name
                     ));
-    
+
                     // 添加搜索按鈕
                     if ui.button("🔍").clicked() {
-                        let search_query = format!(
-                            "{} {}",
-                            current_playing.track_info.artists, current_playing.track_info.name
-                        );
-                        self.search_query = search_query;
-                        let ctx = ui.ctx().clone();
-                        self.perform_search(ctx);
+                        if let Some(spotify_url) = &current_playing.spotify_url {
+                            self.search_query = spotify_url.clone();
+                            let ctx = ui.ctx().clone();
+                            self.perform_search(ctx);
+                        } else {
+                            // 如果沒有 Spotify URL，使用歌曲名稱和藝術家進行搜索
+                            let search_query = format!(
+                                "{} {}",
+                                current_playing.track_info.artists, current_playing.track_info.name
+                            );
+                            self.search_query = search_query;
+                            let ctx = ui.ctx().clone();
+                            self.perform_search(ctx);
+                        }
                     }
                 }
                 None => {
@@ -1633,20 +1590,17 @@ impl SearchApp {
     fn render_logged_in_user(&mut self, ui: &mut egui::Ui) {
         let avatar_size = egui::vec2(32.0, 32.0);
         let button_size = egui::vec2(40.0, 40.0); // 稍微增加按鈕大小，為頭像周圍留出一些空間
-    
+
         let button = egui::Button::new("")
             .fill(egui::Color32::TRANSPARENT)
             .min_size(button_size)
             .frame(false);
-    
+
         let response = ui.add(button);
-    
+
         if ui.is_rect_visible(response.rect) {
             if let Some(avatar) = &*self.spotify_user_avatar.lock().unwrap() {
-                let image_rect = egui::Rect::from_center_size(
-                    response.rect.center(),
-                    avatar_size
-                );
+                let image_rect = egui::Rect::from_center_size(response.rect.center(), avatar_size);
                 ui.painter().image(
                     avatar.id(),
                     image_rect,
@@ -1655,7 +1609,7 @@ impl SearchApp {
                 );
             }
         }
-    
+
         // 動態調整藍色圈選範圍
         if response.hovered() {
             ui.painter().rect_stroke(
@@ -1664,42 +1618,102 @@ impl SearchApp {
                 egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
             );
         }
-    
+
         if response.clicked() {
             ui.memory_mut(|mem| mem.toggle_popup(egui::Id::new("auth_popup")));
         }
-    
+
         self.render_auth_popup(ui, &response);
     }
 
     fn render_auth_popup(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         egui::popup::popup_below_widget(ui, egui::Id::new("auth_popup"), response, |ui| {
-            ui.set_min_width(200.0); // 設置彈出窗口的最小寬度
-    
+            ui.set_min_width(200.0);
+
+            // Spotify 授權部分
             if self.spotify_authorized.load(Ordering::SeqCst) {
                 let user_name = self.spotify_user_name.lock().unwrap().clone();
                 if let Some(user_name) = user_name {
                     let button_text = format!("{} (登出)", user_name);
-                    if self.create_auth_button(ui, &button_text, "spotify_icon_black.png").clicked() {
+                    if self
+                        .create_auth_button(ui, &button_text, "spotify_icon_black.png")
+                        .clicked()
+                    {
                         self.logout_spotify();
                         ui.close_menu();
                     }
                 }
             } else {
-                if self.create_auth_button(ui, "Spotify 授權", "spotify_icon_black.png").clicked() {
-                    info!("Spotify 授權按鈕被點擊了！");
-                    let ctx = ui.ctx().clone();
-                    self.start_spotify_authorization(ctx);
-                    ui.close_menu();
+                let current_status = self.auth_manager.get_status(&AuthPlatform::Spotify);
+                match current_status {
+                    AuthStatus::NotStarted | AuthStatus::Failed(_) => {
+                        if self
+                            .create_auth_button(ui, "Spotify 授權", "spotify_icon_black.png")
+                            .clicked()
+                        {
+                            info!("Spotify 授權按鈕被點擊了！");
+                            let ctx = ui.ctx().clone();
+                            self.start_spotify_authorization(ctx);
+                        }
+                    }
+                    AuthStatus::WaitingForBrowser
+                    | AuthStatus::Processing
+                    | AuthStatus::TokenObtained => {
+                        let button = egui::Button::new(egui::RichText::new("授權中...").size(16.0))
+                            .min_size(egui::vec2(200.0, 40.0));
+                        let response = ui.add(button);
+
+                        if response.clicked() {
+                            self.cancel_authorization();
+                        }
+
+                        if let Some(start_time) = self.auth_start_time {
+                            let elapsed = start_time.elapsed();
+                            let remaining = Duration::from_secs(30)
+                                .checked_sub(elapsed)
+                                .unwrap_or_default();
+                            if remaining.as_secs() > 0 {
+                                let progress = 1.0 - (remaining.as_secs() as f32 / 30.0);
+                                let rect = response.rect;
+                                let progress_rect = egui::Rect::from_min_size(
+                                    rect.min,
+                                    egui::vec2(rect.width() * progress, rect.height()),
+                                );
+                                ui.painter().rect_filled(
+                                    progress_rect,
+                                    0.0,
+                                    egui::Color32::from_rgba_premultiplied(0, 255, 0, 100),
+                                );
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    format!("授權中...{}秒", remaining.as_secs()),
+                                    egui::FontId::default(),
+                                    egui::Color32::BLACK,
+                                );
+                            } else {
+                                self.cancel_authorization();
+                            }
+                        }
+                    }
+                    AuthStatus::Completed => {
+                        ui.label("Spotify 授權成功！");
+                        if ui.button("關閉").clicked() {
+                            ui.close_menu();
+                        }
+                    }
                 }
             }
-    
-            ui.add_space(5.0); // 在兩個按鈕之間添加一些空間
-    
-            if self.create_auth_button(ui, "Osu 授權", "osu!logo.png").clicked() {
+
+            ui.add_space(5.0);
+
+            // Osu 授權部分
+            if self
+                .create_auth_button(ui, "Osu 授權", "osu!logo.png")
+                .clicked()
+            {
                 info!("Osu 授權按鈕被點擊了！");
                 // TODO: 實現 Osu 授權邏輯
-                // self.start_osu_authorization(ui.ctx().clone());
                 ui.close_menu();
             }
         });
@@ -1713,16 +1727,20 @@ impl SearchApp {
         *self.spotify_user_avatar_url.lock().unwrap() = None;
         self.need_reload_avatar.store(true, Ordering::SeqCst);
         self.show_spotify_now_playing = false;
-        self.should_detect_now_playing.store(false, Ordering::SeqCst);
+        self.should_detect_now_playing
+            .store(false, Ordering::SeqCst);
         *self.currently_playing.lock().unwrap() = None;
-        
+
         // 重置 Spotify 客戶端
         if let Ok(mut spotify_client) = self.spotify_client.try_lock() {
             *spotify_client = None;
         }
-    
+
         // 重置授權管理器
         self.auth_manager.reset(&AuthPlatform::Spotify);
+        self.auth_start_time = None;
+        self.auth_in_progress.store(false, Ordering::SeqCst);
+        self.show_auth_progress = false;
     }
 
     fn render_guest_user(&mut self, ui: &mut egui::Ui) {
@@ -1730,9 +1748,9 @@ impl SearchApp {
             .fill(egui::Color32::TRANSPARENT)
             .min_size(egui::vec2(100.0, 40.0))
             .frame(false);
-    
+
         let response = ui.add(button);
-    
+
         if ui.is_rect_visible(response.rect) {
             if let Some(default_avatar) = &self.default_avatar_texture {
                 let image_rect = egui::Rect::from_min_size(
@@ -1746,7 +1764,7 @@ impl SearchApp {
                     egui::Color32::WHITE,
                 );
             }
-    
+
             let text_pos = response.rect.left_center() + egui::vec2(5.0, 0.0);
             ui.painter().text(
                 text_pos,
@@ -1756,7 +1774,7 @@ impl SearchApp {
                 egui::Color32::BLACK,
             );
         }
-    
+
         if response.hovered() {
             ui.painter().rect_stroke(
                 response.rect,
@@ -1764,11 +1782,11 @@ impl SearchApp {
                 egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
             );
         }
-    
+
         if response.clicked() {
             ui.memory_mut(|mem| mem.toggle_popup(egui::Id::new("auth_popup")));
         }
-    
+
         self.render_auth_popup(ui, &response);
     }
 
@@ -1776,20 +1794,22 @@ impl SearchApp {
         let button_padding = egui::vec2(8.0, 4.0);
         let icon_size = egui::vec2(24.0, 24.0);
         let spacing = 8.0;
-    
+
         let total_width = 200.0;
         let total_height = 40.0;
-    
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(total_width, total_height), egui::Sense::click());
-    
+
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(total_width, total_height), egui::Sense::click());
+
         if ui.is_rect_visible(rect) {
             let visuals = ui.style().interact(&response);
-    
+
             // 繪製按鈕背景
-            ui.painter().rect_filled(rect, visuals.rounding, visuals.bg_fill);
-    
+            ui.painter()
+                .rect_filled(rect, visuals.rounding, visuals.bg_fill);
+
             let mut content_rect = rect.shrink2(button_padding);
-    
+
             // 繪製圖標（如果有）
             if let Some(texture) = self.preloaded_icons.get(icon_path) {
                 let icon_rect = egui::Rect::from_min_size(content_rect.min, icon_size);
@@ -1801,7 +1821,7 @@ impl SearchApp {
                 );
                 content_rect.min.x += icon_size.x + spacing;
             }
-    
+
             // 繪製文字
             let galley = ui.painter().layout_no_wrap(
                 text.to_owned(),
@@ -1810,11 +1830,12 @@ impl SearchApp {
             );
             let text_pos = content_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0);
             ui.painter().galley(text_pos, galley, visuals.text_color());
-    
+
             // 為了調試，繪製邊框
-            ui.painter().rect_stroke(rect, visuals.rounding, visuals.fg_stroke);
+            ui.painter()
+                .rect_stroke(rect, visuals.rounding, visuals.fg_stroke);
         }
-    
+
         response
     }
 
@@ -1823,34 +1844,27 @@ impl SearchApp {
             "spotify_icon_black.png" => {
                 info!("嘗試加載 Spotify 圖標");
                 include_bytes!("assets/spotify_icon_black.png")
-            },
+            }
             "osu!logo.png" => {
                 info!("嘗試加載 Osu 圖標");
                 include_bytes!("assets/osu!logo.png")
-            },
+            }
             _ => {
                 error!("未知的圖標路徑: {}", icon_path);
                 return None;
             }
         };
-    
+
         match image::load_from_memory(icon_bytes) {
             Ok(image) => {
                 let image = image.to_rgba8();
                 let size = [image.width() as _, image.height() as _];
                 let pixels = image.as_flat_samples();
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    size,
-                    pixels.as_slice()
-                );
-    
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+
                 info!("成功加載圖標: {}", icon_path);
-                Some(ctx.load_texture(
-                    icon_path,
-                    color_image,
-                    egui::TextureOptions::default(),
-                ))
-            },
+                Some(ctx.load_texture(icon_path, color_image, egui::TextureOptions::default()))
+            }
             Err(e) => {
                 error!("無法加載圖標 {}: {:?}", icon_path, e);
                 None
@@ -2015,96 +2029,6 @@ impl SearchApp {
                     self.display_osu_results(ui, window_size);
                 });
             }
-        });
-    }
-
-    fn start_spotify_authorization(&mut self, ctx: egui::Context) {
-        if self.auth_in_progress.load(Ordering::SeqCst) {
-            info!("Spotify 授權已在進行中，請等待");
-            return;
-        }
-
-        info!("開始 Spotify 授權流程");
-        self.show_auth_progress = true;
-        self.auth_in_progress.store(true, Ordering::SeqCst);
-        self.auth_manager.reset(&AuthPlatform::Spotify);
-
-        // 重置相關狀態
-        self.spotify_authorized.store(false, Ordering::SeqCst);
-        *self.spotify_user_avatar_url.lock().unwrap() = None;
-        self.need_reload_avatar.store(true, Ordering::SeqCst);
-
-        let spotify_client = self.spotify_client.clone();
-        let debug_mode = self.debug_mode;
-        let spotify_authorized = self.spotify_authorized.clone();
-        let auth_manager = self.auth_manager.clone();
-        let listener = self.listener.clone();
-        let ctx_clone = ctx.clone();
-        let spotify_user_avatar_url = self.spotify_user_avatar_url.clone();
-        let need_reload_avatar = self.need_reload_avatar.clone();
-        let spotify_user_avatar = self.spotify_user_avatar.clone();
-        let spotify_user_name = self.spotify_user_name.clone();
-        let auth_in_progress = self.auth_in_progress.clone();
-
-        tokio::spawn(async move {
-            // 關閉之前的監聽器（如果有的話）
-            {
-                let mut listener_guard = listener.lock().await;
-                if let Some(l) = listener_guard.take() {
-                    drop(l);
-                }
-            }
-
-            let result = authorize_spotify(
-                spotify_client.clone(),
-                debug_mode,
-                auth_manager.clone(),
-                listener.clone(),
-                spotify_authorized.clone(),
-            )
-            .await;
-
-            match result {
-                Ok((avatar_url, Some(user_name))) => {
-                    info!(
-                        "Spotify 授權成功，獲取到頭像 URL: {:?} 和用戶名稱: {}",
-                        avatar_url, user_name
-                    );
-                    let avatar_url_clone = avatar_url.clone();
-                    *spotify_user_avatar_url.lock().unwrap() = avatar_url;
-                    *spotify_user_name.lock().unwrap() = Some(user_name);
-                    need_reload_avatar.store(true, Ordering::SeqCst);
-                    spotify_authorized.store(true, Ordering::SeqCst);
-                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
-
-                    // 使用克隆的 avatar_url_clone
-                    if let Some(url) = avatar_url_clone {
-                        if let Err(e) = SearchApp::load_spotify_avatar(
-                            &ctx_clone,
-                            &url,
-                            spotify_user_avatar.clone(),
-                            need_reload_avatar.clone(),
-                        )
-                        .await
-                        {
-                            error!("加載 Spotify 頭像失敗: {:?}", e);
-                        }
-                    }
-                }
-                Ok((_, None)) => {
-                    error!("Spotify 授權成功，但未獲取到用戶 ID");
-                    spotify_authorized.store(true, Ordering::SeqCst);
-                    auth_manager.update_status(&AuthPlatform::Spotify, AuthStatus::Completed);
-                }
-                Err(e) => {
-                    error!("Spotify 授權失敗: {:?}", e);
-                    auth_manager
-                        .update_status(&AuthPlatform::Spotify, AuthStatus::Failed(e.to_string()));
-                }
-            }
-
-            auth_in_progress.store(false, Ordering::SeqCst);
-            ctx_clone.request_repaint();
         });
     }
 

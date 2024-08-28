@@ -630,17 +630,26 @@ pub async fn update_current_playing(
                     })
                     .collect::<Vec<_>>();
                 let track_info = TrackInfo {
-                    name: track.name,
+                    name: track.name.clone(),
                     artists: artists
                         .iter()
                         .map(|a| a.name.clone())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    album: track.album.name,
+                    album: track.album.name.clone(),
                 };
+                let spotify_url = track.external_urls.get("spotify").cloned();
+                
+                if debug_mode {
+                    info!("當前播放: {} - {}", track_info.artists, track_info.name);
+                    if let Some(url) = &spotify_url {
+                        info!("Spotify URL: {}", url);
+                    }
+                }
+                
                 let new_currently_playing = CurrentlyPlaying {
                     track_info,
-                    spotify_url: track.external_urls.get("spotify").cloned(),
+                    spotify_url,
                 };
                 Ok(Some(new_currently_playing))
             } else {
