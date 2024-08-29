@@ -143,6 +143,7 @@ struct SearchApp {
     need_reload_avatar: Arc<AtomicBool>,
     need_repaint: Arc<AtomicBool>,
     osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
+    open_browser_states: HashMap<usize, f32>,
     receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
     relax_slider_value: i32,
     scroll_to_top: bool,
@@ -554,6 +555,7 @@ impl SearchApp {
             need_reload_avatar: Arc::new(AtomicBool::new(false)),
             need_repaint,
             osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            open_browser_states: HashMap::new(),
             receiver: Some(receiver),
             relax_slider_value: 0,
             scroll_to_top: false,
@@ -810,6 +812,7 @@ impl SearchApp {
         let sender = self.sender.clone();
         let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
         self.displayed_osu_results = 10;
+        self.clear_cover_textures();
 
         info!("使用者搜尋: {}", query);
 
@@ -923,12 +926,15 @@ impl SearchApp {
                     *osu_search_results.lock().await = results.clone();
 
                     let mut osu_urls = Vec::new();
-                    if let Some(cover_url) = &results[0].covers.cover {
-                        osu_urls.push(cover_url.clone());
+                    for (index, beatmapset) in results.iter().enumerate() {
+                        if let Some(cover_url) = &beatmapset.covers.cover {
+                            osu_urls.push((index, cover_url.clone()));
+                        }
                     }
+                    *osu_search_results.lock().await = results;
 
                     if let Err(e) =
-                        load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await
+                        load_osu_covers(osu_urls, ctx_clone.clone(), sender.clone()).await
                     {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
@@ -1081,9 +1087,9 @@ impl SearchApp {
                     }
 
                     let mut osu_urls = Vec::new();
-                    for beatmapset in &results {
+                    for (index, beatmapset) in results.iter().enumerate() {
                         if let Some(cover_url) = &beatmapset.covers.cover {
-                            osu_urls.push(cover_url.clone());
+                            osu_urls.push((index, cover_url.clone()));
                         }
                     }
                     *osu_search_results.lock().await = results;
@@ -1244,226 +1250,118 @@ impl SearchApp {
     }
     fn display_osu_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         let mut scroll_area = egui::ScrollArea::vertical().id_source("osu_results_scroll");
-    
+
         if self.scroll_to_top {
             scroll_area = scroll_area.scroll_offset(egui::vec2(0.0, 0.0));
             self.scroll_to_top = false;
         }
-    
+
         scroll_area.show(ui, |ui| {
             let mut should_load_more = false;
             let mut new_displayed_results = self.displayed_osu_results;
-    
-            if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
-                let total_results = osu_search_results_guard.len();
-                let displayed_results = self.displayed_osu_results.min(total_results);
-    
-                ui.horizontal(|ui| {
-                    if window_size.x >= 1000.0 {
-                        ui.heading(
-                            egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
-                        );
-                        ui.add_space(10.0);
-                    }
-    
-                    ui.label(
-                        egui::RichText::new(format!("總結果數: {}", total_results))
-                            .size(self.global_font_size),
+
+            let total_results;
+            let displayed_results;
+            let mut beatmapsets_to_display = Vec::new();
+
+            {
+                if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
+                    total_results = osu_search_results_guard.len();
+                    displayed_results = self.displayed_osu_results.min(total_results);
+                    beatmapsets_to_display = osu_search_results_guard
+                        .iter()
+                        .take(displayed_results)
+                        .cloned()
+                        .collect();
+                } else {
+                    total_results = 0;
+                    displayed_results = 0;
+                }
+            }
+
+            ui.horizontal(|ui| {
+                if window_size.x >= 1000.0 {
+                    ui.heading(
+                        egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
                     );
                     ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
-                            .size(self.global_font_size),
-                    );
-                });
-    
+                }
+                ui.label(
+                    egui::RichText::new(format!("總結果數: {}", total_results))
+                        .size(self.global_font_size),
+                );
                 ui.add_space(10.0);
-    
-                if !osu_search_results_guard.is_empty() {
-                    if let Some(selected_index) = self.selected_beatmapset {
-                        let selected_beatmapset = &osu_search_results_guard[selected_index];
-                        let beatmap_info = print_beatmap_info_gui(selected_beatmapset);
-    
-                        ui.heading(
-                            egui::RichText::new(format!(
-                                "{} - {}",
-                                beatmap_info.title, beatmap_info.artist
-                            ))
-                            .font(egui::FontId::proportional(self.global_font_size * 1.1)),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("by {}", beatmap_info.creator))
-                                .font(egui::FontId::proportional(self.global_font_size * 0.9)),
-                        );
-                        ui.add_space(10.0);
-    
-                        for beatmap_info in beatmap_info.beatmaps {
-                            ui.add_space(10.0);
-                            ui.label(
-                                egui::RichText::new(beatmap_info)
-                                    .font(egui::FontId::proportional(self.global_font_size * 1.0)),
-                            );
-                            ui.add_space(10.0);
-                            ui.separator();
-                        }
-                        if ui
-                            .add_sized(
-                                [100.0, 40.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Back").font(egui::FontId::proportional(
-                                        self.global_font_size * 1.0,
-                                    )),
-                                ),
-                            )
-                            .clicked()
-                        {
-                            self.selected_beatmapset = None;
-                        }
-                    } else {
-                        for (index, beatmapset) in osu_search_results_guard
-                            .iter()
-                            .take(displayed_results)
-                            .enumerate()
-                        {
-                            let response = ui.add(
-                                egui::Button::new("")
-                                    .frame(false)
-                                    .min_size(egui::vec2(ui.available_width(), 100.0)),
-                            );
-    
-                            if response.clicked() {
-                                self.selected_beatmapset = Some(index);
-                            }
-    
-                            ui.allocate_ui_at_rect(response.rect, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        if let Ok(textures) = self.cover_textures.try_read() {
-                                            if let Some(Some((texture, size))) = textures.get(&index) {
-                                                let max_height = 100.0;
-                                                let aspect_ratio = size.0 / size.1;
-                                                let image_size = egui::Vec2::new(
-                                                    max_height * aspect_ratio,
-                                                    max_height,
-                                                );
-                                                ui.image((texture.id(), image_size));
-                                            } else if let Ok(errors) = self.cover_load_errors.try_read()
-                                            {
-                                                if let Some(error_msg) = errors.get(&index) {
-                                                    ui.label(
-                                                        egui::RichText::new(error_msg)
-                                                            .color(egui::Color32::RED),
-                                                    );
-                                                } else {
-                                                    ui.spinner();
-                                                }
-                                            } else {
-                                                ui.spinner();
-                                            }
-                                        } else {
-                                            ui.spinner();
-                                        }
-                                    });
-    
-                                    ui.add_space(10.0);
-    
-                                    ui.vertical(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(&beatmapset.title)
-                                                .font(egui::FontId::proportional(
-                                                    self.global_font_size * 1.0,
-                                                ))
-                                                .strong(),
-                                        );
-                                        ui.label(egui::RichText::new(&beatmapset.artist).font(
-                                            egui::FontId::proportional(self.global_font_size * 0.9),
-                                        ));
-                                        ui.label(
-                                            egui::RichText::new(format!("by {}", beatmapset.creator))
-                                                .font(egui::FontId::proportional(
-                                                    self.global_font_size * 0.8,
-                                                )),
-                                        );
-                                    });
-                                });
-                            });
-    
-                            // 添加 "Open in Browser" 按鈕
+                ui.label(
+                    egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
+                        .size(self.global_font_size),
+                );
+            });
+
+            ui.add_space(10.0);
+
+            if !beatmapsets_to_display.is_empty() {
+                if let Some(selected_index) = self.selected_beatmapset {
+                    if let Some(selected_beatmapset) = beatmapsets_to_display.get(selected_index) {
+                        self.display_selected_beatmapset(ui, selected_beatmapset);
+                    }
+                } else {
+                    for (index, beatmapset) in beatmapsets_to_display.iter().enumerate() {
+                        self.display_beatmapset(ui, beatmapset, index);
+                    }
+
+                    ui.add_space(30.0);
+                    if displayed_results < total_results {
+                        ui.vertical_centered(|ui| {
                             if ui
                                 .add_sized(
-                                    [120.0, 30.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Open in Browser")
-                                            .size(self.global_font_size * 0.8),
-                                    ),
+                                    [200.0, 40.0],
+                                    egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
                                 )
                                 .clicked()
                             {
-                                if let Err(e) = open::that(format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id)) {
-                                    error!("無法打開瀏覽器: {:?}", e);
-                                }
+                                new_displayed_results = (displayed_results + 10).min(total_results);
+                                should_load_more = true;
                             }
-    
-                            ui.add_space(5.0);
-                            ui.separator();
-                        }
-    
-                        ui.add_space(30.0);
-                        if displayed_results < total_results {
-                            ui.vertical_centered(|ui| {
-                                if ui
-                                    .add_sized(
-                                        [200.0, 40.0],
-                                        egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    new_displayed_results += 10;
-                                    should_load_more = true;
-                                }
-                            });
-                        } else {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
-                                if ui
-                                    .add_sized(
-                                        [120.0, 40.0],
-                                        egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.scroll_to_top = true;
-                                    ui.ctx().request_repaint();
-                                }
-                            });
-                        }
-                        ui.add_space(50.0);
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+                            if ui
+                                .add_sized(
+                                    [120.0, 40.0],
+                                    egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.scroll_to_top = true;
+                                ui.ctx().request_repaint();
+                            }
+                        });
                     }
-                } else {
-                    ui.label("沒有搜索結果");
+                    ui.add_space(50.0);
                 }
+            } else {
+                ui.label("沒有搜索結果");
             }
-    
+
             if should_load_more {
                 self.displayed_osu_results = new_displayed_results;
-                self.load_more_osu_covers(
-                    self.displayed_osu_results - 10,
-                    self.displayed_osu_results,
-                );
+                self.load_more_osu_covers(displayed_results, new_displayed_results);
             }
         });
     }
-    // 新增函數來加載更多封面
+
     fn load_more_osu_covers(&self, start: usize, end: usize) {
         if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
             let mut osu_urls = Vec::new();
-            for beatmapset in osu_search_results_guard
+            for (index, beatmapset) in osu_search_results_guard
                 .iter()
+                .enumerate()
                 .skip(start)
                 .take(end - start)
             {
                 if let Some(cover_url) = &beatmapset.covers.cover {
-                    osu_urls.push(cover_url.clone());
+                    osu_urls.push((index, cover_url.clone()));
                 }
             }
 
@@ -1473,7 +1371,7 @@ impl SearchApp {
             let ctx = self.ctx.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = load_osu_covers(osu_urls, ctx, sender_clone).await {
+                if let Err(e) = load_osu_covers(osu_urls, ctx.clone(), sender_clone).await {
                     error!("載入更多 osu 封面時發生錯誤: {:?}", e);
                     if debug_mode {
                         error!("載入更多 osu 封面錯誤: {:?}", e);
@@ -1482,6 +1380,225 @@ impl SearchApp {
                 need_repaint.store(true, std::sync::atomic::Ordering::SeqCst);
             });
         }
+    }
+
+    fn display_beatmapset(&mut self, ui: &mut egui::Ui, beatmapset: &Beatmapset, index: usize) {
+        let response = ui.add(
+            egui::Button::new("")
+                .frame(false)
+                .min_size(egui::vec2(ui.available_width(), 100.0)),
+        );
+
+        if response.clicked() {
+            self.selected_beatmapset = Some(index);
+        }
+
+        ui.allocate_ui_at_rect(response.rect, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    let is_image_loaded = if let Ok(textures) = self.cover_textures.try_read() {
+                        textures.get(&index).map_or(false, |opt| opt.is_some())
+                    } else {
+                        false
+                    };
+
+                    if is_image_loaded {
+                        if let Ok(textures) = self.cover_textures.try_read() {
+                            if let Some(Some((texture, size))) = textures.get(&index) {
+                                let max_height = 100.0;
+                                let aspect_ratio = size.0 / size.1;
+                                let image_size =
+                                    egui::Vec2::new(max_height * aspect_ratio, max_height);
+                                ui.image((texture.id(), image_size));
+                            }
+                        }
+                    } else {
+                        ui.add_sized([100.0, 100.0], egui::Spinner::new().size(32.0));
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(&beatmapset.title)
+                            .font(egui::FontId::proportional(self.global_font_size * 1.0))
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(&beatmapset.artist)
+                            .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("by {}", beatmapset.creator))
+                            .font(egui::FontId::proportional(self.global_font_size * 0.8)),
+                    );
+                });
+            });
+        });
+
+        let open_browser_button_rect = egui::Rect::from_min_size(
+            response.rect.right_bottom() + egui::vec2(-40.0, -40.0),
+            egui::vec2(30.0, 30.0),
+        );
+        let open_browser_button_response =
+            self.draw_open_browser_button(ui, index, open_browser_button_rect);
+
+        if open_browser_button_response.clicked() {
+            if let Err(e) = open::that(format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id))
+            {
+                error!("無法打開瀏覽器: {:?}", e);
+            }
+        }
+
+        open_browser_button_response.on_hover_text("在瀏覽器中打開");
+
+        ui.add_space(5.0);
+        ui.separator();
+    }
+
+    fn display_selected_beatmapset(&mut self, ui: &mut egui::Ui, beatmapset: &Beatmapset) {
+        let beatmap_info = print_beatmap_info_gui(beatmapset);
+
+        ui.heading(
+            egui::RichText::new(format!("{} - {}", beatmap_info.title, beatmap_info.artist))
+                .font(egui::FontId::proportional(self.global_font_size * 1.1)),
+        );
+        ui.label(
+            egui::RichText::new(format!("by {}", beatmap_info.creator))
+                .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+        );
+        ui.add_space(10.0);
+
+        for beatmap_info in beatmap_info.beatmaps {
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(beatmap_info)
+                    .font(egui::FontId::proportional(self.global_font_size * 1.0)),
+            );
+            ui.add_space(10.0);
+            ui.separator();
+        }
+        if ui
+            .add_sized(
+                [100.0, 40.0],
+                egui::Button::new(
+                    egui::RichText::new("Back")
+                        .font(egui::FontId::proportional(self.global_font_size * 1.0)),
+                ),
+            )
+            .clicked()
+        {
+            self.selected_beatmapset = None;
+        }
+    }
+
+    fn clear_cover_textures(&self) {
+        if let Ok(mut textures) = self.cover_textures.try_write() {
+            textures.clear();
+        }
+    }
+
+    fn draw_open_browser_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        rect: egui::Rect,
+    ) -> egui::Response {
+        let animation_progress = self.open_browser_states.entry(index).or_insert(0.0);
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+
+        if response.hovered() {
+            *animation_progress =
+                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
+        } else {
+            *animation_progress =
+                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
+        }
+
+        let center = rect.center();
+        let radius = rect.height() / 2.0;
+
+        // 繪製圓形背景
+        let bg_color_start = egui::Color32::from_rgb(200, 200, 200);
+        let bg_color_end = egui::Color32::LIGHT_BLUE;
+        let bg_color = egui::Color32::from_rgba_unmultiplied(
+            bg_color_start.r()
+                + ((bg_color_end.r() as f32 - bg_color_start.r() as f32)
+                    * *animation_progress as f32) as u8,
+            bg_color_start.g()
+                + ((bg_color_end.g() as f32 - bg_color_start.g() as f32)
+                    * *animation_progress as f32) as u8,
+            bg_color_start.b()
+                + ((bg_color_end.b() as f32 - bg_color_start.b() as f32)
+                    * *animation_progress as f32) as u8,
+            255,
+        );
+        ui.painter()
+            .circle(center, radius, bg_color, egui::Stroke::NONE);
+
+        // 繪製瀏覽器圖標
+        let icon_size = radius * 1.2;
+        let top_left = center - egui::vec2(icon_size / 2.0, icon_size / 2.0);
+        let bottom_right = center + egui::vec2(icon_size / 2.0, icon_size / 2.0);
+
+        let icon_color_start = egui::Color32::BLACK;
+        let icon_color_end = egui::Color32::WHITE;
+        let icon_color = egui::Color32::from_rgba_unmultiplied(
+            icon_color_start.r()
+                + ((icon_color_end.r() as f32 - icon_color_start.r() as f32)
+                    * *animation_progress as f32) as u8,
+            icon_color_start.g()
+                + ((icon_color_end.g() as f32 - icon_color_start.g() as f32)
+                    * *animation_progress as f32) as u8,
+            icon_color_start.b()
+                + ((icon_color_end.b() as f32 - icon_color_start.b() as f32)
+                    * *animation_progress as f32) as u8,
+            255,
+        );
+
+        ui.painter().rect_stroke(
+            egui::Rect::from_two_pos(top_left, bottom_right),
+            egui::Rounding::same(2.0),
+            egui::Stroke::new(2.0, icon_color),
+        );
+
+        // 繪製箭頭
+        let arrow_start = center + egui::vec2(-icon_size / 4.0, 0.0);
+        let arrow_end = center + egui::vec2(icon_size / 4.0, 0.0);
+        ui.painter()
+            .line_segment([arrow_start, arrow_end], egui::Stroke::new(2.0, icon_color));
+
+        let arrow_top = arrow_end + egui::vec2(-icon_size / 8.0, -icon_size / 8.0);
+        let arrow_bottom = arrow_end + egui::vec2(-icon_size / 8.0, icon_size / 8.0);
+        ui.painter()
+            .line_segment([arrow_end, arrow_top], egui::Stroke::new(2.0, icon_color));
+        ui.painter().line_segment(
+            [arrow_end, arrow_bottom],
+            egui::Stroke::new(2.0, icon_color),
+        );
+
+        // 繪製動畫效果
+        if *animation_progress > 0.0 {
+            // 內圈動畫
+            ui.painter().circle_stroke(
+                center,
+                radius * (1.0 + *animation_progress * 0.2),
+                egui::Stroke::new(2.0 * *animation_progress as f32, egui::Color32::WHITE),
+            );
+
+            // 外圈動畫
+            ui.painter().circle_stroke(
+                center,
+                radius * (1.0 + *animation_progress * 0.4),
+                egui::Stroke::new(
+                    1.0 * *animation_progress as f32,
+                    egui::Color32::from_white_alpha((128.0 * *animation_progress) as u8),
+                ),
+            );
+        }
+
+        response
     }
 
     fn load_default_avatar(&mut self) {
@@ -1510,18 +1627,20 @@ impl SearchApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.spotify_authorized.load(Ordering::SeqCst) {
                             self.render_logged_in_user(ui);
-    
+
                             let button = egui::Button::new(egui::RichText::new("🎵").size(16.0))
                                 .min_size(egui::vec2(32.0, 32.0))
                                 .frame(false);
-    
+
                             let response = ui.add(button);
-    
+
                             if response.clicked() {
-                                ui.memory_mut(|mem| mem.toggle_popup(egui::Id::new("now_playing_popup")));
+                                ui.memory_mut(|mem| {
+                                    mem.toggle_popup(egui::Id::new("now_playing_popup"))
+                                });
                                 self.should_detect_now_playing.store(true, Ordering::SeqCst);
                             }
-    
+
                             if response.hovered() {
                                 ui.painter().rect_stroke(
                                     response.rect,
@@ -1529,7 +1648,7 @@ impl SearchApp {
                                     egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
                                 );
                             }
-    
+
                             self.render_now_playing_popup(ui, &response);
                         } else {
                             self.render_guest_user(ui);
@@ -1539,14 +1658,18 @@ impl SearchApp {
             );
         });
     }
-    
+
     fn render_now_playing_popup(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         egui::popup::popup_below_widget(ui, egui::Id::new("now_playing_popup"), response, |ui| {
             ui.set_min_width(250.0);
             ui.set_max_width(300.0);
-    
-            let current_playing = self.currently_playing.lock().ok().and_then(|guard| guard.clone());
-    
+
+            let current_playing = self
+                .currently_playing
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+
             match current_playing {
                 Some(current_playing) => {
                     ui.horizontal(|ui| {
@@ -1559,14 +1682,14 @@ impl SearchApp {
                         }
                         ui.label(egui::RichText::new("正在播放").strong());
                     });
-    
+
                     ui.add_space(5.0);
-    
+
                     ui.label(egui::RichText::new(&current_playing.track_info.name).size(16.0));
                     ui.label(egui::RichText::new(&current_playing.track_info.artists).size(14.0));
-    
+
                     ui.add_space(10.0);
-    
+
                     if ui.button("搜索此歌曲").clicked() {
                         if let Some(spotify_url) = &current_playing.spotify_url {
                             self.search_query = spotify_url.clone();

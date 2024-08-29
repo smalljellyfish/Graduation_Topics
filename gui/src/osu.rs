@@ -256,15 +256,15 @@ pub fn parse_osu_url(url: &str) -> Option<(String, Option<String>)> {
     }
 }
 pub async fn load_osu_covers(
-    urls: Vec<String>,
+    urls: Vec<(usize, String)>,
     ctx: egui::Context,
     sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
 ) -> Result<(), OsuError> {
     let client = Client::new();
     let mut errors = Vec::new();
 
-    for (index, url) in urls.into_iter().enumerate() {
-        debug!("正在載入封面，URL: {}", url);
+    for (index, url) in urls.into_iter() {
+        info!("正在載入封面，URL: {}", url);
         match client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
@@ -327,3 +327,4 @@ pub async fn load_osu_covers(
         Err(OsuError::Other(errors.join("\n")))
     }
 }
+
