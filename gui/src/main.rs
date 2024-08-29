@@ -1087,16 +1087,16 @@ impl SearchApp {
                     }
 
                     let mut osu_urls = Vec::new();
-                    for (index, beatmapset) in results.iter().enumerate() {
+                    for (index, beatmapset) in results.iter().enumerate().take(10) {
                         if let Some(cover_url) = &beatmapset.covers.cover {
                             osu_urls.push((index, cover_url.clone()));
                         }
                     }
                     *osu_search_results.lock().await = results;
-
-                    if let Err(e) =
-                        load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await
-                    {
+    
+                    info!("初始加載 osu 封面：共 {} 個", osu_urls.len());
+    
+                    if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
                             ctx_clone.request_repaint();
@@ -1105,18 +1105,20 @@ impl SearchApp {
                                 ui.label(format!("{:?}", e));
                             });
                         }
+                    } else {
+                        info!("成功初始加載 {} 個 osu 封面", osu_urls.len());
                     }
                 }
-
+    
                 Ok(())
             }
             .await;
-
+    
             if let Err(e) = &result {
                 let mut error = err_msg.lock().await;
                 *error = e.to_string();
             }
-
+    
             is_searching.store(false, Ordering::SeqCst);
             need_repaint.store(true, Ordering::SeqCst);
             result
@@ -1364,18 +1366,25 @@ impl SearchApp {
                     osu_urls.push((index, cover_url.clone()));
                 }
             }
-
+    
+            // 新增：記錄本次加載的封面數量
+            let loaded_covers_count = osu_urls.len();
+            info!("正在加載更多 osu 封面：從 {} 到 {}，共 {} 個", start, end, loaded_covers_count);
+    
             let sender_clone = self.sender.clone();
             let debug_mode = self.debug_mode;
             let need_repaint = self.need_repaint.clone();
             let ctx = self.ctx.clone();
-
+    
             tokio::spawn(async move {
                 if let Err(e) = load_osu_covers(osu_urls, ctx.clone(), sender_clone).await {
                     error!("載入更多 osu 封面時發生錯誤: {:?}", e);
                     if debug_mode {
                         error!("載入更多 osu 封面錯誤: {:?}", e);
                     }
+                } else {
+                    // 新增：記錄成功加載的封面數量
+                    info!("成功加載 {} 個 osu 封面", loaded_covers_count);
                 }
                 need_repaint.store(true, std::sync::atomic::Ordering::SeqCst);
             });

@@ -264,7 +264,7 @@ pub async fn load_osu_covers(
     let mut errors = Vec::new();
 
     for (index, url) in urls.into_iter() {
-        info!("正在載入封面，URL: {}", url);
+        debug!("正在載入封面，URL: {}", url);
         match client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
