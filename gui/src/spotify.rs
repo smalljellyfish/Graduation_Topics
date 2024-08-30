@@ -312,26 +312,6 @@ pub fn print_track_infos(track_infos: Vec<Track>) {
     }
 }
  */
-pub fn print_track_info_gui(track: &Track) -> (TrackInfo, Option<String>) {
-    let track_name = track.name.clone();
-    let album_name = track.album.name.clone();
-    let artist_names = track
-        .artists
-        .iter()
-        .map(|artist| artist.name.clone())
-        .collect::<Vec<String>>()
-        .join(", ");
-
-    let spotify_url = track.external_urls.get("spotify").cloned();
-
-    let track_info = TrackInfo {
-        name: track_name,
-        artists: artist_names,
-        album: album_name,
-    };
-
-    (track_info, spotify_url)
-}
 
 pub async fn get_track_info(
     client: &reqwest::Client,
