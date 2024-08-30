@@ -160,6 +160,7 @@ struct SearchApp {
     show_auth_progress: bool,
     show_relax_window: bool,
     show_settings: bool,
+    show_side_menu: bool,
     spotify_authorized: Arc<AtomicBool>,
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
     spotify_icon: Option<egui::TextureHandle>,
@@ -174,6 +175,7 @@ struct SearchApp {
     spotify_open_button_states: HashMap<usize, f32>,
     osu_search_button_states: HashMap<usize, f32>,
     osu_open_button_states: HashMap<usize, f32>,
+    side_menu_animation: HashMap<egui::Id, f32>,
 }
 
 impl eframe::App for SearchApp {
@@ -575,6 +577,7 @@ impl SearchApp {
             show_auth_progress: false,
             show_relax_window: false,
             show_settings: false,
+            show_side_menu: false,
             spotify_authorized: Arc::new(AtomicBool::new(false)),
             spotify_client,
             spotify_icon,
@@ -589,6 +592,7 @@ impl SearchApp {
             spotify_open_button_states: HashMap::new(),
             osu_search_button_states: HashMap::new(),
             osu_open_button_states: HashMap::new(),
+            side_menu_animation: HashMap::new(),
         };
 
         app.load_default_avatar();
@@ -1156,17 +1160,18 @@ impl SearchApp {
                         return;
                     }
                 };
-    
+
                 let total_results = sorted_results.len();
                 let displayed_results = total_results;
-    
+
                 // 記錄整個可視區域的頂部
                 let top_rect = ui.max_rect();
-    
+
                 ui.horizontal(|ui| {
                     if window_size.x >= 1000.0 {
                         ui.heading(
-                            egui::RichText::new("Spotify Results").size(self.global_font_size * 1.2),
+                            egui::RichText::new("Spotify Results")
+                                .size(self.global_font_size * 1.2),
                         );
                         ui.add_space(10.0);
                     }
@@ -1180,14 +1185,14 @@ impl SearchApp {
                             .size(self.global_font_size),
                     );
                 });
-    
+
                 ui.add_space(10.0);
-    
+
                 if !sorted_results.is_empty() {
                     for (index, track) in sorted_results.iter().enumerate() {
                         self.display_spotify_track(ui, track, index);
                     }
-    
+
                     ui.add_space(30.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
@@ -1552,38 +1557,42 @@ impl SearchApp {
 
         let button_size = egui::vec2(30.0, 30.0);
         let spacing = 10.0;
-    
+
         // "以此搜尋" 按鈕
         let search_button_rect = egui::Rect::from_min_size(
-            response.rect.right_bottom() + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
+            response.rect.right_bottom()
+                + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
             button_size,
         );
-        let search_button_response = self.draw_search_button(ui, index, search_button_rect, ButtonType::Osu);
-    
+        let search_button_response =
+            self.draw_search_button(ui, index, search_button_rect, ButtonType::Osu);
+
         if search_button_response.clicked() {
             let osu_url = format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id);
             self.search_query = osu_url;
             let ctx = ui.ctx().clone();
             self.perform_search(ctx);
         }
-    
+
         search_button_response.on_hover_text("以此搜尋");
-    
+
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom() + egui::vec2(-(button_size.x + 5.0), -button_size.y - 5.0),
             button_size,
         );
-        let open_button_response = self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Osu);
-    
+        let open_button_response =
+            self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Osu);
+
         if open_button_response.clicked() {
-            if let Err(e) = open::that(format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id)) {
+            if let Err(e) = open::that(format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id))
+            {
                 error!("無法打開瀏覽器: {:?}", e);
             }
         }
-    
+
         open_button_response.on_hover_text("在瀏覽器中打開");
-    
+
         ui.add_space(5.0);
         ui.separator();
     }
@@ -1824,43 +1833,142 @@ impl SearchApp {
     //渲染頂部面板
     fn render_top_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.with_layout(
-                egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
-                |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.spotify_authorized.load(Ordering::SeqCst) {
-                            self.render_logged_in_user(ui);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // 側邊菜單按鈕
+                let button_size = egui::vec2(40.0, 40.0);
+                let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
+                
+                if ui.is_rect_visible(rect) {
+                    let visuals = ui.style().interact(&response);
+                    let animation_progress = self.side_menu_animation.entry(ui.id()).or_insert(0.0);
+    
+                    if response.hovered() {
+                        *animation_progress = (*animation_progress + ui.input(|i| i.unstable_dt) * 4.0).min(1.0);
+                    } else {
+                        *animation_progress = (*animation_progress - ui.input(|i| i.unstable_dt) * 4.0).max(0.0);
+                    }
+                    
+                    let color = egui::Color32::from_rgba_unmultiplied(
+                        255,
+                        255,
+                        255,
+                        (255.0 * *animation_progress) as u8,
+                    );
+                    
+                    ui.painter().rect_filled(
+                        rect.expand(*animation_progress * 4.0),
+                        visuals.rounding,
+                        color,
+                    );
+                    
+                    let font_id = egui::FontId::proportional(24.0);
+                    let galley = ui.painter().layout_no_wrap(
+                        "☰".to_string(),
+                        font_id,
+                        visuals.text_color(),
+                    );
+                    
+                    let text_pos = rect.center() - galley.size() / 2.0;
+                    ui.painter().galley(text_pos, galley, visuals.text_color());
+                }
+                
+                if response.clicked() {
+                    self.show_side_menu = !self.show_side_menu;
+                }
+                
+                ui.add_space(10.0);
 
-                            let button = egui::Button::new(egui::RichText::new("🎵").size(16.0))
-                                .min_size(egui::vec2(32.0, 32.0))
-                                .frame(false);
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
+                    |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.spotify_authorized.load(Ordering::SeqCst) {
+                                self.render_logged_in_user(ui);
 
-                            let response = ui.add(button);
+                                let button =
+                                    egui::Button::new(egui::RichText::new("🎵").size(16.0))
+                                        .min_size(egui::vec2(32.0, 32.0))
+                                        .frame(false);
 
-                            if response.clicked() {
-                                ui.memory_mut(|mem| {
-                                    mem.toggle_popup(egui::Id::new("now_playing_popup"))
-                                });
-                                self.should_detect_now_playing.store(true, Ordering::SeqCst);
+                                let response = ui.add(button);
+
+                                if response.clicked() {
+                                    ui.memory_mut(|mem| {
+                                        mem.toggle_popup(egui::Id::new("now_playing_popup"))
+                                    });
+                                    self.should_detect_now_playing.store(true, Ordering::SeqCst);
+                                }
+
+                                if response.hovered() {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        egui::Rounding::same(4.0),
+                                        egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
+                                    );
+                                }
+
+                                self.render_now_playing_popup(ui, &response);
+                            } else {
+                                self.render_guest_user(ui);
                             }
+                        });
+                    },
+                );
+            });
+        });
+        self.render_side_menu(ui);
+    }
 
-                            if response.hovered() {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    egui::Rounding::same(4.0),
-                                    egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
-                                );
-                            }
-
-                            self.render_now_playing_popup(ui, &response);
-                        } else {
-                            self.render_guest_user(ui);
+    fn render_side_menu(&mut self, ui: &mut egui::Ui) {
+        if self.show_side_menu {
+            let menu_area = egui::Area::new(egui::Id::new("side_menu_area"))
+                .fixed_pos(ui.min_rect().left_top() + egui::vec2(5.0, 5.0))
+                .order(egui::Order::Foreground);
+    
+            let mut menu_clicked = false;
+    
+            menu_area.show(ui.ctx(), |ui| {
+                let frame = egui::Frame::popup(ui.style())
+                    .stroke(egui::Stroke::NONE)
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(2.0, 2.0),
+                        blur: 8.0,
+                        spread: 2.0,
+                        color: egui::Color32::from_black_alpha(32),
+                    });
+    
+                frame.show(ui, |ui| {
+                    ui.set_min_width(200.0);
+                    ui.vertical(|ui| {
+                        ui.heading("菜單");
+                        ui.add_space(10.0);
+    
+                        if ui.button("Spotify").clicked() {
+                            // 處理 Spotify 按鈕點擊
+                            self.show_side_menu = false;
+                            menu_clicked = true;
+                        }
+                        if ui.button("osu!").clicked() {
+                            // 處理 osu! 按鈕點擊
+                            self.show_side_menu = false;
+                            menu_clicked = true;
+                        }
+                        if ui.button("設置").clicked() {
+                            // 處理設置按鈕點擊
+                            self.show_side_menu = false;
+                            menu_clicked = true;
                         }
                     });
-                },
-            );
-        });
+                });
+            });
+    
+            // 檢查是否在菜單外點擊
+            if ui.input(|i| i.pointer.any_click()) && !menu_clicked {
+                self.show_side_menu = false;
+            }
+        }
     }
+
     //渲染正在播放的彈窗
     fn render_now_playing_popup(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         egui::popup::popup_below_widget(ui, egui::Id::new("now_playing_popup"), response, |ui| {
