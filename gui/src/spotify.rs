@@ -152,6 +152,8 @@ pub struct Track {
     pub artists: Vec<Artist>,
     pub external_urls: HashMap<String, String>,
     pub album: Album,
+    #[serde(skip)]
+    pub index: usize,
 }
 pub struct TrackWithCover {
     pub name: String,
@@ -159,6 +161,7 @@ pub struct TrackWithCover {
     pub external_urls: HashMap<String, String>,
     pub album_name: String,
     pub cover_url: Option<String>,
+    pub index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -395,41 +398,46 @@ pub async fn search_track(
                 info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
             }
 
-            let mut track_infos: Vec<TrackWithCover> = Vec::new();
-            let mut error_occurred = false;
+            let track_infos: Vec<TrackWithCover> = tracks
+                .items
+                .into_iter()
+                .enumerate()
+                .map(|(index, track)| {
+                    let cover_url = track.album.images.first().map(|img| img.url.clone());
+                    let artists_names = track
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.clone())
+                        .collect::<Vec<String>>()
+                        .join(", ");
 
-            for track in tracks.items {
-                let cover_url = track.album.images.first().map(|img| img.url.clone());
-                let artists_names = track
-                    .artists
-                    .iter()
-                    .map(|artist| artist.name.clone())
-                    .collect::<Vec<String>>()
-                    .join(", ");
+                    if debug_mode {
+                        if let Some(url) = &cover_url {
+                            info!(
+                                "處理曲目 {}: \"{}\" by {}",
+                                index, track.name, artists_names
+                            );
+                            info!("  專輯封面 URL: {}", url);
+                        } else {
+                            error!(
+                                "處理曲目 {} 時出錯: \"{}\" by {} - 缺少封面 URL",
+                                index, track.name, artists_names
+                            );
+                        }
+                    }
 
-                if cover_url.is_none() {
-                    error_occurred = true;
-                    error!(
-                        "處理曲目時出錯: \"{}\" by {} - 缺少封面 URL",
-                        track.name, artists_names
-                    );
-                } else if debug_mode {
-                    info!("處理曲目: \"{}\" by {}", track.name, artists_names);
-                    info!("  專輯封面 URL: {}", cover_url.as_ref().unwrap());
-                }
+                    TrackWithCover {
+                        name: track.name,
+                        artists: track.artists,
+                        external_urls: track.external_urls,
+                        album_name: track.album.name,
+                        cover_url,
+                        index: index + (offset as usize),
+                    }
+                })
+                .collect();
 
-                track_infos.push(TrackWithCover {
-                    name: track.name,
-                    artists: track.artists,
-                    external_urls: track.external_urls,
-                    album_name: track.album.name,
-                    cover_url,
-                });
-            }
-
-            if error_occurred {
-                error!("部分曲目處理出錯，請檢查錯誤日誌");
-            } else if debug_mode {
+            if debug_mode {
                 info!("成功處理 {} 首曲目", track_infos.len());
             }
 
@@ -639,14 +647,14 @@ pub async fn update_current_playing(
                     album: track.album.name.clone(),
                 };
                 let spotify_url = track.external_urls.get("spotify").cloned();
-                
+
                 if debug_mode {
                     info!("當前播放: {} - {}", track_info.artists, track_info.name);
                     if let Some(url) = &spotify_url {
                         info!("Spotify URL: {}", url);
                     }
                 }
-                
+
                 let new_currently_playing = CurrentlyPlaying {
                     track_info,
                     spotify_url,
@@ -1038,23 +1046,20 @@ async fn accept_connection(
 
 pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let icon_bytes = include_bytes!("assets/spotify_icon_black.png");
-    
+
     match image::load_from_memory(icon_bytes) {
         Ok(image) => {
             let size = [image.width() as _, image.height() as _];
             let image_buffer = image.to_rgba8();
             let pixels = image_buffer.as_flat_samples();
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                size,
-                pixels.as_slice(),
-            );
+            let image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
 
             let texture_options = egui::TextureOptions {
                 magnification: egui::TextureFilter::Linear,
                 minification: egui::TextureFilter::Linear,
                 wrap_mode: egui::TextureWrapMode::ClampToEdge,
             };
-            
+
             Some(ctx.load_texture("spotify_icon", image, texture_options))
         }
         Err(e) => {
@@ -1063,4 +1068,3 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         }
     }
 }
-

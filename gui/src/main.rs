@@ -3,6 +3,8 @@ mod osu;
 mod spotify;
 
 // 標準庫導入
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::default::Default;
 use std::env;
@@ -125,7 +127,6 @@ struct SearchApp {
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
     client: Arc<tokio::sync::Mutex<Client>>,
     config_errors: Arc<Mutex<Vec<String>>>,
-    cover_load_errors: Arc<RwLock<HashMap<usize, String>>>,
     cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
     ctx: egui::Context,
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
@@ -162,7 +163,7 @@ struct SearchApp {
     spotify_user_name: Arc<Mutex<Option<String>>>,
     show_spotify_now_playing: bool,
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
-    texture_load_queue: Arc<Mutex<Vec<String>>>,
+    texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>>,
     preloaded_icons: HashMap<String, egui::TextureHandle>,
 }
 
@@ -460,7 +461,8 @@ impl SearchApp {
     ) -> Result<Self, AppError> {
         let texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let texture_load_queue = Arc::new(Mutex::new(Vec::<String>::new()));
+        let texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>> =
+            Arc::new(Mutex::new(BinaryHeap::new()));
 
         let texture_cache_clone = Arc::clone(&texture_cache);
         let texture_load_queue_clone = Arc::clone(&texture_load_queue);
@@ -507,24 +509,24 @@ impl SearchApp {
         // 啟動異步加載任務
         tokio::spawn(async move {
             loop {
-                let url = {
+                let item = {
                     let mut queue = texture_load_queue_clone.lock().unwrap();
                     queue.pop()
                 };
-
-                if let Some(url) = url {
+        
+                if let Some(Reverse((_, url))) = item {
                     if !texture_cache_clone.read().await.contains_key(&url) {
                         if let Some(texture) = Self::load_texture_async(&ctx_clone, &url).await {
                             texture_cache_clone
                                 .write()
                                 .await
-                                .insert(url, Arc::new(texture));
+                                .insert(url.clone(), Arc::new(texture));
                             need_repaint_clone.store(true, Ordering::SeqCst);
                         }
                     }
                 }
-
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         });
 
@@ -537,7 +539,6 @@ impl SearchApp {
             avatar_load_handle: None,
             client,
             config_errors,
-            cover_load_errors: Arc::new(RwLock::new(HashMap::new())),
             cover_textures,
             ctx,
             currently_playing: Arc::new(Mutex::new(None)),
@@ -906,6 +907,7 @@ impl SearchApp {
                                 total_tracks: 0,
                             },
                             external_urls: twc.external_urls.clone(),
+                            index: twc.index,
                         })
                         .collect();
 
@@ -977,6 +979,7 @@ impl SearchApp {
                                             .images
                                             .first()
                                             .map(|img| img.url.clone()),
+                                        index: 0, // 添加這行，給予一個固定的索引
                                     }])
                                 }
                                 SpotifyUrlStatus::Incomplete => {
@@ -1044,6 +1047,7 @@ impl SearchApp {
                                         total_tracks: 0,
                                     },
                                     external_urls: twc.external_urls.clone(),
+                                    index: twc.index,
                                 })
                                 .collect();
 
@@ -1093,10 +1097,12 @@ impl SearchApp {
                         }
                     }
                     *osu_search_results.lock().await = results;
-    
+
                     info!("初始加載 osu 封面：共 {} 個", osu_urls.len());
-    
-                    if let Err(e) = load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await {
+
+                    if let Err(e) =
+                        load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await
+                    {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
                             ctx_clone.request_repaint();
@@ -1109,16 +1115,16 @@ impl SearchApp {
                         info!("成功初始加載 {} 個 osu 封面", osu_urls.len());
                     }
                 }
-    
+
                 Ok(())
             }
             .await;
-    
+
             if let Err(e) = &result {
                 let mut error = err_msg.lock().await;
                 *error = e.to_string();
             }
-    
+
             is_searching.store(false, Ordering::SeqCst);
             need_repaint.store(true, Ordering::SeqCst);
             result
@@ -1130,27 +1136,38 @@ impl SearchApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if let Ok(search_results_guard) = self.search_results.try_lock() {
                     if !search_results_guard.is_empty() {
-                        for track in search_results_guard.iter() {
+                        // 創建一個可變的克隆，以便我們可以對其進行排序
+                        let mut sorted_results = search_results_guard.clone();
+                        // 根據 index 排序結果
+                        sorted_results.sort_by_key(|track| track.index);
+
+                        for track in sorted_results.iter() {
                             ui.horizontal(|ui| {
                                 ui.set_min_height(100.0);
 
                                 // 顯示專輯封面
                                 if let Some(cover_url) =
-                                    &track.album.images.first().map(|img| &img.url)
+                                    track.album.images.first().map(|img| &img.url)
                                 {
                                     let texture_cache = self.texture_cache.clone();
                                     let texture_load_queue = self.texture_load_queue.clone();
 
                                     if let Ok(cache) = texture_cache.try_read() {
-                                        if let Some(texture) = cache.get(*cover_url) {
+                                        if let Some(texture) = cache.get(cover_url) {
                                             let size = egui::Vec2::new(100.0, 100.0);
                                             ui.add(egui::Image::new(
                                                 egui::load::SizedTexture::new(texture.id(), size),
                                             ));
                                         } else {
                                             if let Ok(mut queue) = texture_load_queue.lock() {
-                                                if !queue.contains(cover_url) {
-                                                    queue.push(cover_url.to_string());
+                                                if !queue
+                                                    .iter()
+                                                    .any(|Reverse((_, url))| url == cover_url)
+                                                {
+                                                    queue.push(Reverse((
+                                                        track.index,
+                                                        cover_url.to_string(),
+                                                    )));
                                                 }
                                             }
                                             // 使用轉圈圈的加載動畫
@@ -1170,25 +1187,29 @@ impl SearchApp {
                                 }
 
                                 ui.vertical(|ui| {
-                                    let (track_info, spotify_url) = print_track_info_gui(track);
-
                                     // 顯示曲目名稱
                                     ui.label(
-                                        egui::RichText::new(&track_info.name)
+                                        egui::RichText::new(&track.name)
                                             .strong()
                                             .size(self.global_font_size * 1.2),
                                     );
 
                                     // 顯示藝術家
+                                    let artists = track
+                                        .artists
+                                        .iter()
+                                        .map(|a| a.name.clone())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
                                     ui.label(
-                                        egui::RichText::new(&track_info.artists)
-                                            .size(self.global_font_size),
+                                        egui::RichText::new(&artists).size(self.global_font_size),
                                     );
 
                                     // 顯示專輯名稱
                                     ui.label(
-                                        egui::RichText::new(&track_info.album)
-                                            .size(self.global_font_size * 0.9),
+                                        egui::RichText::new(&track.album.name)
+                                            .size(self.global_font_size * 0.8)
+                                            .italics(),
                                     );
 
                                     // 添加點擊和拖動的響應
@@ -1199,7 +1220,7 @@ impl SearchApp {
 
                                     // 雙擊
                                     if response.double_clicked() {
-                                        if let Some(url) = &spotify_url {
+                                        if let Some(url) = track.external_urls.get("spotify") {
                                             if let Err(e) = open_spotify_url(url) {
                                                 log::error!("Failed to open URL: {}", e);
                                             }
@@ -1209,7 +1230,7 @@ impl SearchApp {
                                     // 右鍵菜單
                                     response.context_menu(|ui| {
                                         self.create_context_menu(ui, |add_button| {
-                                            if let Some(url) = &spotify_url {
+                                            if let Some(url) = track.external_urls.get("spotify") {
                                                 add_button(
                                                     "Copy Link",
                                                     Box::new({
@@ -1366,16 +1387,19 @@ impl SearchApp {
                     osu_urls.push((index, cover_url.clone()));
                 }
             }
-    
+
             // 新增：記錄本次加載的封面數量
             let loaded_covers_count = osu_urls.len();
-            info!("正在加載更多 osu 封面：從 {} 到 {}，共 {} 個", start, end, loaded_covers_count);
-    
+            info!(
+                "正在加載更多 osu 封面：從 {} 到 {}，共 {} 個",
+                start, end, loaded_covers_count
+            );
+
             let sender_clone = self.sender.clone();
             let debug_mode = self.debug_mode;
             let need_repaint = self.need_repaint.clone();
             let ctx = self.ctx.clone();
-    
+
             tokio::spawn(async move {
                 if let Err(e) = load_osu_covers(osu_urls, ctx.clone(), sender_clone).await {
                     error!("載入更多 osu 封面時發生錯誤: {:?}", e);
