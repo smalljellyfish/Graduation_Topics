@@ -370,9 +370,10 @@ pub async fn search_track(
     let search_result: SearchResult =
         serde_json::from_str(&response_text).map_err(|e| SpotifyError::JsonError(e))?;
 
-    match search_result.tracks {
-        Some(tracks) => {
-            let total_pages = (tracks.total + limit - 1) / limit;
+        match search_result.tracks {
+            Some(tracks) => {
+                let total_tracks = tracks.total;
+                let total_pages = (total_tracks + limit - 1) / limit;
 
             if debug_mode {
                 info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
@@ -426,6 +427,7 @@ pub async fn search_track(
         None => Err(SpotifyError::ApiError("搜索結果中沒有找到曲目".to_string())),
     }
 }
+
 
 pub async fn get_access_token(
     client: &reqwest::Client,

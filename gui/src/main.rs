@@ -140,6 +140,7 @@ struct SearchApp {
     debug_mode: bool,
     default_avatar_texture: Option<egui::TextureHandle>,
     displayed_osu_results: usize,
+    displayed_spotify_results: usize,
     err_msg: Arc<tokio::sync::Mutex<String>>,
     error_message: Arc<tokio::sync::Mutex<String>>,
     global_font_size: f32,
@@ -379,6 +380,8 @@ impl eframe::App for SearchApp {
             self.render_top_panel(ui);
         });
 
+        self.render_side_menu(ctx);
+
         self.render_central_panel(ctx);
 
         if self.show_relax_window {
@@ -456,7 +459,14 @@ impl eframe::App for SearchApp {
             }
             _ => {}
         }
-    }
+        let side_menu_state_start = self.show_side_menu;
+        if self.show_side_menu != side_menu_state_start {
+            info!(
+                "Side menu state changed from {} to {}",
+                side_menu_state_start, self.show_side_menu
+            );
+        }
+    } // 在更新結束時再次檢查側邊選單狀態
 }
 
 impl SearchApp {
@@ -557,6 +567,7 @@ impl SearchApp {
             debug_mode,
             default_avatar_texture: None,
             displayed_osu_results: 10,
+            displayed_spotify_results: 10,
             err_msg: Arc::new(tokio::sync::Mutex::new(String::new())),
             error_message: Arc::new(tokio::sync::Mutex::new(String::new())),
             global_font_size: 16.0,
@@ -1010,7 +1021,7 @@ impl SearchApp {
                                     // 執行普通搜索
                                     if !query.is_empty() {
                                         info!("Spotify 查詢 (關鍵字): {}", query);
-                                        let limit = 10;
+                                        let limit = 50;
                                         let offset = 0;
                                         search_track(
                                             &*client.lock().await,
@@ -1160,13 +1171,13 @@ impl SearchApp {
                         return;
                     }
                 };
-
+    
                 let total_results = sorted_results.len();
-                let displayed_results = total_results;
-
+                let displayed_results = self.displayed_spotify_results.min(total_results);
+    
                 // 記錄整個可視區域的頂部
                 let top_rect = ui.max_rect();
-
+    
                 ui.horizontal(|ui| {
                     if window_size.x >= 1000.0 {
                         ui.heading(
@@ -1185,28 +1196,42 @@ impl SearchApp {
                             .size(self.global_font_size),
                     );
                 });
-
+    
                 ui.add_space(10.0);
-
+    
                 if !sorted_results.is_empty() {
-                    for (index, track) in sorted_results.iter().enumerate() {
+                    for (index, track) in sorted_results.iter().take(displayed_results).enumerate() {
                         self.display_spotify_track(ui, track, index);
                     }
-
+    
                     ui.add_space(30.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
-                        if ui
-                            .add_sized(
-                                [120.0, 40.0],
-                                egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
-                            )
-                            .clicked()
-                        {
-                            // 滾動到整個可視區域的頂部
-                            ui.scroll_to_rect(top_rect, Some(egui::Align::TOP));
-                        }
-                    });
+                    if displayed_results < total_results {
+                        ui.vertical_centered(|ui| {
+                            if ui
+                                .add_sized(
+                                    [200.0, 40.0],
+                                    egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.displayed_spotify_results = (self.displayed_spotify_results + 10).min(total_results);
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+                            if ui
+                                .add_sized(
+                                    [120.0, 40.0],
+                                    egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
+                                )
+                                .clicked()
+                            {
+                                // 滾動到整個可視區域的頂部
+                                ui.scroll_to_rect(top_rect, Some(egui::Align::TOP));
+                            }
+                        });
+                    }
                     ui.add_space(50.0);
                 } else {
                     ui.label("沒有搜索結果");
@@ -1837,45 +1862,49 @@ impl SearchApp {
                 // 側邊菜單按鈕
                 let button_size = egui::vec2(40.0, 40.0);
                 let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
-                
+
                 if ui.is_rect_visible(rect) {
                     let visuals = ui.style().interact(&response);
                     let animation_progress = self.side_menu_animation.entry(ui.id()).or_insert(0.0);
-    
+
                     if response.hovered() {
-                        *animation_progress = (*animation_progress + ui.input(|i| i.unstable_dt) * 4.0).min(1.0);
+                        *animation_progress =
+                            (*animation_progress + ui.input(|i| i.unstable_dt) * 4.0).min(1.0);
                     } else {
-                        *animation_progress = (*animation_progress - ui.input(|i| i.unstable_dt) * 4.0).max(0.0);
+                        *animation_progress =
+                            (*animation_progress - ui.input(|i| i.unstable_dt) * 4.0).max(0.0);
                     }
-                    
+
                     let color = egui::Color32::from_rgba_unmultiplied(
                         255,
                         255,
                         255,
                         (255.0 * *animation_progress) as u8,
                     );
-                    
+
                     ui.painter().rect_filled(
                         rect.expand(*animation_progress * 4.0),
                         visuals.rounding,
                         color,
                     );
-                    
+
                     let font_id = egui::FontId::proportional(24.0);
-                    let galley = ui.painter().layout_no_wrap(
-                        "☰".to_string(),
-                        font_id,
-                        visuals.text_color(),
-                    );
-                    
+                    let galley =
+                        ui.painter()
+                            .layout_no_wrap("☰".to_string(), font_id, visuals.text_color());
+
                     let text_pos = rect.center() - galley.size() / 2.0;
                     ui.painter().galley(text_pos, galley, visuals.text_color());
                 }
-                
+
                 if response.clicked() {
                     self.show_side_menu = !self.show_side_menu;
+                    info!(
+                        "Side menu button clicked. New state: {}",
+                        self.show_side_menu
+                    );
                 }
-                
+
                 ui.add_space(10.0);
 
                 ui.with_layout(
@@ -1916,56 +1945,61 @@ impl SearchApp {
                 );
             });
         });
-        self.render_side_menu(ui);
     }
 
-    fn render_side_menu(&mut self, ui: &mut egui::Ui) {
-        if self.show_side_menu {
-            let menu_area = egui::Area::new(egui::Id::new("side_menu_area"))
-                .fixed_pos(ui.min_rect().left_top() + egui::vec2(5.0, 5.0))
-                .order(egui::Order::Foreground);
+    fn render_side_menu(&mut self, ctx: &egui::Context) {
+        if !self.show_side_menu {
+            return;
+        }
     
-            let mut menu_clicked = false;
+        egui::SidePanel::left("side_menu")
+            .default_width(250.0)
+            .show(ctx, |ui| {
+                ui.debug_paint_cursor();
     
-            menu_area.show(ui.ctx(), |ui| {
-                let frame = egui::Frame::popup(ui.style())
-                    .stroke(egui::Stroke::NONE)
-                    .shadow(egui::epaint::Shadow {
-                        offset: egui::vec2(2.0, 2.0),
-                        blur: 8.0,
-                        spread: 2.0,
-                        color: egui::Color32::from_black_alpha(32),
-                    });
+                ui.add_space(10.0);
     
-                frame.show(ui, |ui| {
-                    ui.set_min_width(200.0);
-                    ui.vertical(|ui| {
-                        ui.heading("菜單");
-                        ui.add_space(10.0);
-    
-                        if ui.button("Spotify").clicked() {
-                            // 處理 Spotify 按鈕點擊
-                            self.show_side_menu = false;
-                            menu_clicked = true;
-                        }
-                        if ui.button("osu!").clicked() {
-                            // 處理 osu! 按鈕點擊
-                            self.show_side_menu = false;
-                            menu_clicked = true;
-                        }
-                        if ui.button("設置").clicked() {
-                            // 處理設置按鈕點擊
-                            self.show_side_menu = false;
-                            menu_clicked = true;
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    ui.heading("Menu");
+                    if ui.button("✕").clicked() {
+                        self.show_side_menu = false;
+                        info!("Side menu close button clicked. New state: false");
+                    }
                 });
+    
+                ui.add_space(20.0);
+    
+                ui.style_mut().spacing.item_spacing.y = 2.0;
+    
+                let menu_items = vec![
+                    ("🏠 Home", "home"),
+                    ("🔍 Issues", "issues"),
+                    ("🔀 Pull requests", "pull_requests"),
+                    ("📁 Projects", "projects"),
+                    ("💬 Discussions", "discussions"),
+                    ("🧑‍💻 Codespaces", "codespaces"),
+                    ("🌐 Explore", "explore"),
+                    ("🛒 Marketplace", "marketplace"),
+                ];
+    
+                for (label, id) in menu_items {
+                    if ui.button(label).clicked() {
+                        info!("Clicked on: {}", id);
+                        self.show_side_menu = false;
+                    }
+                }
+    
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(10.0);
+    
+                ui.label("Repositories");
             });
     
-            // 檢查是否在菜單外點擊
-            if ui.input(|i| i.pointer.any_click()) && !menu_clicked {
-                self.show_side_menu = false;
-            }
+        // 檢查是否在側邊欄外點擊
+        if ctx.input(|i| i.pointer.any_released()) && !ctx.is_pointer_over_area() {
+            self.show_side_menu = false;
+            info!("Clicked outside side menu. New state: false");
         }
     }
 
