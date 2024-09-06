@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube 標題抓取器",
+  "version": "1.0",
+  "permissions": ["activeTab", "http://localhost:8000/"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
