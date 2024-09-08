@@ -375,6 +375,11 @@ impl eframe::App for SearchApp {
                 errors.clear();
             }
         }
+        // 必要時更新視窗
+        if self.need_repaint.load(std::sync::atomic::Ordering::Relaxed) {
+            ctx.request_repaint();
+            self.need_repaint.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             self.render_top_panel(ui);
@@ -384,24 +389,6 @@ impl eframe::App for SearchApp {
 
         self.render_central_panel(ctx);
 
-        if self.show_relax_window {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("Waste your time");
-
-                    let slider = egui::Slider::new(&mut self.relax_slider_value, 0..=999_999_999)
-                        .clamp_to_range(true)
-                        .text("我不知道這是做啥");
-                    ui.add_sized([ui.available_width(), 20.0], slider);
-
-                    ui.label(format!("Value: {}", self.relax_slider_value));
-
-                    if ui.button("Close").clicked() {
-                        self.show_relax_window = false;
-                    }
-                });
-            });
-        }
 
         if self.search_query.trim().to_lowercase() == "debug" {
             self.debug_mode = !self.debug_mode; // 切換調試模式
@@ -2345,153 +2332,173 @@ impl SearchApp {
     // 渲染中央面板
     fn render_central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.set_max_width(ui.available_width());
-            ui.set_max_height(ui.available_height());
-
-            let window_size = ui.available_size();
-
-            // 使用 egui 的緩存機制來減少重繪
-            let window_size_changed = ui
-                .memory_mut(|mem| {
-                    mem.data
-                        .get_temp::<egui::Vec2>(egui::Id::new("window_size"))
-                })
-                .map_or(true, |old_size| old_size != window_size);
-
-            if window_size_changed {
-                ui.memory_mut(|mem| {
-                    mem.data
-                        .insert_temp(egui::Id::new("window_size"), window_size)
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("?").clicked() {
-                        self.show_settings = !self.show_settings;
-                    }
-                    ui.label(format!(
-                        "視窗大小: {} x {}",
-                        window_size.x as i32, window_size.y as i32
-                    ));
-                    ui.heading(egui::RichText::new("搜尋歌曲:").size(self.global_font_size * 1.3));
-                    ui.add_space(5.0);
-                });
-            }
-
-            if self.show_settings {
-                self.show_settings(ui);
-            }
-
-            ui.horizontal(|ui| {
-                let available_width = ui.available_width();
-                let text_edit_width = available_width * 0.95;
-                let text_edit_height = self.global_font_size * 2.2;
-
-                let frame = egui::Frame::none()
-                    .fill(ui.visuals().extreme_bg_color)
-                    .inner_margin(egui::Margin::same(4.0))
-                    .rounding(egui::Rounding::same(2.0));
-
-                frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let text_edit = egui::TextEdit::singleline(&mut self.search_query)
-                            .font(egui::FontId::proportional(self.global_font_size * 1.1))
-                            .margin(egui::vec2(5.0, 0.0))
-                            .desired_width(text_edit_width - self.global_font_size * 2.2)
-                            .vertical_align(egui::Align::Center);
-
-                        let text_edit_response = ui.add_sized(
-                            egui::vec2(
-                                text_edit_width - self.global_font_size * 2.2,
-                                text_edit_height,
-                            ),
-                            text_edit,
-                        );
-
-                        // 檢測Enter是否按下，並處理調試模式
-                        if text_edit_response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
-                            if self.search_query.trim().to_lowercase() == "debug" {
-                                self.debug_mode = !self.debug_mode;
-                                self.search_query.clear();
-                            } else {
-                                self.perform_search(ctx.clone());
+            egui::Frame::none()
+                .fill(ui.style().visuals.window_fill())
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.set_max_height(ui.available_height());
+    
+                    let window_size = ui.available_size();
+    
+                    // 使用 egui 的緩存機制來減少重繪
+                    let window_size_changed = ui
+                        .memory_mut(|mem| {
+                            mem.data
+                                .get_temp::<egui::Vec2>(egui::Id::new("window_size"))
+                        })
+                        .map_or(true, |old_size| old_size != window_size);
+    
+                    if window_size_changed {
+                        ui.memory_mut(|mem| {
+                            mem.data
+                                .insert_temp(egui::Id::new("window_size"), window_size)
+                        });
+    
+                        ui.horizontal(|ui| {
+                            if ui.button("?").clicked() {
+                                self.show_settings = !self.show_settings;
                             }
-                        }
-
-                        // 顯示調試模式狀態
-                        if self.debug_mode {
+                            ui.label(format!(
+                                "視窗大小: {} x {}",
+                                window_size.x as i32, window_size.y as i32
+                            ));
+                            ui.heading(egui::RichText::new("搜尋歌曲:").size(self.global_font_size * 1.3));
                             ui.add_space(5.0);
-                            ui.label(
-                                egui::RichText::new("調試模式開啟")
-                                    .color(egui::Color32::YELLOW)
-                                    .size(self.global_font_size),
-                            );
-                        }
-                    });
+                        });
+                    }
+    
+                    if self.show_settings {
+                        self.show_settings(ui);
+                    }
+    
+                    self.render_search_bar(ui, ctx);
+    
+                    // 使用緩存來減少不必要的樣式更新
+                    self.update_font_size(ui);
+    
+                    self.display_error_message(ui);
+    
+                    // 根據視窗大小決定佈局
+                    if window_size.x >= 1000.0 {
+                        self.render_large_window_layout(ui, window_size);
+                    } else {
+                        self.render_small_window_layout(ui, window_size);
+                    }
                 });
-            });
-
-            // 使用緩存來減少不必要的樣式更新
-            if ui
-                .memory_mut(|mem| mem.data.get_temp::<f32>(egui::Id::new("global_font_size")))
-                .map_or(true, |old_size| old_size != self.global_font_size)
-            {
-                ui.memory_mut(|mem| {
-                    mem.data
-                        .insert_temp(egui::Id::new("global_font_size"), self.global_font_size)
-                });
-
-                let text_style = egui::TextStyle::Body.resolve(ui.style());
-                let mut new_text_style = text_style.clone();
-                new_text_style.size = self.global_font_size;
-                ui.style_mut()
-                    .text_styles
-                    .insert(egui::TextStyle::Body, new_text_style);
-            }
-
-            if let Ok(err_msg_guard) = self.err_msg.try_lock() {
-                if !err_msg_guard.is_empty() {
-                    ui.label(format!("{}", *err_msg_guard));
-                }
-            }
-
-            // 根據視窗大小決定佈局
-            if window_size.x >= 1000.0 {
-                // 大視窗佈局
-                ui.columns(2, |columns| {
-                    // Spotify 結果
-                    columns[0].vertical(|ui| {
-                        ui.set_min_width(0.45 * window_size.x);
-                        self.display_spotify_results(ui, window_size);
-                    });
-
-                    // Osu 結果
-                    columns[1].vertical(|ui| {
-                        ui.set_min_width(0.45 * window_size.x);
-                        self.display_osu_results(ui, window_size);
-                    });
-                });
-            } else {
-                // 小視窗佈局（折疊式）
-                egui::CollapsingHeader::new(
-                    egui::RichText::new("Spotify 結果").size(self.global_font_size * 1.1),
-                )
-                .default_open(true)
-                .show(ui, |ui| {
-                    self.display_spotify_results(ui, window_size);
-                });
-
-                egui::CollapsingHeader::new(
-                    egui::RichText::new("Osu 結果").size(self.global_font_size * 1.1),
-                )
-                .default_open(true)
-                .show(ui, |ui| {
-                    self.display_osu_results(ui, window_size);
-                });
-            }
         });
     }
+    
+    fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
+        ui.columns(2, |columns| {
+            columns[0].vertical(|ui| {
+                ui.set_min_width(0.48 * window_size.x);
+                ui.set_max_width(0.48 * window_size.x);
+                self.display_spotify_results(ui, window_size);
+            });
+            columns[1].vertical(|ui| {
+                ui.set_min_width(0.48 * window_size.x);
+                ui.set_max_width(0.48 * window_size.x);
+                self.display_osu_results(ui, window_size);
+            });
+        });
+    }
+    
+    fn render_small_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::CollapsingHeader::new(
+                egui::RichText::new("Spotify 結果").size(self.global_font_size * 1.1),
+            )
+            .default_open(true)
+            .show(ui, |ui| {
+                self.display_spotify_results(ui, window_size);
+            });
+    
+            egui::CollapsingHeader::new(
+                egui::RichText::new("Osu 結果").size(self.global_font_size * 1.1),
+            )
+            .default_open(true)
+            .show(ui, |ui| {
+                self.display_osu_results(ui, window_size);
+            });
+        });
+    }
+    
+    fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            let available_width = ui.available_width();
+            let text_edit_width = available_width * 0.95;
+            let text_edit_height = self.global_font_size * 2.2;
+    
+            let frame = egui::Frame::none()
+                .fill(ui.visuals().extreme_bg_color)
+                .inner_margin(egui::Margin::same(4.0))
+                .rounding(egui::Rounding::same(2.0));
+    
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let text_edit = egui::TextEdit::singleline(&mut self.search_query)
+                        .font(egui::FontId::proportional(self.global_font_size * 1.1))
+                        .margin(egui::vec2(5.0, 0.0))
+                        .desired_width(text_edit_width - self.global_font_size * 2.2)
+                        .vertical_align(egui::Align::Center);
+    
+                    let text_edit_response = ui.add_sized(
+                        egui::vec2(
+                            text_edit_width - self.global_font_size * 2.2,
+                            text_edit_height,
+                        ),
+                        text_edit,
+                    );
+    
+                    if text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if self.search_query.trim().to_lowercase() == "debug" {
+                            self.debug_mode = !self.debug_mode;
+                            self.search_query.clear();
+                        } else {
+                            self.perform_search(ctx.clone());
+                        }
+                    }
+    
+                    if self.debug_mode {
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new("調試模式開啟")
+                                .color(egui::Color32::YELLOW)
+                                .size(self.global_font_size),
+                        );
+                    }
+                });
+            });
+        });
+    }
+    
+    fn update_font_size(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .memory_mut(|mem| mem.data.get_temp::<f32>(egui::Id::new("global_font_size")))
+            .map_or(true, |old_size| old_size != self.global_font_size)
+        {
+            ui.memory_mut(|mem| {
+                mem.data
+                    .insert_temp(egui::Id::new("global_font_size"), self.global_font_size)
+            });
+    
+            let text_style = egui::TextStyle::Body.resolve(ui.style());
+            let mut new_text_style = text_style.clone();
+            new_text_style.size = self.global_font_size;
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Body, new_text_style);
+        }
+    }
+    
+    fn display_error_message(&self, ui: &mut egui::Ui) {
+        if let Ok(err_msg_guard) = self.err_msg.try_lock() {
+            if !err_msg_guard.is_empty() {
+                ui.label(format!("{}", *err_msg_guard));
+            }
+        }
+    }
+    
 
     async fn load_spotify_avatar(
         ctx: &egui::Context,
@@ -2591,6 +2598,7 @@ async fn main() -> Result<(), AppError> {
     let need_repaint = Arc::new(AtomicBool::new(false));
 
     let mut native_options = eframe::NativeOptions::default();
+    native_options.hardware_acceleration = eframe::HardwareAcceleration::Preferred;
     native_options.viewport = ViewportBuilder {
         title: Some(String::from("Search App")),
         inner_size: Some(egui::Vec2::new(730.0, 430.0)),

@@ -1,7 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <style>
+    body {
+      width: 300px;
+      font-family: Arial, sans-serif;
+    }
     .loader {
       border: 4px solid #f3f3f3;
       border-top: 4px solid #3498db;
@@ -10,23 +15,42 @@
       height: 20px;
       animation: spin 1s linear infinite;
       display: none;
+      margin-left: 10px;
     }
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
+    button {
+      margin-bottom: 10px;
+    }
+    h3 {
+      margin-bottom: 5px;
+    }
+    #title, #description, #result {
+      margin-bottom: 10px;
+      word-wrap: break-word;
+    }
+    .cached {
+      color: #888;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
-  <button id="getTitleAndDescription">get title and description</button>
-  <div class="loader" id="loader"></div>
+  <button id="getTitleAndDescription">獲取標題和描述</button>
+  <span class="loader" id="loader"></span>
   <div>
-    <h3>title：</h3>
+    <h3>標題：</h3>
     <div id="title"></div>
   </div>
   <div>
-    <h3>description：</h3>
+    <h3>描述：</h3>
     <div id="description"></div>
+  </div>
+  <div>
+    <h3>分析結果：</h3>
+    <div id="result"></div>
   </div>
   <script src="popup.js"></script>
 </body>

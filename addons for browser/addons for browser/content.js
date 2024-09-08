@@ -5,7 +5,7 @@ function getYouTubeTitle() {
 
 function getYouTubeDescription() {
   return new Promise((resolve) => {
-    const maxAttempts = 5;
+    const maxAttempts = 3;
     let attempts = 0;
 
     function tryGetDescription() {
@@ -24,35 +24,16 @@ function getYouTubeDescription() {
     function extractDescription() {
       const descriptionElement = document.querySelector('yt-attributed-string.ytd-text-inline-expander');
       if (descriptionElement) {
-        // 遞迴函數來提取純文本
-        function extractText(element) {
-          let text = '';
-          for (let node of element.childNodes) {
-            if (node.nodeType === Node.TEXT_NODE) {
-              text += node.textContent;
-            } else if (node.nodeType === Node.ELEMENT_NODE) {
-              if (node.tagName.toLowerCase() === 'a') {
-                text += node.href + ' ';
-              }
-              text += extractText(node);
-            }
-          }
-          return text;
-        }
-
-        const description = extractText(descriptionElement).trim();
-        console.log('Raw description:', description); // 用於調試
+        const description = descriptionElement.textContent.trim();
         if (description) {
           resolve(description);
-        } else if (attempts < maxAttempts) {
-          setTimeout(tryGetDescription, 1000);
         } else {
-          resolve('無法獲取描述');
+          resolve(null); // 描述為空時返回 null
         }
       } else if (attempts < maxAttempts) {
         setTimeout(tryGetDescription, 1000);
       } else {
-        resolve('無法獲取描述');
+        resolve(null); // 無法獲取描述時返回 null
       }
     }
 
@@ -63,13 +44,15 @@ function getYouTubeDescription() {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getTitleAndDescription') {
     Promise.all([getYouTubeTitle(), getYouTubeDescription()]).then(([title, description]) => {
-      console.log('Title:', title); // 用於調試
-      console.log('Description:', description); // 用於調試
+      console.log('Title:', title);
+      console.log('Description:', description);
       sendResponse({
         title: title,
-        description: description
+        description: description // 可能為 null
       });
     });
     return true; // 表示我們將異步發送回應
   }
 });
+
+
