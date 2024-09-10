@@ -38,9 +38,10 @@ use crate::osu::{
     parse_osu_url, print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
-    authorize_spotify, get_access_token, get_track_info, is_valid_spotify_url, load_spotify_icon,
-    open_spotify_url, search_track, update_currently_playing_wrapper, Album, AuthStatus,
-    CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
+    add_track_to_liked, authorize_spotify, get_access_token, get_track_info, is_track_liked,
+    is_valid_spotify_url, load_spotify_icon, open_spotify_url, remove_track_from_liked,
+    search_track, update_currently_playing_wrapper, Album, AuthStatus, CurrentlyPlaying, Image,
+    SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{read_config, set_log_level, ConfigError};
 
@@ -152,15 +153,12 @@ struct SearchApp {
     need_repaint: Arc<AtomicBool>,
     osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
     receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
-    relax_slider_value: i32,
     scroll_to_top: bool,
     search_query: String,
     search_results: Arc<tokio::sync::Mutex<Vec<Track>>>,
     selected_beatmapset: Option<usize>,
     sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
     show_auth_progress: bool,
-    show_relax_window: bool,
-    show_settings: bool,
     show_side_menu: bool,
     spotify_authorized: Arc<AtomicBool>,
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
@@ -171,6 +169,7 @@ struct SearchApp {
     show_spotify_now_playing: bool,
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
     texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>>,
+    track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
     preloaded_icons: HashMap<String, egui::TextureHandle>,
     spotify_search_button_states: HashMap<usize, f32>,
     spotify_open_button_states: HashMap<usize, f32>,
@@ -378,7 +377,8 @@ impl eframe::App for SearchApp {
         // 必要時更新視窗
         if self.need_repaint.load(std::sync::atomic::Ordering::Relaxed) {
             ctx.request_repaint();
-            self.need_repaint.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.need_repaint
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -388,7 +388,6 @@ impl eframe::App for SearchApp {
         self.render_side_menu(ctx);
 
         self.render_central_panel(ctx);
-
 
         if self.search_query.trim().to_lowercase() == "debug" {
             self.debug_mode = !self.debug_mode; // 切換調試模式
@@ -566,15 +565,12 @@ impl SearchApp {
             need_repaint,
             osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             receiver: Some(receiver),
-            relax_slider_value: 0,
             scroll_to_top: false,
             search_query: String::new(),
             search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             selected_beatmapset: None,
             sender,
             show_auth_progress: false,
-            show_relax_window: false,
-            show_settings: false,
             show_side_menu: false,
             spotify_authorized: Arc::new(AtomicBool::new(false)),
             spotify_client,
@@ -585,6 +581,7 @@ impl SearchApp {
             show_spotify_now_playing: false,
             texture_cache,
             texture_load_queue,
+            track_liked_status: Arc::new(Mutex::new(HashMap::new())),
             preloaded_icons,
             spotify_search_button_states: HashMap::new(),
             spotify_open_button_states: HashMap::new(),
@@ -710,39 +707,6 @@ impl SearchApp {
         });
     }
 
-    //顯示SETTINGS
-    fn show_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("設置");
-        ui.add_space(10.0);
-
-        // 整體縮放設置
-        ui.horizontal(|ui| {
-            ui.label("整體縮放:");
-            if ui.button("-").clicked() {
-                let new_scale = (ui.ctx().pixels_per_point() - 0.1).max(0.5);
-                ui.ctx().set_pixels_per_point(new_scale);
-            }
-            ui.label(format!("{:.2}", ui.ctx().pixels_per_point()));
-            if ui.button("+").clicked() {
-                let new_scale = (ui.ctx().pixels_per_point() + 0.1).min(3.0);
-                ui.ctx().set_pixels_per_point(new_scale);
-            }
-        });
-
-        ui.add_space(10.0);
-
-        // Debug 模式設置
-        let mut debug_mode = self.debug_mode;
-        ui.checkbox(&mut debug_mode, "Debug Mode");
-        if debug_mode != self.debug_mode {
-            self.debug_mode = debug_mode;
-            set_log_level(self.debug_mode);
-            info!("Debug mode: {}", self.debug_mode);
-        }
-
-        ui.add_space(10.0);
-    }
-
     fn should_update_current_playing(&self) -> bool {
         if !self.spotify_authorized.load(Ordering::SeqCst) {
             return false; // 如果未授權，不更新
@@ -828,6 +792,10 @@ impl SearchApp {
         let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
         self.displayed_osu_results = 10;
         self.clear_cover_textures();
+
+        let spotify_authorized = self.spotify_authorized.clone();
+        let spotify_client = self.spotify_client.clone();
+        let track_liked_status = self.track_liked_status.clone();
 
         info!("使用者搜尋: {}", query);
 
@@ -1130,6 +1098,44 @@ impl SearchApp {
                     }
                 }
 
+                if spotify_authorized.load(Ordering::SeqCst) {
+                    let spotify_client = spotify_client.clone();
+                    let track_liked_status = track_liked_status.clone();
+                    let ctx_clone = ctx_clone.clone();
+                    let search_results = search_results.clone();
+
+                    tokio::spawn(async move {
+                        let spotify_option = {
+                            let spotify_guard = spotify_client.lock().unwrap();
+                            spotify_guard.as_ref().cloned()
+                        };
+
+                        if let Some(spotify) = spotify_option {
+                            let search_results = search_results.lock().await;
+                            for track in &*search_results {
+                                if let Some(track_id) = track
+                                    .external_urls
+                                    .get("spotify")
+                                    .and_then(|url| url.split('/').last())
+                                {
+                                    match is_track_liked(&spotify, track_id).await {
+                                        Ok(is_liked) => {
+                                            track_liked_status
+                                                .lock()
+                                                .unwrap()
+                                                .insert(track_id.to_string(), is_liked);
+                                        }
+                                        Err(e) => {
+                                            error!("檢查曲目收藏狀態時發生錯誤: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            ctx_clone.request_repaint();
+                        }
+                    });
+                }
+
                 Ok(())
             }
             .await;
@@ -1158,13 +1164,13 @@ impl SearchApp {
                         return;
                     }
                 };
-    
+
                 let total_results = sorted_results.len();
                 let displayed_results = self.displayed_spotify_results.min(total_results);
-    
+
                 // 記錄整個可視區域的頂部
                 let top_rect = ui.max_rect();
-    
+
                 ui.horizontal(|ui| {
                     if window_size.x >= 1000.0 {
                         ui.heading(
@@ -1183,14 +1189,15 @@ impl SearchApp {
                             .size(self.global_font_size),
                     );
                 });
-    
+
                 ui.add_space(10.0);
-    
+
                 if !sorted_results.is_empty() {
-                    for (index, track) in sorted_results.iter().take(displayed_results).enumerate() {
+                    for (index, track) in sorted_results.iter().take(displayed_results).enumerate()
+                    {
                         self.display_spotify_track(ui, track, index);
                     }
-    
+
                     ui.add_space(30.0);
                     if displayed_results < total_results {
                         ui.vertical_centered(|ui| {
@@ -1201,7 +1208,8 @@ impl SearchApp {
                                 )
                                 .clicked()
                             {
-                                self.displayed_spotify_results = (self.displayed_spotify_results + 10).min(total_results);
+                                self.displayed_spotify_results =
+                                    (self.displayed_spotify_results + 10).min(total_results);
                             }
                         });
                     } else {
@@ -1290,17 +1298,17 @@ impl SearchApp {
         });
 
         let button_size = egui::vec2(30.0, 30.0);
-        let spacing = 10.0; // 增加間距
+        let spacing = 10.0;
 
         // "以此搜尋" 按鈕
         let search_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom()
-                + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
+                + egui::vec2(-(4.0 * button_size.x + 3.0 * spacing), -button_size.y - 5.0),
             button_size,
         );
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-
+    
         if search_button_response.clicked() {
             if let Some(spotify_url) = track.external_urls.get("spotify") {
                 self.search_query = spotify_url.clone();
@@ -1319,17 +1327,18 @@ impl SearchApp {
             let ctx = ui.ctx().clone();
             self.perform_search(ctx);
         }
-
+    
         search_button_response.on_hover_text("以此搜尋");
-
+    
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
-            response.rect.right_bottom() + egui::vec2(-(button_size.x + 5.0), -button_size.y - 5.0),
+            response.rect.right_bottom()
+                + egui::vec2(-(3.0 * button_size.x + 2.0 * spacing), -button_size.y - 5.0),
             button_size,
         );
         let open_button_response =
             self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
-
+    
         if open_button_response.clicked() {
             if let Some(url) = track.external_urls.get("spotify") {
                 if let Err(e) = open_spotify_url(url) {
@@ -1337,8 +1346,68 @@ impl SearchApp {
                 }
             }
         }
-
+    
         open_button_response.on_hover_text("打開");
+    
+        // "Liked" 按鈕
+        if self.spotify_authorized.load(Ordering::SeqCst) {
+            let track_id = track.external_urls.get("spotify")
+                .and_then(|url| url.split('/').last())
+                .unwrap_or("");
+            let is_liked = self.track_liked_status
+                .lock()
+                .unwrap()
+                .get(track_id)
+                .cloned()
+                .unwrap_or(false);
+    
+            let like_button_text = if is_liked { "❤️" } else { "🤍" };
+            let like_button_rect = egui::Rect::from_min_size(
+                response.rect.right_bottom() + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
+                button_size,
+            );
+            let like_button_response = ui.put(like_button_rect, egui::Button::new(like_button_text));
+    
+            if like_button_response.clicked() {
+                let spotify_client = self.spotify_client.clone();
+                let track_id = track_id.to_string();
+                let track_liked_status = self.track_liked_status.clone();
+                let ctx = ui.ctx().clone();
+    
+                tokio::spawn(async move {
+                    let spotify_option = {
+                        let spotify_guard = spotify_client.lock().unwrap();
+                        spotify_guard.as_ref().cloned()
+                    };
+    
+                    if let Some(spotify) = spotify_option {
+                        let result = if is_liked {
+                            remove_track_from_liked(&spotify, &track_id).await
+                        } else {
+                            add_track_to_liked(&spotify, &track_id).await
+                        };
+    
+                        match result {
+                            Ok(_) => {
+                                let mut status = track_liked_status.lock().unwrap();
+                                status.insert(track_id.clone(), !is_liked);
+                                log::info!("成功更新曲目 {} 的收藏狀態", track_id);
+                                ctx.request_repaint();
+                            }
+                            Err(e) => {
+                                log::error!("更新曲目 {} 的收藏狀態時發生錯誤: {:?}", track_id, e);
+                            }
+                        }
+                    } else {
+                        log::error!("無法獲取 Spotify 客戶端");
+                    }
+                });
+            }
+    
+            like_button_response.on_hover_text(if is_liked { "取消收藏" } else { "收藏" });
+        } else {
+            log::error!("Spotify 未授權，無法顯示 Liked 按鈕");
+        }
 
         response.context_menu(|ui| {
             self.create_context_menu(ui, |add_button| {
@@ -1938,55 +2007,126 @@ impl SearchApp {
         if !self.show_side_menu {
             return;
         }
-    
+
         egui::SidePanel::left("side_menu")
-            .default_width(250.0)
-            .show(ctx, |ui| {
-                ui.debug_paint_cursor();
-    
-                ui.add_space(10.0);
-    
-                ui.horizontal(|ui| {
-                    ui.heading("Menu");
-                    if ui.button("✕").clicked() {
-                        self.show_side_menu = false;
-                        info!("Side menu close button clicked. New state: false");
-                    }
+            .default_width(300.0)
+            .show_animated(ctx, self.show_side_menu, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        ui.heading("Menu");
+                        if ui.button("Close").clicked() {
+                            self.show_side_menu = false;
+                            info!("側邊選單關閉按鈕被點擊。新狀態: false");
+                        }
+                    });
+
+                    ui.add_space(20.0);
+
+                    ui.style_mut().spacing.item_spacing.y = 8.0;
+
+                    // Spotify 折疊式視窗
+                    egui::CollapsingHeader::new(egui::RichText::new("🎵 Spotify").size(20.0))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.add_space(5.0);
+                            if self
+                                .create_auth_button(ui, "Search", "spotify_icon_black.png")
+                                .clicked()
+                            {
+                                info!("點擊了: Spotify 搜尋");
+                                self.show_side_menu = false;
+                            }
+                            if self
+                                .create_auth_button(ui, "Playlists", "spotify_icon_black.png")
+                                .clicked()
+                            {
+                                info!("點擊了: Spotify 播放清單");
+                                self.show_side_menu = false;
+                            }
+                            if self
+                                .create_auth_button(ui, "Now Playing", "spotify_icon_black.png")
+                                .clicked()
+                            {
+                                info!("點擊了: Spotify 正在播放");
+                                self.show_side_menu = false;
+                            }
+                        });
+
+                    // Osu 折疊式視窗
+                    egui::CollapsingHeader::new(egui::RichText::new("🎮 Osu").size(20.0))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.add_space(5.0);
+                            if self
+                                .create_auth_button(ui, "Beatmaps", "osu!logo.png")
+                                .clicked()
+                            {
+                                info!("點擊了: Osu 節奏圖譜");
+                                self.show_side_menu = false;
+                            }
+                            if self
+                                .create_auth_button(ui, "Scores", "osu!logo.png")
+                                .clicked()
+                            {
+                                info!("點擊了: Osu 分數");
+                                self.show_side_menu = false;
+                            }
+                            if self
+                                .create_auth_button(ui, "Profile", "osu!logo.png")
+                                .clicked()
+                            {
+                                info!("點擊了: Osu 個人檔案");
+                                self.show_side_menu = false;
+                            }
+                        });
+
+                    // Settings 折疊式視窗
+                    egui::CollapsingHeader::new(egui::RichText::new("Settings").size(20.0))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.add_space(5.0);
+
+                            // 整體縮放設置
+                            ui.horizontal(|ui| {
+                                ui.label("整體縮放:");
+                                if ui.button("-").clicked() {
+                                    let new_scale = (ui.ctx().pixels_per_point() - 0.1).max(0.5);
+                                    ui.ctx().set_pixels_per_point(new_scale);
+                                }
+                                ui.label(format!("{:.2}", ui.ctx().pixels_per_point()));
+                                if ui.button("+").clicked() {
+                                    let new_scale = (ui.ctx().pixels_per_point() + 0.1).min(3.0);
+                                    ui.ctx().set_pixels_per_point(new_scale);
+                                }
+                            });
+
+                            ui.add_space(10.0);
+
+                            // Debug 模式設置
+                            let mut debug_mode = self.debug_mode;
+                            ui.checkbox(&mut debug_mode, "Debug Mode");
+                            if debug_mode != self.debug_mode {
+                                self.debug_mode = debug_mode;
+                                set_log_level(self.debug_mode);
+                                info!("Debug mode: {}", self.debug_mode);
+                            }
+
+                            ui.add_space(10.0);
+
+                            if ui.button("About").clicked() {
+                                info!("點擊了: 關於");
+                                self.show_side_menu = false;
+                            }
+                        });
                 });
-    
-                ui.add_space(20.0);
-    
-                ui.style_mut().spacing.item_spacing.y = 2.0;
-    
-                let menu_items = vec![
-                    ("🏠 Home", "home"),
-                    ("🔍 Issues", "issues"),
-                    ("🔀 Pull requests", "pull_requests"),
-                    ("📁 Projects", "projects"),
-                    ("💬 Discussions", "discussions"),
-                    ("🧑‍💻 Codespaces", "codespaces"),
-                    ("🌐 Explore", "explore"),
-                    ("🛒 Marketplace", "marketplace"),
-                ];
-    
-                for (label, id) in menu_items {
-                    if ui.button(label).clicked() {
-                        info!("Clicked on: {}", id);
-                        self.show_side_menu = false;
-                    }
-                }
-    
-                ui.add_space(20.0);
-                ui.separator();
-                ui.add_space(10.0);
-    
-                ui.label("Repositories");
             });
-    
+
         // 檢查是否在側邊欄外點擊
         if ctx.input(|i| i.pointer.any_released()) && !ctx.is_pointer_over_area() {
             self.show_side_menu = false;
-            info!("Clicked outside side menu. New state: false");
+            info!("在側邊選單外點擊。新狀態: false");
         }
     }
 
@@ -2187,6 +2327,7 @@ impl SearchApp {
         self.should_detect_now_playing
             .store(false, Ordering::SeqCst);
         *self.currently_playing.lock().unwrap() = None;
+        self.track_liked_status.lock().unwrap().clear();
 
         // 重置 Spotify 客戶端
         if let Ok(mut spotify_client) = self.spotify_client.try_lock() {
@@ -2337,9 +2478,9 @@ impl SearchApp {
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
                     ui.set_max_height(ui.available_height());
-    
+
                     let window_size = ui.available_size();
-    
+
                     // 使用 egui 的緩存機制來減少重繪
                     let window_size_changed = ui
                         .memory_mut(|mem| {
@@ -2347,37 +2488,21 @@ impl SearchApp {
                                 .get_temp::<egui::Vec2>(egui::Id::new("window_size"))
                         })
                         .map_or(true, |old_size| old_size != window_size);
-    
+
                     if window_size_changed {
                         ui.memory_mut(|mem| {
                             mem.data
                                 .insert_temp(egui::Id::new("window_size"), window_size)
                         });
-    
-                        ui.horizontal(|ui| {
-                            if ui.button("?").clicked() {
-                                self.show_settings = !self.show_settings;
-                            }
-                            ui.label(format!(
-                                "視窗大小: {} x {}",
-                                window_size.x as i32, window_size.y as i32
-                            ));
-                            ui.heading(egui::RichText::new("搜尋歌曲:").size(self.global_font_size * 1.3));
-                            ui.add_space(5.0);
-                        });
                     }
-    
-                    if self.show_settings {
-                        self.show_settings(ui);
-                    }
-    
+
                     self.render_search_bar(ui, ctx);
-    
+
                     // 使用緩存來減少不必要的樣式更新
                     self.update_font_size(ui);
-    
+
                     self.display_error_message(ui);
-    
+
                     // 根據視窗大小決定佈局
                     if window_size.x >= 1000.0 {
                         self.render_large_window_layout(ui, window_size);
@@ -2387,7 +2512,7 @@ impl SearchApp {
                 });
         });
     }
-    
+
     fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         ui.columns(2, |columns| {
             columns[0].vertical(|ui| {
@@ -2402,7 +2527,7 @@ impl SearchApp {
             });
         });
     }
-    
+
     fn render_small_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::CollapsingHeader::new(
@@ -2412,7 +2537,7 @@ impl SearchApp {
             .show(ui, |ui| {
                 self.display_spotify_results(ui, window_size);
             });
-    
+
             egui::CollapsingHeader::new(
                 egui::RichText::new("Osu 結果").size(self.global_font_size * 1.1),
             )
@@ -2422,18 +2547,18 @@ impl SearchApp {
             });
         });
     }
-    
+
     fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             let available_width = ui.available_width();
             let text_edit_width = available_width * 0.95;
             let text_edit_height = self.global_font_size * 2.2;
-    
+
             let frame = egui::Frame::none()
                 .fill(ui.visuals().extreme_bg_color)
                 .inner_margin(egui::Margin::same(4.0))
                 .rounding(egui::Rounding::same(2.0));
-    
+
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let text_edit = egui::TextEdit::singleline(&mut self.search_query)
@@ -2441,7 +2566,7 @@ impl SearchApp {
                         .margin(egui::vec2(5.0, 0.0))
                         .desired_width(text_edit_width - self.global_font_size * 2.2)
                         .vertical_align(egui::Align::Center);
-    
+
                     let text_edit_response = ui.add_sized(
                         egui::vec2(
                             text_edit_width - self.global_font_size * 2.2,
@@ -2449,8 +2574,10 @@ impl SearchApp {
                         ),
                         text_edit,
                     );
-    
-                    if text_edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+
+                    if text_edit_response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
                         if self.search_query.trim().to_lowercase() == "debug" {
                             self.debug_mode = !self.debug_mode;
                             self.search_query.clear();
@@ -2458,7 +2585,7 @@ impl SearchApp {
                             self.perform_search(ctx.clone());
                         }
                     }
-    
+
                     if self.debug_mode {
                         ui.add_space(5.0);
                         ui.label(
@@ -2471,7 +2598,7 @@ impl SearchApp {
             });
         });
     }
-    
+
     fn update_font_size(&mut self, ui: &mut egui::Ui) {
         if ui
             .memory_mut(|mem| mem.data.get_temp::<f32>(egui::Id::new("global_font_size")))
@@ -2481,7 +2608,7 @@ impl SearchApp {
                 mem.data
                     .insert_temp(egui::Id::new("global_font_size"), self.global_font_size)
             });
-    
+
             let text_style = egui::TextStyle::Body.resolve(ui.style());
             let mut new_text_style = text_style.clone();
             new_text_style.size = self.global_font_size;
@@ -2490,7 +2617,7 @@ impl SearchApp {
                 .insert(egui::TextStyle::Body, new_text_style);
         }
     }
-    
+
     fn display_error_message(&self, ui: &mut egui::Ui) {
         if let Ok(err_msg_guard) = self.err_msg.try_lock() {
             if !err_msg_guard.is_empty() {
@@ -2498,7 +2625,6 @@ impl SearchApp {
             }
         }
     }
-    
 
     async fn load_spotify_avatar(
         ctx: &egui::Context,

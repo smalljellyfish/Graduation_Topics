@@ -21,7 +21,7 @@ use log::{debug, error, info};
 use regex::Regex;
 use reqwest::Client;
 use rspotify::{
-    clients::OAuthClient, model::PlayableItem, scopes, AuthCodeSpotify, ClientError, Credentials,
+    clients::OAuthClient, model::{PlayableItem,TrackId}, scopes, AuthCodeSpotify, ClientError, Credentials,
     OAuth, Token,
 };
 use serde::{Deserialize, Serialize};
@@ -713,7 +713,7 @@ pub fn authorize_spotify(
         let client_id = config["spotify"]["client_id"]
             .as_str()
             .ok_or_else(|| SpotifyError::ConfigError("Missing Spotify client ID".to_string()))?;
-        let scope = "user-read-currently-playing user-read-private user-read-email";
+        let scope = "user-read-currently-playing user-read-private user-read-email user-library-read user-library-modify";
 
         // 檢查是否已有監聽器，如果沒有則創建新的
         let bound_port = {
@@ -1049,4 +1049,44 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
             None
         }
     }
+}
+
+pub async fn add_track_to_liked(
+    spotify: &AuthCodeSpotify, 
+    track_id: &str
+) -> Result<(), SpotifyError> {
+    let track_id = TrackId::from_id(track_id)
+        .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
+    
+    spotify.current_user_saved_tracks_add(vec![track_id])
+        .await
+        .map_err(|e| SpotifyError::ApiError(format!("無法將曲目添加到 Liked Songs: {}", e)))?;
+    
+    Ok(())
+}
+pub async fn is_track_liked(
+    spotify: &AuthCodeSpotify, 
+    track_id: &str
+) -> Result<bool, SpotifyError> {
+    let track_id = TrackId::from_id(track_id)
+        .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
+    
+    let is_saved = spotify.current_user_saved_tracks_contains(vec![track_id])
+        .await
+        .map_err(|e| SpotifyError::ApiError(format!("無法檢查曲目是否已收藏: {}", e)))?;
+    
+    Ok(is_saved[0])
+}
+pub async fn remove_track_from_liked(
+    spotify: &AuthCodeSpotify, 
+    track_id: &str
+) -> Result<(), SpotifyError> {
+    let track_id = TrackId::from_id(track_id)
+        .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
+    
+    spotify.current_user_saved_tracks_delete(vec![track_id])
+        .await
+        .map_err(|e| SpotifyError::ApiError(format!("無法從 Liked Songs 中移除曲目: {}", e)))?;
+    
+    Ok(())
 }
