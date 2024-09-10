@@ -99,32 +99,6 @@ pub async fn get_beatmapsets(
     Ok(search_response.beatmapsets)
 }
 
-pub async fn get_beatmapset_by_id(
-    client: &Client,
-    access_token: &str,
-    beatmapset_id: &str,
-    debug_mode: bool,
-) -> Result<Beatmapset, OsuError> {
-    let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
-
-    let response = client
-        .get(&url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(OsuError::RequestError)?;
-
-    let response_text = response.text().await.map_err(OsuError::RequestError)?;
-
-    if debug_mode {
-        info!("Osu API 回應 JSON: {}", response_text);
-    }
-
-    let beatmapset: Beatmapset =
-        serde_json::from_str(&response_text).map_err(OsuError::JsonError)?;
-
-    Ok(beatmapset)
-}
 
 pub async fn get_beatmapset_details(
     client: &Client,

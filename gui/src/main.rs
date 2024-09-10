@@ -34,8 +34,8 @@ use tokio::{
 
 // 本地模組導入
 use crate::osu::{
-    get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers,
-    parse_osu_url, print_beatmap_info_gui, Beatmapset,
+    get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers, parse_osu_url,
+    print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_track_info, is_track_liked,
@@ -826,238 +826,206 @@ impl SearchApp {
                         anyhow!("Osu 錯誤：無法獲取 token")
                     })?;
 
-                if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
-                    info!("Osu 搜尋: {}", query);
+                // 創建一個 future 來執行 Spotify 搜索
+                let spotify_search_future = async {
+                    if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
+                        info!("Osu 搜尋: {}", query);
 
-                    // 如果是 osu! URL，獲取譜面信息並進行反搜索
-                    let (artist, title) = get_beatmapset_details(
-                        &*client.lock().await,
-                        &osu_token,
-                        &beatmapset_id,
-                        debug_mode,
-                    )
-                    .await
-                    .map_err(|e| {
-                        error!("獲取 Osu 譜面詳情錯誤: {:?}", e);
-                        anyhow!("Osu 錯誤：獲取譜面詳情失敗")
-                    })?;
+                        let (artist, title) = get_beatmapset_details(
+                            &*client.lock().await,
+                            &osu_token,
+                            &beatmapset_id,
+                            debug_mode,
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!("獲取 Osu 譜面詳情錯誤: {:?}", e);
+                            anyhow!("Osu 錯誤：獲取譜面詳情失敗")
+                        })?;
 
-                    let spotify_query = format!("{} {}", artist, title);
-                    info!("Spotify 查詢 (從 osu): {}", spotify_query);
+                        let spotify_query = format!("{} {}", artist, title);
+                        info!("Spotify 查詢 (從 osu): {}", spotify_query);
 
-                    // 使用獲取的 artist 和 title 進行 Spotify 搜索
-                    let tracks_with_cover = search_track(
-                        &*client.lock().await,
-                        &spotify_query,
-                        &spotify_token,
-                        10,
-                        0,
-                        debug_mode,
-                    )
-                    .await
-                    .map(|(tracks_with_cover, _)| tracks_with_cover)
-                    .map_err(|e| {
-                        error!("Spotify 反搜索錯誤: {:?}", e);
-                        anyhow!("Spotify 錯誤：反搜索失敗")
-                    })?;
+                        let tracks_with_cover = search_track(
+                            &*client.lock().await,
+                            &spotify_query,
+                            &spotify_token,
+                            10,
+                            0,
+                            debug_mode,
+                        )
+                        .await
+                        .map(|(tracks_with_cover, _)| tracks_with_cover)
+                        .map_err(|e| {
+                            error!("Spotify 反搜索錯誤: {:?}", e);
+                            anyhow!("Spotify 錯誤：反搜索失敗")
+                        })?;
 
-                    // 更新 Spotify 搜索結果
-                    let mut search_results = search_results.lock().await;
-                    *search_results = tracks_with_cover
-                        .iter()
-                        .map(|twc| Track {
-                            name: twc.name.clone(),
-                            artists: twc.artists.clone(),
-                            album: Album {
-                                name: twc.album_name.clone(),
-                                album_type: String::new(),
-                                artists: Vec::new(),
-                                external_urls: HashMap::new(),
-                                images: twc
-                                    .cover_url
-                                    .as_ref()
-                                    .map(|url| {
-                                        vec![Image {
-                                            url: url.clone(),
-                                            width: 0,
-                                            height: 0,
-                                        }]
-                                    })
-                                    .unwrap_or_default(),
-                                id: String::new(),
-                                release_date: String::new(),
-                                total_tracks: 0,
-                            },
-                            external_urls: twc.external_urls.clone(),
-                            index: twc.index,
-                        })
-                        .collect();
-
-                    // 獲取 osu! beatmapset
-                    let beatmapset = get_beatmapset_by_id(
-                        &*client.lock().await,
-                        &osu_token,
-                        &beatmapset_id,
-                        debug_mode,
-                    )
-                    .await
-                    .map_err(|e| {
-                        error!("獲取 Osu 譜面錯誤: {:?}", e);
-                        anyhow!("Osu 錯誤：獲取譜面失敗")
-                    })?;
-
-                    let results = vec![beatmapset];
-                    *osu_search_results.lock().await = results.clone();
-
-                    let mut osu_urls = Vec::new();
-                    for (index, beatmapset) in results.iter().enumerate() {
-                        if let Some(cover_url) = &beatmapset.covers.cover {
-                            osu_urls.push((index, cover_url.clone()));
-                        }
-                    }
-                    *osu_search_results.lock().await = results;
-
-                    if let Err(e) =
-                        load_osu_covers(osu_urls, ctx_clone.clone(), sender.clone()).await
-                    {
-                        error!("載入 osu 封面時發生錯誤: {:?}", e);
-                        if debug_mode {
-                            ctx_clone.request_repaint();
-                            egui::Window::new("Error").show(&ctx_clone, |ui| {
-                                ui.label("部分 osu 封面載入失敗:");
-                                ui.label(format!("{:?}", e));
-                            });
-                        }
-                    }
-                } else {
-                    // 如果不是 osu! URL，執行原有的搜索邏輯
-                    let spotify_result: Result<Vec<TrackWithCover>> =
-                        match is_valid_spotify_url(&query) {
-                            Ok(status) => match status {
-                                SpotifyUrlStatus::Valid => {
-                                    info!("Spotify 查詢 (URL): {}", query);
-                                    let track_id = query
-                                        .split('/')
-                                        .last()
-                                        .unwrap_or("")
-                                        .split('?')
-                                        .next()
-                                        .unwrap_or("");
-                                    let track = get_track_info(
-                                        &*client.lock().await,
-                                        track_id,
-                                        &spotify_token,
-                                    )
-                                    .await
-                                    .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
-
-                                    Ok(vec![TrackWithCover {
-                                        name: track.name.clone(),
-                                        artists: track.artists.clone(),
-                                        external_urls: track.external_urls.clone(),
-                                        album_name: track.album.name.clone(),
-                                        cover_url: track
-                                            .album
-                                            .images
-                                            .first()
-                                            .map(|img| img.url.clone()),
-                                        index: 0, // 添加這行，給予一個固定的索引
-                                    }])
-                                }
-                                SpotifyUrlStatus::Incomplete => {
-                                    *error = "Spotify URL 不完整，請輸入完整的 URL".to_string();
-                                    return Ok(());
-                                }
-                                SpotifyUrlStatus::Invalid => {
-                                    *error = "無效的 Spotify URL".to_string();
-                                    return Ok(());
-                                }
-                                SpotifyUrlStatus::NotSpotify => {
-                                    // 執行普通搜索
-                                    if !query.is_empty() {
-                                        info!("Spotify 查詢 (關鍵字): {}", query);
-                                        let limit = 50;
-                                        let offset = 0;
-                                        search_track(
+                        let mut search_results = search_results.lock().await;
+                        *search_results = tracks_with_cover
+                            .iter()
+                            .map(|twc| Track {
+                                name: twc.name.clone(),
+                                artists: twc.artists.clone(),
+                                album: Album {
+                                    name: twc.album_name.clone(),
+                                    album_type: String::new(),
+                                    artists: Vec::new(),
+                                    external_urls: HashMap::new(),
+                                    images: twc
+                                        .cover_url
+                                        .as_ref()
+                                        .map(|url| {
+                                            vec![Image {
+                                                url: url.clone(),
+                                                width: 0,
+                                                height: 0,
+                                            }]
+                                        })
+                                        .unwrap_or_default(),
+                                    id: String::new(),
+                                    release_date: String::new(),
+                                    total_tracks: 0,
+                                },
+                                external_urls: twc.external_urls.clone(),
+                                index: twc.index,
+                            })
+                            .collect();
+                    } else {
+                        let spotify_result: Result<Vec<TrackWithCover>> =
+                            match is_valid_spotify_url(&query) {
+                                Ok(status) => match status {
+                                    SpotifyUrlStatus::Valid => {
+                                        info!("Spotify 查詢 (URL): {}", query);
+                                        let track_id = query
+                                            .split('/')
+                                            .last()
+                                            .unwrap_or("")
+                                            .split('?')
+                                            .next()
+                                            .unwrap_or("");
+                                        let track = get_track_info(
                                             &*client.lock().await,
-                                            &query,
+                                            track_id,
                                             &spotify_token,
-                                            limit,
-                                            offset,
-                                            debug_mode,
                                         )
                                         .await
-                                        .map(|(tracks_with_cover, _)| tracks_with_cover)
-                                        .map_err(|e| anyhow!("Spotify 搜索錯誤: {}", e))
-                                    } else {
-                                        Ok(Vec::new())
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                error!("驗證 Spotify URL 時發生錯誤: {:?}", e);
-                                Err(anyhow!("Spotify URL 驗證錯誤"))
-                            }
-                        };
-                    let osu_query = match spotify_result {
-                        Ok(ref tracks_with_cover) => {
-                            info!("Spotify 搜索結果: {} 首曲目", tracks_with_cover.len());
-                            let mut search_results = search_results.lock().await;
-                            *search_results = tracks_with_cover
-                                .iter()
-                                .map(|twc| Track {
-                                    name: twc.name.clone(),
-                                    artists: twc.artists.clone(),
-                                    album: Album {
-                                        name: twc.album_name.clone(),
-                                        album_type: String::new(),
-                                        artists: Vec::new(),
-                                        external_urls: HashMap::new(),
-                                        images: twc
-                                            .cover_url
-                                            .as_ref()
-                                            .map(|url| {
-                                                vec![Image {
-                                                    url: url.clone(),
-                                                    width: 0,
-                                                    height: 0,
-                                                }]
-                                            })
-                                            .unwrap_or_default(),
-                                        id: String::new(),
-                                        release_date: String::new(),
-                                        total_tracks: 0,
-                                    },
-                                    external_urls: twc.external_urls.clone(),
-                                    index: twc.index,
-                                })
-                                .collect();
+                                        .map_err(|e| anyhow!("獲取曲目資訊錯誤: {:?}", e))?;
 
-                            if matches!(is_valid_spotify_url(&query), Ok(SpotifyUrlStatus::Valid))
-                                && !tracks_with_cover.is_empty()
-                            {
-                                let osu_query = format!(
-                                    "{} {}",
-                                    tracks_with_cover[0]
-                                        .artists
-                                        .iter()
-                                        .map(|a| a.name.clone())
-                                        .collect::<Vec<_>>()
-                                        .join(", "),
-                                    tracks_with_cover[0].name
-                                );
-                                info!("Osu 查詢 (從 Spotify): {}", osu_query);
-                                osu_query
-                            } else {
-                                info!("Osu 查詢 (關鍵字): {}", query);
-                                query.clone()
+                                        Ok(vec![TrackWithCover {
+                                            name: track.name.clone(),
+                                            artists: track.artists.clone(),
+                                            external_urls: track.external_urls.clone(),
+                                            album_name: track.album.name.clone(),
+                                            cover_url: track
+                                                .album
+                                                .images
+                                                .first()
+                                                .map(|img| img.url.clone()),
+                                            index: 0,
+                                        }])
+                                    }
+                                    SpotifyUrlStatus::Incomplete => {
+                                        *error = "Spotify URL 不完整，請輸入完整的 URL".to_string();
+                                        return Ok(());
+                                    }
+                                    SpotifyUrlStatus::Invalid => {
+                                        *error = "無效的 Spotify URL".to_string();
+                                        return Ok(());
+                                    }
+                                    SpotifyUrlStatus::NotSpotify => {
+                                        if !query.is_empty() {
+                                            info!("Spotify 查詢 (關鍵字): {}", query);
+                                            let limit = 50;
+                                            let offset = 0;
+                                            search_track(
+                                                &*client.lock().await,
+                                                &query,
+                                                &spotify_token,
+                                                limit,
+                                                offset,
+                                                debug_mode,
+                                            )
+                                            .await
+                                            .map(|(tracks_with_cover, _)| tracks_with_cover)
+                                            .map_err(|e| anyhow!("Spotify 搜索錯誤: {}", e))
+                                        } else {
+                                            Ok(Vec::new())
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("驗證 Spotify URL 時發生錯誤: {:?}", e);
+                                    Err(anyhow!("Spotify URL 驗證錯誤"))
+                                }
+                            };
+
+                        match spotify_result {
+                            Ok(ref tracks_with_cover) => {
+                                info!("Spotify 搜索結果: {} 首曲目", tracks_with_cover.len());
+                                let mut search_results = search_results.lock().await;
+                                *search_results = tracks_with_cover
+                                    .iter()
+                                    .map(|twc| Track {
+                                        name: twc.name.clone(),
+                                        artists: twc.artists.clone(),
+                                        album: Album {
+                                            name: twc.album_name.clone(),
+                                            album_type: String::new(),
+                                            artists: Vec::new(),
+                                            external_urls: HashMap::new(),
+                                            images: twc
+                                                .cover_url
+                                                .as_ref()
+                                                .map(|url| {
+                                                    vec![Image {
+                                                        url: url.clone(),
+                                                        width: 0,
+                                                        height: 0,
+                                                    }]
+                                                })
+                                                .unwrap_or_default(),
+                                            id: String::new(),
+                                            release_date: String::new(),
+                                            total_tracks: 0,
+                                        },
+                                        external_urls: twc.external_urls.clone(),
+                                        index: twc.index,
+                                    })
+                                    .collect();
+                            }
+                            Err(e) => {
+                                error!("Spotify 搜索錯誤: {:?}", e);
+                                return Err(anyhow!("Spotify 錯誤：搜索失敗"));
                             }
                         }
-                        Err(e) => {
-                            error!("Spotify 搜索錯誤: {:?}", e);
-                            return Err(anyhow!("Spotify 錯誤：搜索失敗"));
+                    }
+                    Ok(())
+                };
+
+                // 創建一個 future 來執行 Osu 搜索
+                let osu_search_future = async {
+                    let osu_query = if let Some((beatmapset_id, _)) = parse_osu_url(&query) {
+                        beatmapset_id
+                    } else {
+                        let search_results = search_results.lock().await;
+                        if !search_results.is_empty() {
+                            format!(
+                                "{} {}",
+                                search_results[0]
+                                    .artists
+                                    .iter()
+                                    .map(|a| a.name.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                search_results[0].name
+                            )
+                        } else {
+                            query.clone()
                         }
                     };
+
+                    info!("Osu 查詢: {}", osu_query);
 
                     let results =
                         get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
@@ -1096,15 +1064,13 @@ impl SearchApp {
                     } else {
                         info!("成功初始加載 {} 個 osu 封面", osu_urls.len());
                     }
-                }
 
-                if spotify_authorized.load(Ordering::SeqCst) {
-                    let spotify_client = spotify_client.clone();
-                    let track_liked_status = track_liked_status.clone();
-                    let ctx_clone = ctx_clone.clone();
-                    let search_results = search_results.clone();
+                    Ok::<(), anyhow::Error>(())
+                };
 
-                    tokio::spawn(async move {
+                // 創建一個 future 來檢查收藏狀態
+                let check_liked_status_future = async {
+                    if spotify_authorized.load(Ordering::SeqCst) {
                         let spotify_option = {
                             let spotify_guard = spotify_client.lock().unwrap();
                             spotify_guard.as_ref().cloned()
@@ -1131,10 +1097,22 @@ impl SearchApp {
                                     }
                                 }
                             }
-                            ctx_clone.request_repaint();
                         }
-                    });
-                }
+                    }
+                };
+
+                // 並行執行所有 future
+                let (spotify_result, osu_result, _) = tokio::join!(
+                    spotify_search_future,
+                    osu_search_future,
+                    check_liked_status_future
+                );
+
+                // 處理 Spotify 搜索結果
+                spotify_result?;
+
+                // 處理 Osu 搜索結果
+                osu_result?;
 
                 Ok(())
             }
@@ -1147,6 +1125,8 @@ impl SearchApp {
 
             is_searching.store(false, Ordering::SeqCst);
             need_repaint.store(true, Ordering::SeqCst);
+            ctx_clone.request_repaint(); // 只在這裡調用一次重繪
+
             result
         })
     }
@@ -1308,7 +1288,7 @@ impl SearchApp {
         );
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-    
+
         if search_button_response.clicked() {
             if let Some(spotify_url) = track.external_urls.get("spotify") {
                 self.search_query = spotify_url.clone();
@@ -1327,9 +1307,9 @@ impl SearchApp {
             let ctx = ui.ctx().clone();
             self.perform_search(ctx);
         }
-    
+
         search_button_response.on_hover_text("以此搜尋");
-    
+
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom()
@@ -1338,7 +1318,7 @@ impl SearchApp {
         );
         let open_button_response =
             self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
-    
+
         if open_button_response.clicked() {
             if let Some(url) = track.external_urls.get("spotify") {
                 if let Err(e) = open_spotify_url(url) {
@@ -1346,47 +1326,52 @@ impl SearchApp {
                 }
             }
         }
-    
+
         open_button_response.on_hover_text("打開");
-    
+
         // "Liked" 按鈕
         if self.spotify_authorized.load(Ordering::SeqCst) {
-            let track_id = track.external_urls.get("spotify")
+            let track_id = track
+                .external_urls
+                .get("spotify")
                 .and_then(|url| url.split('/').last())
                 .unwrap_or("");
-            let is_liked = self.track_liked_status
+            let is_liked = self
+                .track_liked_status
                 .lock()
                 .unwrap()
                 .get(track_id)
                 .cloned()
                 .unwrap_or(false);
-    
+
             let like_button_text = if is_liked { "❤️" } else { "🤍" };
             let like_button_rect = egui::Rect::from_min_size(
-                response.rect.right_bottom() + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
+                response.rect.right_bottom()
+                    + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
                 button_size,
             );
-            let like_button_response = ui.put(like_button_rect, egui::Button::new(like_button_text));
-    
+            let like_button_response =
+                ui.put(like_button_rect, egui::Button::new(like_button_text));
+
             if like_button_response.clicked() {
                 let spotify_client = self.spotify_client.clone();
                 let track_id = track_id.to_string();
                 let track_liked_status = self.track_liked_status.clone();
                 let ctx = ui.ctx().clone();
-    
+
                 tokio::spawn(async move {
                     let spotify_option = {
                         let spotify_guard = spotify_client.lock().unwrap();
                         spotify_guard.as_ref().cloned()
                     };
-    
+
                     if let Some(spotify) = spotify_option {
                         let result = if is_liked {
                             remove_track_from_liked(&spotify, &track_id).await
                         } else {
                             add_track_to_liked(&spotify, &track_id).await
                         };
-    
+
                         match result {
                             Ok(_) => {
                                 let mut status = track_liked_status.lock().unwrap();
@@ -1403,7 +1388,7 @@ impl SearchApp {
                     }
                 });
             }
-    
+
             like_button_response.on_hover_text(if is_liked { "取消收藏" } else { "收藏" });
         } else {
             log::error!("Spotify 未授權，無法顯示 Liked 按鈕");
