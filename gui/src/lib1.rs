@@ -1,14 +1,17 @@
 // 標準庫導入
 use std::fs::File;
+use std::fs;
 use std::io::Read;
 use std::sync::Mutex;
 
 // 第三方庫導入
 use anyhow::Result;
+use chrono::Utc;
+use reqwest::Client;
 use lazy_static::lazy_static;
 use log::{debug, error, LevelFilter};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -27,6 +30,20 @@ pub struct ServiceConfig {
 pub struct Config {
     pub spotify: ServiceConfig,
     pub osu: ServiceConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoginInfo {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expiry_time: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Deserialize)]
+struct RefreshTokenResponse {
+    access_token: String,
+    expires_in: i64,
+    refresh_token: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -178,4 +195,81 @@ pub fn set_log_level(debug_mode: bool) {
         LevelFilter::Info
     };
     log::set_max_level(log_level);
+}
+pub fn save_login_info(login_info: &LoginInfo) -> Result<(), ConfigError> {
+    let json = serde_json::to_string(login_info)
+        .map_err(|e| ConfigError::Other(format!("無法序列化登入信息: {}", e)))?;
+    fs::write("login_info.json", json)
+        .map_err(|e| ConfigError::FileOpenError(format!("無法保存登入信息: {}", e)))
+}
+
+pub fn read_login_info() -> Result<Option<LoginInfo>, ConfigError> {
+    match fs::read_to_string("login_info.json") {
+        Ok(contents) => {
+            let login_info: LoginInfo = serde_json::from_str(&contents)
+                .map_err(|e| ConfigError::JsonParseError(format!("無法解析登入信息: {}", e)))?;
+            Ok(Some(login_info))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ConfigError::FileReadError(format!("無法讀取登入信息: {}", e))),
+    }
+}
+
+pub fn is_token_valid(login_info: &LoginInfo) -> bool {
+    Utc::now() < login_info.expiry_time
+}
+
+pub async fn check_and_refresh_token(client: &Client, config: &Config) -> Result<LoginInfo, ConfigError> {
+    if let Some(login_info) = read_login_info()? {
+        if is_token_valid(&login_info) {
+            return Ok(login_info);
+        }
+        
+        // 令牌已過期,嘗試刷新
+        let new_token = refresh_spotify_token(client, &config.spotify, &login_info.refresh_token).await?;
+        
+        let new_login_info = LoginInfo {
+            access_token: new_token.access_token,
+            refresh_token: new_token.refresh_token.unwrap_or(login_info.refresh_token),
+            expiry_time: Utc::now() + chrono::Duration::seconds(new_token.expires_in),
+        };
+        
+        save_login_info(&new_login_info)?;
+        Ok(new_login_info)
+    } else {
+        Err(ConfigError::Other("沒有保存的登入信息".to_string()))
+    }
+}
+async fn refresh_spotify_token(
+    client: &Client,
+    config: &ServiceConfig,
+    refresh_token: &str,
+) -> Result<RefreshTokenResponse, ConfigError> {
+    let token_url = "https://accounts.spotify.com/api/token";
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ];
+
+    let response = client
+        .post(token_url)
+        .basic_auth(&config.client_id, Some(&config.client_secret))
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| ConfigError::Other(format!("刷新令牌請求失敗: {}", e)))?;
+
+    if response.status().is_success() {
+        let token_data: RefreshTokenResponse = response
+            .json()
+            .await
+            .map_err(|e| ConfigError::Other(format!("解析刷新令牌響應失敗: {}", e)))?;
+        Ok(token_data)
+    } else {
+        let error_text = response
+            .text()
+            .await
+            .map_err(|e| ConfigError::Other(format!("讀取錯誤響應失敗: {}", e)))?;
+        Err(ConfigError::Other(format!("刷新令牌失敗: {}", error_text)))
+    }
 }
