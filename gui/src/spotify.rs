@@ -15,14 +15,16 @@ use std::time::{Duration, Instant};
 
 // 第三方庫導入
 use anyhow::{anyhow, Error, Result};
-use chrono::Local;
+use chrono::{Local, Utc};
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use regex::Regex;
 use reqwest::Client;
 use rspotify::{
-    clients::{OAuthClient,BaseClient}, model::{PlayableItem,TrackId,FullTrack,PlaylistId}, scopes, AuthCodeSpotify, ClientError, Credentials,
-    OAuth, Token,model::SimplifiedPlaylist,
+    clients::{BaseClient, OAuthClient},
+    model::SimplifiedPlaylist,
+    model::{FullTrack, PlayableItem, PlaylistId, TrackId},
+    scopes, AuthCodeSpotify, ClientError, Credentials, OAuth, Token,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,6 +45,7 @@ use winapi::{
 
 // 本地模組導入
 use crate::{read_config, AuthManager, AuthPlatform};
+use lib::{LoginInfo, save_login_info};
 
 // 常量定義
 const SPOTIFY_API_BASE_URL: &str = "https://api.spotify.com/v1";
@@ -370,10 +373,10 @@ pub async fn search_track(
     let search_result: SearchResult =
         serde_json::from_str(&response_text).map_err(|e| SpotifyError::JsonError(e))?;
 
-        match search_result.tracks {
-            Some(tracks) => {
-                let total_tracks = tracks.total;
-                let total_pages = (total_tracks + limit - 1) / limit;
+    match search_result.tracks {
+        Some(tracks) => {
+            let total_tracks = tracks.total;
+            let total_pages = (total_tracks + limit - 1) / limit;
 
             if debug_mode {
                 info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
@@ -427,7 +430,6 @@ pub async fn search_track(
         None => Err(SpotifyError::ApiError("搜索結果中沒有找到曲目".to_string())),
     }
 }
-
 
 pub async fn get_access_token(
     client: &reqwest::Client,
@@ -928,14 +930,13 @@ async fn process_authorization_callback(
                     };
 
                     let new_spotify = AuthCodeSpotify::from_token_with_config(
-                        token_data,
+                        token_data.clone(),
                         creds,
                         oauth,
                         rspotify::Config::default(),
                     );
 
                     // 每次授權成功後都獲取用戶信息和頭像 URL
-
                     let user = new_spotify
                         .current_user()
                         .await
@@ -951,6 +952,17 @@ async fn process_authorization_callback(
                     } else {
                         error!("用戶沒有頭像 URL");
                     }
+
+                    // 更新這裡：保存登入信息時包含頭像 URL
+                    let login_info = LoginInfo {
+                        access_token: token_data.access_token,
+                        refresh_token: token_data.refresh_token.unwrap_or_default(),
+                        expiry_time: Utc::now() + token_data.expires_in,
+                        avatar_url: user_avatar_url.clone(), // 使用獲取到的頭像 URL
+                    };
+                    save_login_info(&login_info)
+                        .map_err(|e| SpotifyError::IoError(e.to_string()))?;
+
                     let mut client = spotify_client.lock().map_err(|e| {
                         SpotifyError::IoError(format!("無法獲取 Spotify 客戶端鎖: {}", e))
                     })?;
@@ -1052,45 +1064,50 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 pub async fn add_track_to_liked(
-    spotify: &AuthCodeSpotify, 
-    track_id: &str
+    spotify: &AuthCodeSpotify,
+    track_id: &str,
 ) -> Result<(), SpotifyError> {
     let track_id = TrackId::from_id(track_id)
         .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-    
-    spotify.current_user_saved_tracks_add(vec![track_id])
+
+    spotify
+        .current_user_saved_tracks_add(vec![track_id])
         .await
         .map_err(|e| SpotifyError::ApiError(format!("無法將曲目添加到 Liked Songs: {}", e)))?;
-    
+
     Ok(())
 }
 pub async fn is_track_liked(
-    spotify: &AuthCodeSpotify, 
-    track_id: &str
+    spotify: &AuthCodeSpotify,
+    track_id: &str,
 ) -> Result<bool, SpotifyError> {
     let track_id = TrackId::from_id(track_id)
         .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-    
-    let is_saved = spotify.current_user_saved_tracks_contains(vec![track_id])
+
+    let is_saved = spotify
+        .current_user_saved_tracks_contains(vec![track_id])
         .await
         .map_err(|e| SpotifyError::ApiError(format!("無法檢查曲目是否已收藏: {}", e)))?;
-    
+
     Ok(is_saved[0])
 }
 pub async fn remove_track_from_liked(
-    spotify: &AuthCodeSpotify, 
-    track_id: &str
+    spotify: &AuthCodeSpotify,
+    track_id: &str,
 ) -> Result<(), SpotifyError> {
     let track_id = TrackId::from_id(track_id)
         .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-    
-    spotify.current_user_saved_tracks_delete(vec![track_id])
+
+    spotify
+        .current_user_saved_tracks_delete(vec![track_id])
         .await
         .map_err(|e| SpotifyError::ApiError(format!("無法從 Liked Songs 中移除曲目: {}", e)))?;
-    
+
     Ok(())
 }
-pub async fn get_user_playlists(spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>) -> Result<Vec<SimplifiedPlaylist>> {
+pub async fn get_user_playlists(
+    spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
+) -> Result<Vec<SimplifiedPlaylist>> {
     // 鎖定 Mutex，取得 Spotify 客戶端的克隆，然後立即釋放 MutexGuard
     let spotify_ref = {
         let spotify = spotify_client.lock().unwrap();
@@ -1102,7 +1119,9 @@ pub async fn get_user_playlists(spotify_client: Arc<Mutex<Option<AuthCodeSpotify
         let mut offset = 0;
         loop {
             // 在這裡執行異步操作，不再持有 MutexGuard
-            let current_user_playlists = spotify.current_user_playlists_manual(Some(50), Some(offset)).await?;
+            let current_user_playlists = spotify
+                .current_user_playlists_manual(Some(50), Some(offset))
+                .await?;
             if current_user_playlists.items.is_empty() {
                 break;
             }
@@ -1131,13 +1150,7 @@ pub async fn get_playlist_tracks(
 
         loop {
             let playlist_items = spotify
-                .playlist_items_manual(
-                    playlist_id.clone(),
-                    None,
-                    None,
-                    Some(100),
-                    Some(offset),
-                )
+                .playlist_items_manual(playlist_id.clone(), None, None, Some(100), Some(offset))
                 .await?;
 
             if playlist_items.items.is_empty() {

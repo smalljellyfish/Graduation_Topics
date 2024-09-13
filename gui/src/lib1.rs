@@ -37,6 +37,7 @@ pub struct LoginInfo {
     pub access_token: String,
     pub refresh_token: String,
     pub expiry_time: chrono::DateTime<chrono::Utc>,
+    pub avatar_url: Option<String>,  // 新增
 }
 
 #[derive(Deserialize)]
@@ -220,26 +221,29 @@ pub fn is_token_valid(login_info: &LoginInfo) -> bool {
 }
 
 pub async fn check_and_refresh_token(client: &Client, config: &Config) -> Result<LoginInfo, ConfigError> {
-    if let Some(login_info) = read_login_info()? {
-        if is_token_valid(&login_info) {
-            return Ok(login_info);
+    match read_login_info()? {
+        Some(login_info) => {
+            if is_token_valid(&login_info) {
+                Ok(login_info)
+            } else {
+                // 令牌已過期,嘗試刷新
+                let new_token = refresh_spotify_token(client, &config.spotify, &login_info.refresh_token).await?;
+                
+                let new_login_info = LoginInfo {
+                    access_token: new_token.access_token,
+                    refresh_token: new_token.refresh_token.unwrap_or(login_info.refresh_token),
+                    expiry_time: Utc::now() + chrono::Duration::seconds(new_token.expires_in as i64),
+                    avatar_url: login_info.avatar_url, // 保留原有的頭像 URL
+                };
+                
+                save_login_info(&new_login_info)?;
+                Ok(new_login_info)
+            }
         }
-        
-        // 令牌已過期,嘗試刷新
-        let new_token = refresh_spotify_token(client, &config.spotify, &login_info.refresh_token).await?;
-        
-        let new_login_info = LoginInfo {
-            access_token: new_token.access_token,
-            refresh_token: new_token.refresh_token.unwrap_or(login_info.refresh_token),
-            expiry_time: Utc::now() + chrono::Duration::seconds(new_token.expires_in),
-        };
-        
-        save_login_info(&new_login_info)?;
-        Ok(new_login_info)
-    } else {
-        Err(ConfigError::Other("沒有保存的登入信息".to_string()))
+        None => Err(ConfigError::Other("沒有保存的登入信息".to_string())),
     }
 }
+
 async fn refresh_spotify_token(
     client: &Client,
     config: &ServiceConfig,
