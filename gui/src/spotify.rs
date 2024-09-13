@@ -21,8 +21,8 @@ use log::{debug, error, info};
 use regex::Regex;
 use reqwest::Client;
 use rspotify::{
-    clients::OAuthClient, model::{PlayableItem,TrackId}, scopes, AuthCodeSpotify, ClientError, Credentials,
-    OAuth, Token,
+    clients::{OAuthClient,BaseClient}, model::{PlayableItem,TrackId,FullTrack,PlaylistId}, scopes, AuthCodeSpotify, ClientError, Credentials,
+    OAuth, Token,model::SimplifiedPlaylist,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1089,4 +1089,72 @@ pub async fn remove_track_from_liked(
         .map_err(|e| SpotifyError::ApiError(format!("無法從 Liked Songs 中移除曲目: {}", e)))?;
     
     Ok(())
+}
+pub async fn get_user_playlists(spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>) -> Result<Vec<SimplifiedPlaylist>> {
+    // 鎖定 Mutex，取得 Spotify 客戶端的克隆，然後立即釋放 MutexGuard
+    let spotify_ref = {
+        let spotify = spotify_client.lock().unwrap();
+        spotify.as_ref().cloned()
+    };
+
+    if let Some(spotify) = spotify_ref {
+        let mut playlists = Vec::new();
+        let mut offset = 0;
+        loop {
+            // 在這裡執行異步操作，不再持有 MutexGuard
+            let current_user_playlists = spotify.current_user_playlists_manual(Some(50), Some(offset)).await?;
+            if current_user_playlists.items.is_empty() {
+                break;
+            }
+            playlists.extend(current_user_playlists.items);
+            offset += 50;
+        }
+        Ok(playlists)
+    } else {
+        Err(anyhow!("Spotify 客戶端未初始化"))
+    }
+}
+pub async fn get_playlist_tracks(
+    spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
+    playlist_id: String,
+) -> Result<Vec<FullTrack>> {
+    let spotify_ref = {
+        let spotify = spotify_client.lock().unwrap();
+        spotify.as_ref().cloned()
+    };
+
+    if let Some(spotify) = spotify_ref {
+        let mut tracks = Vec::new();
+        let mut offset = 0;
+
+        let playlist_id = PlaylistId::from_id(&playlist_id)?;
+
+        loop {
+            let playlist_items = spotify
+                .playlist_items_manual(
+                    playlist_id.clone(),
+                    None,
+                    None,
+                    Some(100),
+                    Some(offset),
+                )
+                .await?;
+
+            if playlist_items.items.is_empty() {
+                break;
+            }
+
+            for item in playlist_items.items {
+                if let Some(PlayableItem::Track(track)) = item.track {
+                    tracks.push(track);
+                }
+            }
+
+            offset += 100;
+        }
+
+        Ok(tracks)
+    } else {
+        Err(anyhow!("Spotify 客戶端未初始化"))
+    }
 }

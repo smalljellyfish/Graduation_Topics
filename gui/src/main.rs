@@ -22,7 +22,11 @@ use egui::{
 
 use log::{debug, error, info, LevelFilter};
 use reqwest::Client;
-use rspotify::{scopes, AuthCodeSpotify, Credentials, OAuth};
+use rspotify::{
+    model::{FullTrack, SimplifiedPlaylist, PlaylistId},
+    prelude::Id,
+    scopes, AuthCodeSpotify, Credentials, OAuth,
+};
 use simplelog::*;
 use thiserror::Error;
 use tokio::{
@@ -38,10 +42,10 @@ use crate::osu::{
     print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
-    add_track_to_liked, authorize_spotify, get_access_token, get_track_info, is_track_liked,
-    is_valid_spotify_url, load_spotify_icon, open_spotify_url, remove_track_from_liked,
-    search_track, update_currently_playing_wrapper, Album, AuthStatus, CurrentlyPlaying, Image,
-    SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
+    add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
+    get_user_playlists, is_track_liked, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
+    remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
+    CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{read_config, set_log_level, ConfigError};
 
@@ -166,15 +170,19 @@ struct SearchApp {
     spotify_user_avatar: Arc<Mutex<Option<egui::TextureHandle>>>,
     spotify_user_avatar_url: Arc<Mutex<Option<String>>>,
     spotify_user_name: Arc<Mutex<Option<String>>>,
+    spotify_user_playlists: Arc<Mutex<Vec<SimplifiedPlaylist>>>,
+    spotify_playlist_tracks: Arc<Mutex<Vec<FullTrack>>>,
+    selected_playlist: Option<SimplifiedPlaylist>,
     show_spotify_now_playing: bool,
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
     texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>>,
-    track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
+    spotify_track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
     preloaded_icons: HashMap<String, egui::TextureHandle>,
     spotify_search_button_states: HashMap<usize, f32>,
     spotify_open_button_states: HashMap<usize, f32>,
     osu_search_button_states: HashMap<usize, f32>,
     osu_open_button_states: HashMap<usize, f32>,
+    liked_button_states: HashMap<usize, f32>,
     side_menu_animation: HashMap<egui::Id, f32>,
 }
 
@@ -374,11 +382,12 @@ impl eframe::App for SearchApp {
                 errors.clear();
             }
         }
-        // 必要時更新視窗
-        if self.need_repaint.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .need_repaint
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             ctx.request_repaint();
-            self.need_repaint
-                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -578,15 +587,19 @@ impl SearchApp {
             spotify_user_avatar: Arc::new(Mutex::new(None)),
             spotify_user_avatar_url: Arc::new(Mutex::new(None)),
             spotify_user_name: Arc::new(Mutex::new(None)),
+            spotify_user_playlists: Arc::new(Mutex::new(Vec::new())),
+            spotify_playlist_tracks: Arc::new(Mutex::new(Vec::new())),
+            selected_playlist: None,
             show_spotify_now_playing: false,
             texture_cache,
             texture_load_queue,
-            track_liked_status: Arc::new(Mutex::new(HashMap::new())),
+            spotify_track_liked_status: Arc::new(Mutex::new(HashMap::new())),
             preloaded_icons,
             spotify_search_button_states: HashMap::new(),
             spotify_open_button_states: HashMap::new(),
             osu_search_button_states: HashMap::new(),
             osu_open_button_states: HashMap::new(),
+            liked_button_states: HashMap::new(),
             side_menu_animation: HashMap::new(),
         };
 
@@ -795,7 +808,7 @@ impl SearchApp {
 
         let spotify_authorized = self.spotify_authorized.clone();
         let spotify_client = self.spotify_client.clone();
-        let track_liked_status = self.track_liked_status.clone();
+        let spotify_track_liked_status = self.spotify_track_liked_status.clone();
 
         info!("使用者搜尋: {}", query);
 
@@ -1086,7 +1099,7 @@ impl SearchApp {
                                 {
                                     match is_track_liked(&spotify, track_id).await {
                                         Ok(is_liked) => {
-                                            track_liked_status
+                                            spotify_track_liked_status
                                                 .lock()
                                                 .unwrap()
                                                 .insert(track_id.to_string(), is_liked);
@@ -1337,26 +1350,25 @@ impl SearchApp {
                 .and_then(|url| url.split('/').last())
                 .unwrap_or("");
             let is_liked = self
-                .track_liked_status
+                .spotify_track_liked_status
                 .lock()
                 .unwrap()
                 .get(track_id)
                 .cloned()
                 .unwrap_or(false);
 
-            let like_button_text = if is_liked { "❤️" } else { "🤍" };
             let like_button_rect = egui::Rect::from_min_size(
                 response.rect.right_bottom()
                     + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
                 button_size,
             );
             let like_button_response =
-                ui.put(like_button_rect, egui::Button::new(like_button_text));
+                self.draw_liked_button(ui, index, like_button_rect, is_liked);
 
             if like_button_response.clicked() {
                 let spotify_client = self.spotify_client.clone();
                 let track_id = track_id.to_string();
-                let track_liked_status = self.track_liked_status.clone();
+                let spotify_track_liked_status = self.spotify_track_liked_status.clone();
                 let ctx = ui.ctx().clone();
 
                 tokio::spawn(async move {
@@ -1374,7 +1386,7 @@ impl SearchApp {
 
                         match result {
                             Ok(_) => {
-                                let mut status = track_liked_status.lock().unwrap();
+                                let mut status = spotify_track_liked_status.lock().unwrap();
                                 status.insert(track_id.clone(), !is_liked);
                                 log::info!("成功更新曲目 {} 的收藏狀態", track_id);
                                 ctx.request_repaint();
@@ -1772,6 +1784,68 @@ impl SearchApp {
         response
     }
 
+    fn draw_liked_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        rect: egui::Rect,
+        is_liked: bool,
+    ) -> egui::Response {
+        let animation_progress = self.liked_button_states.entry(index).or_insert(0.0);
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+
+        if response.hovered() {
+            *animation_progress =
+                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
+        } else {
+            *animation_progress =
+                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
+        }
+
+        let center = rect.center();
+        let radius = rect.height() / 2.0;
+
+        // 繪製圓形背景
+        let bg_color = egui::Color32::from_rgba_unmultiplied(
+            200 + ((55) as f32 * *animation_progress) as u8,
+            200 + ((55) as f32 * *animation_progress) as u8,
+            200 + ((55) as f32 * *animation_progress) as u8,
+            255,
+        );
+        ui.painter()
+            .circle(center, radius, bg_color, egui::Stroke::NONE);
+
+        // 繪製愛心圖標
+        let icon_color = if is_liked {
+            egui::Color32::RED
+        } else {
+            egui::Color32::from_rgba_unmultiplied(
+                0 + ((255) as f32 * *animation_progress) as u8,
+                0 + ((255) as f32 * *animation_progress) as u8,
+                0 + ((255) as f32 * *animation_progress) as u8,
+                255,
+            )
+        };
+
+        let heart_size = radius * 1.2;
+        let heart_points = [
+            center + egui::vec2(0.0, -heart_size * 0.4),
+            center + egui::vec2(-heart_size * 0.4, -heart_size * 0.1),
+            center + egui::vec2(-heart_size * 0.4, heart_size * 0.2),
+            center + egui::vec2(0.0, heart_size * 0.5),
+            center + egui::vec2(heart_size * 0.4, heart_size * 0.2),
+            center + egui::vec2(heart_size * 0.4, -heart_size * 0.1),
+        ];
+
+        ui.painter().add(egui::Shape::convex_polygon(
+            heart_points.to_vec(),
+            icon_color,
+            egui::Stroke::new(1.0, icon_color),
+        ));
+
+        response
+    }
+
     //繪製前往瀏覽器按鈕
     fn draw_open_browser_button(
         &mut self,
@@ -2029,6 +2103,7 @@ impl SearchApp {
                             {
                                 info!("點擊了: Spotify 播放清單");
                                 self.show_side_menu = false;
+                                self.load_user_playlists();
                             }
                             if self
                                 .create_auth_button(ui, "Now Playing", "spotify_icon_black.png")
@@ -2114,7 +2189,43 @@ impl SearchApp {
             info!("在側邊選單外點擊。新狀態: false");
         }
     }
+    fn load_user_playlists(&self) {
+        let spotify_client = self.spotify_client.clone();
+        let user_playlists = self.spotify_user_playlists.clone();
+        let ctx = self.ctx.clone();
 
+        tokio::spawn(async move {
+            match get_user_playlists(spotify_client).await {
+                Ok(playlists) => {
+                    *user_playlists.lock().unwrap() = playlists;
+                    ctx.request_repaint();
+                }
+                Err(e) => {
+                    error!("獲取用戶播放清單失敗: {:?}", e);
+                }
+            }
+        });
+    }
+    fn load_playlist_tracks(&self, playlist_id: PlaylistId) {
+        let spotify_client = self.spotify_client.clone();
+        let playlist_tracks = self.spotify_playlist_tracks.clone();
+        let ctx = self.ctx.clone();
+        let playlist_id_string = playlist_id.id().to_string();
+    
+        tokio::spawn(async move {
+            match get_playlist_tracks(spotify_client, playlist_id_string).await {
+                Ok(tracks) => {
+                    let tracks_len = tracks.len();
+                    *playlist_tracks.lock().unwrap() = tracks;
+                    ctx.request_repaint();
+                    info!("成功加載 {} 首曲目", tracks_len);
+                }
+                Err(e) => {
+                    error!("獲取播放清單曲目失敗: {:?}", e);
+                }
+            }
+        });
+    }
     //渲染正在播放的彈窗
     fn render_now_playing_popup(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         egui::popup::popup_below_widget(ui, egui::Id::new("now_playing_popup"), response, |ui| {
@@ -2312,7 +2423,7 @@ impl SearchApp {
         self.should_detect_now_playing
             .store(false, Ordering::SeqCst);
         *self.currently_playing.lock().unwrap() = None;
-        self.track_liked_status.lock().unwrap().clear();
+        self.spotify_track_liked_status.lock().unwrap().clear();
 
         // 重置 Spotify 客戶端
         if let Ok(mut spotify_client) = self.spotify_client.try_lock() {
@@ -2463,9 +2574,9 @@ impl SearchApp {
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
                     ui.set_max_height(ui.available_height());
-
+    
                     let window_size = ui.available_size();
-
+    
                     // 使用 egui 的緩存機制來減少重繪
                     let window_size_changed = ui
                         .memory_mut(|mem| {
@@ -2473,28 +2584,69 @@ impl SearchApp {
                                 .get_temp::<egui::Vec2>(egui::Id::new("window_size"))
                         })
                         .map_or(true, |old_size| old_size != window_size);
-
+    
                     if window_size_changed {
                         ui.memory_mut(|mem| {
                             mem.data
                                 .insert_temp(egui::Id::new("window_size"), window_size)
                         });
                     }
-
+    
                     self.render_search_bar(ui, ctx);
-
+    
                     // 使用緩存來減少不必要的樣式更新
                     self.update_font_size(ui);
-
+    
                     self.display_error_message(ui);
-
+    
                     // 根據視窗大小決定佈局
                     if window_size.x >= 1000.0 {
                         self.render_large_window_layout(ui, window_size);
                     } else {
                         self.render_small_window_layout(ui, window_size);
                     }
+    
+                    // 顯示用戶播放清單
+                    ui.group(|ui| {
+                        ui.label("我的 Spotify 曲目");
+                        if let Ok(playlists) = self.spotify_user_playlists.lock() {
+                            for playlist in playlists.iter() {
+                                if ui.button(&playlist.name).clicked() {
+                                    self.selected_playlist = Some(playlist.clone());
+                                    self.load_playlist_tracks(playlist.id.clone());
+                                    info!("正在加載播放清單: {}", playlist.name);
+                                }
+                            }
+                        }
+                    });
                 });
+    
+            // 顯示選中的播放清單內容
+            if let Some(selected_playlist) = &self.selected_playlist {
+                egui::Window::new(&selected_playlist.name).show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let tracks = self.spotify_playlist_tracks.lock().unwrap();
+                        if tracks.is_empty() {
+                            ui.label("正在加載曲目...");
+                        } else {
+                            for track in tracks.iter() {
+                                ui.horizontal(|ui| {
+                                    ui.label(&track.name);
+                                    ui.label(" - ");
+                                    ui.label(
+                                        track
+                                            .artists
+                                            .iter()
+                                            .map(|a| a.name.clone())
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                    );
+                                });
+                            }
+                        }
+                    });
+                });
+            }
         });
     }
 
