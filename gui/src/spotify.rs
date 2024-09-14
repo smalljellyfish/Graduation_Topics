@@ -660,7 +660,11 @@ pub async fn update_currently_playing_wrapper(
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
     debug_mode: bool,
-) -> Result<()> {
+    should_detect_now_playing: &AtomicBool
+) -> Result<(), SpotifyError> {
+    if !should_detect_now_playing.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let spotify_ref = {
         let spotify = spotify_client.lock().unwrap();
         spotify.as_ref().cloned()
@@ -668,8 +672,9 @@ pub async fn update_currently_playing_wrapper(
 
     let update_result = if let Some(spotify) = spotify_ref {
         update_current_playing(&spotify, currently_playing.clone(), debug_mode).await
+            .map_err(|e| SpotifyError::ApiError(e.to_string()))
     } else {
-        Err(anyhow!("Spotify 客戶端未初始化"))
+        Err(SpotifyError::AuthorizationError("Spotify 客戶端未初始化".to_string()))
     };
 
     match update_result {
@@ -686,7 +691,7 @@ pub async fn update_currently_playing_wrapper(
         Err(e) => {
             if e.to_string().contains("InvalidToken") {
                 error!("Token 無效，需要重新授權");
-                return Err(anyhow!("Token 無效，需要重新授權"));
+                Err(SpotifyError::AuthorizationError("Token 無效，需要重新授權".to_string()))
             } else {
                 error!("更新當前播放失敗: {:?}", e);
                 Err(e)
@@ -1111,6 +1116,9 @@ pub async fn get_user_playlists(
     // 鎖定 Mutex，取得 Spotify 客戶端的克隆，然後立即釋放 MutexGuard
     let spotify_ref = {
         let spotify = spotify_client.lock().unwrap();
+        if spotify.is_none() {
+            error!("Spotify 客戶端未初始化");
+        }
         spotify.as_ref().cloned()
     };
 
