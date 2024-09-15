@@ -41,6 +41,8 @@ use winapi::{
         winuser::SW_SHOW,
     },
 };
+use futures_util::stream::StreamExt;
+
 
 // 本地模組導入
 use crate::{read_config, AuthManager, AuthPlatform};
@@ -1168,6 +1170,29 @@ pub async fn get_playlist_tracks(
             }
 
             offset += 100;
+        }
+
+        Ok(tracks)
+    } else {
+        Err(anyhow!("Spotify 客戶端未初始化"))
+    }
+}
+
+pub async fn get_liked_tracks(spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>) -> Result<Vec<FullTrack>> {
+    let spotify_ref = {
+        let spotify = spotify_client.lock().unwrap();
+        spotify.as_ref().cloned()
+    };
+
+    if let Some(spotify) = spotify_ref {
+        let mut tracks = Vec::new();
+        let mut saved_tracks = spotify.current_user_saved_tracks(None);
+
+        while let Some(item) = saved_tracks.next().await {
+            match item {
+                Ok(saved_track) => tracks.push(saved_track.track),
+                Err(e) => return Err(anyhow::Error::from(e)),
+            }
         }
 
         Ok(tracks)
