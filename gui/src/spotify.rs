@@ -15,16 +15,15 @@ use std::time::{Duration, Instant};
 
 // 第三方庫導入
 use anyhow::{anyhow, Error, Result};
-use chrono::{Local, Utc};
+use chrono::Local;
+use chrono::Utc;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use regex::Regex;
 use reqwest::Client;
 use rspotify::{
-    clients::{BaseClient, OAuthClient},
-    model::SimplifiedPlaylist,
-    model::{FullTrack, PlayableItem, PlaylistId, TrackId},
-    scopes, AuthCodeSpotify, ClientError, Credentials, OAuth, Token,
+    clients::{OAuthClient,BaseClient}, model::{PlayableItem,TrackId,FullTrack,PlaylistId}, scopes, AuthCodeSpotify, ClientError, Credentials,
+    OAuth, Token,model::SimplifiedPlaylist,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -373,10 +372,10 @@ pub async fn search_track(
     let search_result: SearchResult =
         serde_json::from_str(&response_text).map_err(|e| SpotifyError::JsonError(e))?;
 
-    match search_result.tracks {
-        Some(tracks) => {
-            let total_tracks = tracks.total;
-            let total_pages = (total_tracks + limit - 1) / limit;
+        match search_result.tracks {
+            Some(tracks) => {
+                let total_tracks = tracks.total;
+                let total_pages = (total_tracks + limit - 1) / limit;
 
             if debug_mode {
                 info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
@@ -430,6 +429,7 @@ pub async fn search_track(
         None => Err(SpotifyError::ApiError("搜索結果中沒有找到曲目".to_string())),
     }
 }
+
 
 pub async fn get_access_token(
     client: &reqwest::Client,
@@ -660,11 +660,7 @@ pub async fn update_currently_playing_wrapper(
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
     debug_mode: bool,
-    should_detect_now_playing: &AtomicBool
-) -> Result<(), SpotifyError> {
-    if !should_detect_now_playing.load(Ordering::SeqCst) {
-        return Ok(());
-    }
+) -> Result<()> {
     let spotify_ref = {
         let spotify = spotify_client.lock().unwrap();
         spotify.as_ref().cloned()
@@ -672,9 +668,8 @@ pub async fn update_currently_playing_wrapper(
 
     let update_result = if let Some(spotify) = spotify_ref {
         update_current_playing(&spotify, currently_playing.clone(), debug_mode).await
-            .map_err(|e| SpotifyError::ApiError(e.to_string()))
     } else {
-        Err(SpotifyError::AuthorizationError("Spotify 客戶端未初始化".to_string()))
+        Err(anyhow!("Spotify 客戶端未初始化"))
     };
 
     match update_result {
@@ -691,7 +686,7 @@ pub async fn update_currently_playing_wrapper(
         Err(e) => {
             if e.to_string().contains("InvalidToken") {
                 error!("Token 無效，需要重新授權");
-                Err(SpotifyError::AuthorizationError("Token 無效，需要重新授權".to_string()))
+                return Err(anyhow!("Token 無效，需要重新授權"));
             } else {
                 error!("更新當前播放失敗: {:?}", e);
                 Err(e)
@@ -753,7 +748,7 @@ pub fn authorize_spotify(
 
         let result = match accept_connection(&listener, timeout_duration).await {
             Ok(stream) => {
-                process_successful_connection(
+                let (login_info, avatar_url, user_name) = process_successful_connection(
                     stream,
                     &spotify_client,
                     auth_manager.clone(),
@@ -763,7 +758,15 @@ pub fn authorize_spotify(
                     debug_mode,
                     spotify_authorized,
                 )
-                .await
+                .await?;
+
+                // 保存登入信息
+                match save_login_info(&login_info) {
+                    Ok(()) => info!("成功保存 Spotify 登入信息"),
+                    Err(e) => error!("無法保存 Spotify 登入信息: {:?}", e),
+                }
+
+                Ok((avatar_url, user_name))
             }
             Err(e) => {
                 let error_message = format!("授權過程中斷: {}", e);
@@ -826,7 +829,7 @@ async fn process_successful_connection(
     port: u16,
     debug_mode: bool,
     spotify_authorized: Arc<AtomicBool>,
-) -> Result<(Option<String>, Option<String>), SpotifyError> {
+) -> Result<(LoginInfo, Option<String>, Option<String>), SpotifyError> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader
@@ -873,7 +876,7 @@ async fn process_authorization_callback(
     config: &Value,
     redirect_uri: &str,
     spotify_authorized: Arc<AtomicBool>,
-) -> Result<(Option<String>, Option<String>), SpotifyError> {
+) -> Result<(LoginInfo, Option<String>, Option<String>), SpotifyError> {
     let parsed_url = Url::parse(&url).map_err(SpotifyError::UrlParseError)?;
     let code = parsed_url
         .query_pairs()
@@ -941,7 +944,6 @@ async fn process_authorization_callback(
                         rspotify::Config::default(),
                     );
 
-                    // 每次授權成功後都獲取用戶信息和頭像 URL
                     let user = new_spotify
                         .current_user()
                         .await
@@ -958,15 +960,13 @@ async fn process_authorization_callback(
                         error!("用戶沒有頭像 URL");
                     }
 
-                    // 更新這裡：保存登入信息時包含頭像 URL
                     let login_info = LoginInfo {
-                        access_token: token_data.access_token,
-                        refresh_token: token_data.refresh_token.unwrap_or_default(),
-                        expiry_time: Utc::now() + token_data.expires_in,
-                        avatar_url: user_avatar_url.clone(), // 使用獲取到的頭像 URL
+                        access_token: token_data.access_token.clone(),
+                        refresh_token: token_data.refresh_token.clone().unwrap_or_default(),
+                        expiry_time: Utc::now() + chrono::Duration::seconds(token_data.expires_in.num_seconds()),
+                        avatar_url: user_avatar_url.clone(),
+                        user_name: Some(user_name.clone()),  
                     };
-                    save_login_info(&login_info)
-                        .map_err(|e| SpotifyError::IoError(e.to_string()))?;
 
                     let mut client = spotify_client.lock().map_err(|e| {
                         SpotifyError::IoError(format!("無法獲取 Spotify 客戶端鎖: {}", e))
@@ -978,7 +978,7 @@ async fn process_authorization_callback(
 
                     info!("Spotify 授權成功完成");
 
-                    Ok((user_avatar_url, Some(user_name)))
+                    Ok((login_info, user_avatar_url, Some(user_name)))
                 } else {
                     let error_body = response.text().await.map_err(SpotifyError::RequestError)?;
                     error!(
@@ -1069,56 +1069,48 @@ pub fn load_spotify_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 pub async fn add_track_to_liked(
-    spotify: &AuthCodeSpotify,
-    track_id: &str,
+    spotify: &AuthCodeSpotify, 
+    track_id: &str
 ) -> Result<(), SpotifyError> {
     let track_id = TrackId::from_id(track_id)
         .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-
-    spotify
-        .current_user_saved_tracks_add(vec![track_id])
+    
+    spotify.current_user_saved_tracks_add(vec![track_id])
         .await
         .map_err(|e| SpotifyError::ApiError(format!("無法將曲目添加到 Liked Songs: {}", e)))?;
-
+    
     Ok(())
 }
 pub async fn is_track_liked(
-    spotify: &AuthCodeSpotify,
-    track_id: &str,
+    spotify: &AuthCodeSpotify, 
+    track_id: &str
 ) -> Result<bool, SpotifyError> {
     let track_id = TrackId::from_id(track_id)
         .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-
-    let is_saved = spotify
-        .current_user_saved_tracks_contains(vec![track_id])
+    
+    let is_saved = spotify.current_user_saved_tracks_contains(vec![track_id])
         .await
         .map_err(|e| SpotifyError::ApiError(format!("無法檢查曲目是否已收藏: {}", e)))?;
-
+    
     Ok(is_saved[0])
 }
 pub async fn remove_track_from_liked(
-    spotify: &AuthCodeSpotify,
-    track_id: &str,
+    spotify: &AuthCodeSpotify, 
+    track_id: &str
 ) -> Result<(), SpotifyError> {
     let track_id = TrackId::from_id(track_id)
         .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-
-    spotify
-        .current_user_saved_tracks_delete(vec![track_id])
+    
+    spotify.current_user_saved_tracks_delete(vec![track_id])
         .await
         .map_err(|e| SpotifyError::ApiError(format!("無法從 Liked Songs 中移除曲目: {}", e)))?;
-
+    
     Ok(())
 }
-pub async fn get_user_playlists(
-    spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
-) -> Result<Vec<SimplifiedPlaylist>> {
+pub async fn get_user_playlists(spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>) -> Result<Vec<SimplifiedPlaylist>> {
     // 鎖定 Mutex，取得 Spotify 客戶端的克隆，然後立即釋放 MutexGuard
     let spotify_ref = {
         let spotify = spotify_client.lock().unwrap();
-        if spotify.is_none() {
-            error!("Spotify 客戶端未初始化");
-        }
         spotify.as_ref().cloned()
     };
 
@@ -1127,9 +1119,7 @@ pub async fn get_user_playlists(
         let mut offset = 0;
         loop {
             // 在這裡執行異步操作，不再持有 MutexGuard
-            let current_user_playlists = spotify
-                .current_user_playlists_manual(Some(50), Some(offset))
-                .await?;
+            let current_user_playlists = spotify.current_user_playlists_manual(Some(50), Some(offset)).await?;
             if current_user_playlists.items.is_empty() {
                 break;
             }
@@ -1158,7 +1148,13 @@ pub async fn get_playlist_tracks(
 
         loop {
             let playlist_items = spotify
-                .playlist_items_manual(playlist_id.clone(), None, None, Some(100), Some(offset))
+                .playlist_items_manual(
+                    playlist_id.clone(),
+                    None,
+                    None,
+                    Some(100),
+                    Some(offset),
+                )
                 .await?;
 
             if playlist_items.items.is_empty() {

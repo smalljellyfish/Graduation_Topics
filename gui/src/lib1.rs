@@ -7,6 +7,7 @@ use std::sync::Mutex;
 // 第三方庫導入
 use anyhow::Result;
 use chrono::Utc;
+use chrono::DateTime;
 use reqwest::Client;
 use lazy_static::lazy_static;
 use log::{debug, error, LevelFilter};
@@ -32,12 +33,13 @@ pub struct Config {
     pub osu: ServiceConfig,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LoginInfo {
     pub access_token: String,
     pub refresh_token: String,
-    pub expiry_time: chrono::DateTime<chrono::Utc>,
-    pub avatar_url: Option<String>,  // 新增
+    pub expiry_time: DateTime<Utc>,
+    pub avatar_url: Option<String>,
+    pub user_name: Option<String>,  // 新增的字段
 }
 
 #[derive(Deserialize)]
@@ -234,6 +236,7 @@ pub async fn check_and_refresh_token(client: &Client, config: &Config) -> Result
                     refresh_token: new_token.refresh_token.unwrap_or(login_info.refresh_token),
                     expiry_time: Utc::now() + chrono::Duration::seconds(new_token.expires_in as i64),
                     avatar_url: login_info.avatar_url, // 保留原有的頭像 URL
+                    user_name: login_info.user_name, // 添加 user_name 字段
                 };
                 
                 save_login_info(&new_login_info)?;
