@@ -44,7 +44,7 @@ use crate::osu::{
     parse_osu_url, print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
-    add_track_to_liked, authorize_spotify, get_access_token, get_liked_tracks, get_playlist_tracks,
+    add_track_to_liked, authorize_spotify, get_access_token,get_playlist_tracks,
     get_track_info, get_user_playlists, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
     remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
@@ -2203,7 +2203,9 @@ impl SearchApp {
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     ui.set_min_width(new_width - 20.0); // 減去一些邊距
-                    if self.selected_playlist.is_some() {
+                    if self.show_liked_tracks {
+                        self.render_playlist_content(ui);
+                    } else if self.selected_playlist.is_some() {
                         self.render_playlist_content(ui);
                     } else if self.show_playlists {
                         self.render_playlists(ui);
@@ -2368,16 +2370,16 @@ impl SearchApp {
                 }
                 ui.heading("我的播放清單");
             });
-
+    
             ui.add_space(10.0);
-
+    
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Liked Songs 項目
                 self.render_liked_songs_item(ui);
-
+    
                 ui.add_space(5.0);
                 ui.separator();
-
+    
                 // 原有的播放清單顯示邏輯
                 let playlists_clone = {
                     if let Ok(playlists) = self.spotify_user_playlists.lock() {
@@ -2386,7 +2388,7 @@ impl SearchApp {
                         Vec::new()
                     }
                 };
-
+    
                 for playlist in playlists_clone {
                     self.render_playlist_item(ui, &playlist);
                 }
@@ -2398,14 +2400,14 @@ impl SearchApp {
         ui.add_space(5.0);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::click());
-
+    
         if ui.is_rect_visible(rect) {
             ui.painter()
                 .rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
-
+    
             let cover_size = egui::vec2(60.0, 60.0);
             let text_rect = rect.shrink2(egui::vec2(cover_size.x + 30.0, 0.0));
-
+    
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, -10.0),
                 egui::Align2::LEFT_CENTER,
@@ -2413,7 +2415,7 @@ impl SearchApp {
                 egui::FontId::proportional(18.0),
                 ui.visuals().text_color(),
             );
-
+    
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, 15.0),
                 egui::Align2::LEFT_CENTER,
@@ -2421,12 +2423,12 @@ impl SearchApp {
                 egui::FontId::proportional(14.0),
                 ui.visuals().weak_text_color(),
             );
-
+    
             let image_rect = egui::Rect::from_min_size(
                 rect.left_center() - egui::vec2(0.0, cover_size.y / 2.0),
                 cover_size,
             );
-
+    
             ui.painter()
                 .rect_filled(image_rect, 0.0, egui::Color32::GREEN);
             ui.painter().text(
@@ -2437,11 +2439,15 @@ impl SearchApp {
                 egui::Color32::WHITE,
             );
         }
-
+    
         if response.clicked() {
-            self.load_user_liked_tracks();
+            if self.spotify_liked_tracks.lock().unwrap().is_empty() {
+                self.load_user_liked_tracks();
+            }
             self.selected_playlist = None;
             self.show_liked_tracks = true;
+            self.show_playlists = false;
+            info!("切換到 Liked Songs 視圖");
         }
     }
 
@@ -2544,51 +2550,61 @@ impl SearchApp {
                 if ui.button("< 返回").clicked() {
                     self.selected_playlist = None;
                     self.show_liked_tracks = false;
+                    self.show_playlists = true;
                 }
                 if self.show_liked_tracks {
-                    ui.heading("Liked Songs");
+                    ui.heading(egui::RichText::new("Liked Songs").size(24.0));
                 } else if let Some(playlist) = &self.selected_playlist {
-                    ui.heading(&playlist.name);
+                    ui.heading(egui::RichText::new(&playlist.name).size(24.0));
                 }
             });
-
+    
             ui.add_space(10.0);
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let tracks = if self.show_liked_tracks {
-                    self.spotify_liked_tracks.lock().unwrap()
-                } else {
-                    self.spotify_playlist_tracks.lock().unwrap()
-                };
-
-                if tracks.is_empty() {
-                    ui.label("正在加載曲目...");
-                } else {
-                    for (index, track) in tracks.iter().enumerate() {
-                        ui.add_space(5.0);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(format!("{}. ", index + 1)).size(16.0));
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(&track.name).size(16.0));
-                                ui.label(
-                                    egui::RichText::new(
-                                        track
-                                            .artists
-                                            .iter()
-                                            .map(|a| a.name.clone())
-                                            .collect::<Vec<_>>()
-                                            .join(", "),
-                                    )
-                                    .size(14.0)
-                                    .weak(),
-                                );
-                            });
-                        });
-                        ui.add_space(5.0);
-                        ui.separator();
-                    }
-                }
-            });
+    
+            let is_loading = self.is_searching.load(Ordering::SeqCst);
+            let tracks = if self.show_liked_tracks {
+                self.spotify_liked_tracks.lock().unwrap()
+            } else {
+                self.spotify_playlist_tracks.lock().unwrap()
+            };
+    
+            if is_loading {
+                ui.spinner();
+                ui.label(egui::RichText::new(format!("正在加載... ({}/未知)", tracks.len())).size(18.0));
+            } else {
+                egui::ScrollArea::vertical().show_rows(
+                    ui,
+                    40.0, // 增加每個項目的高度
+                    tracks.len(),
+                    |ui, row_range| {
+                        for i in row_range {
+                            if let Some(track) = tracks.get(i) {
+                                ui.add_space(5.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("{}.", i + 1)).size(18.0));
+                                    ui.add_space(10.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new(&track.name).size(18.0).strong());
+                                        ui.label(
+                                            egui::RichText::new(
+                                                track.artists
+                                                    .iter()
+                                                    .map(|a| a.name.clone())
+                                                    .collect::<Vec<_>>()
+                                                    .join(", "),
+                                            )
+                                            .size(16.0)
+                                            .weak(),
+                                        );
+                                    });
+                                });
+                                ui.add_space(5.0);
+                                ui.separator();
+                            }
+                        }
+                    },
+                );
+            }
         });
     }
     fn load_user_playlists(&self) {
@@ -2631,18 +2647,54 @@ impl SearchApp {
     fn load_user_liked_tracks(&self) {
         let spotify_client = self.spotify_client.clone();
         let liked_tracks = self.spotify_liked_tracks.clone();
+        let is_searching = self.is_searching.clone();
         let ctx = self.ctx.clone();
 
         tokio::spawn(async move {
-            match get_liked_tracks(spotify_client).await {
-                Ok(tracks) => {
-                    *liked_tracks.lock().unwrap() = tracks;
-                    ctx.request_repaint();
+            is_searching.store(true, Ordering::SeqCst);
+            let spotify = match spotify_client.lock() {
+                Ok(guard) => guard.clone(),
+                Err(_) => {
+                    error!("無法獲取 Spotify 客戶端鎖");
+                    is_searching.store(false, Ordering::SeqCst);
+                    return;
                 }
-                Err(e) => {
-                    error!("獲取用戶喜歡的曲目失敗: {:?}", e);
+            };
+            
+            if let Some(spotify) = spotify {
+                let mut all_tracks = Vec::new();
+                let mut offset = 0;
+                loop {
+                    match spotify.current_user_saved_tracks_manual(None, Some(50), Some(offset)).await {
+                        Ok(page) => {
+                            let page_items_len = page.items.len();
+                            all_tracks.extend(page.items.into_iter().map(|saved_track| saved_track.track));
+                            
+                            // 每次獲取到新的曲目就更新 liked_tracks
+                            {
+                                let mut tracks = liked_tracks.lock().unwrap();
+                                tracks.extend(all_tracks.drain(..));
+                            }
+                            
+                            ctx.request_repaint();
+                            
+                            if page.next.is_none() {
+                                break;
+                            }
+                            offset += page_items_len as u32;
+                        }
+                        Err(e) => {
+                            error!("獲取用戶喜歡的曲目失敗: {:?}", e);
+                            break;
+                        }
+                    }
                 }
+                info!("成功加載 {} 首喜歡的曲目", liked_tracks.lock().unwrap().len());
+            } else {
+                error!("Spotify 客戶端未初始化");
             }
+            is_searching.store(false, Ordering::SeqCst);
+            ctx.request_repaint();
         });
     }
     //渲染正在播放的彈窗
