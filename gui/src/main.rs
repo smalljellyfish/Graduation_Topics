@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 // 第三方庫導入
 use anyhow::{anyhow, Context, Result};
+use chrono::{TimeDelta, Utc};
 use clipboard::{ClipboardContext, ClipboardProvider};
-use chrono::{Utc,TimeDelta};
 use eframe::{self, egui};
 use egui::{
     FontData, FontDefinitions, FontFamily, TextureHandle, TextureWrapMode, ViewportBuilder,
@@ -24,9 +24,10 @@ use egui::{
 use log::{debug, error, info, LevelFilter};
 use reqwest::Client;
 use rspotify::{
-    model::{FullTrack, PlaylistId, SimplifiedPlaylist},
+    clients::OAuthClient,
+    model::{FullTrack, PlaylistId, SimplifiedPlaylist, TrackId},
     prelude::Id,
-    scopes, AuthCodeSpotify, Credentials, OAuth,Token
+    scopes, AuthCodeSpotify, Credentials, OAuth, Token,
 };
 use simplelog::*;
 use thiserror::Error;
@@ -39,17 +40,16 @@ use tokio::{
 
 // 本地模組導入
 use crate::osu::{
-    get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers, parse_osu_url,
-    print_beatmap_info_gui, Beatmapset,get_beatmapset_by_id,
+    get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers,
+    parse_osu_url, print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
-    add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
-    get_user_playlists, is_track_liked, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
+    add_track_to_liked, authorize_spotify, get_access_token, get_liked_tracks, get_playlist_tracks,
+    get_track_info, get_user_playlists, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
     remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
-    CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,get_liked_tracks
+    CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
-use lib::{read_config, set_log_level, ConfigError,check_and_refresh_token,read_login_info};
-
+use lib::{check_and_refresh_token, read_config, read_login_info, set_log_level, ConfigError};
 
 const BASE_SIDE_MENU_WIDTH: f32 = 300.0;
 const MIN_SIDE_MENU_WIDTH: f32 = 200.0;
@@ -502,7 +502,7 @@ impl SearchApp {
         let mut oauth = OAuth::default();
         oauth.redirect_uri = "http://localhost:8888/callback".to_string();
         oauth.scopes = scopes!("user-read-currently-playing");
-    
+
         let spotify_client = Arc::new(Mutex::new(None));
         let spotify_authorized = Arc::new(AtomicBool::new(false));
         let spotify_user_avatar = Arc::new(Mutex::new(None));
@@ -531,7 +531,10 @@ impl SearchApp {
                     let token = Token {
                         access_token: login_info.access_token.clone(),
                         refresh_token: Some(login_info.refresh_token.clone()),
-                        expires_in: TimeDelta::try_seconds((login_info.expiry_time - Utc::now()).num_seconds()).unwrap_or_default(),
+                        expires_in: TimeDelta::try_seconds(
+                            (login_info.expiry_time - Utc::now()).num_seconds(),
+                        )
+                        .unwrap_or_default(),
                         expires_at: Some(login_info.expiry_time),
                         scopes: oauth.scopes,
                     };
@@ -569,7 +572,7 @@ impl SearchApp {
                             });
                         }
                     }
-                },
+                }
                 Err(e) => {
                     error!("無法刷新 Spotify 令牌: {:?}", e);
                     spotify_authorized_clone.store(false, Ordering::SeqCst);
@@ -887,6 +890,7 @@ impl SearchApp {
         let need_repaint = self.need_repaint.clone();
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
+        let spotify_client = self.spotify_client.clone(); // 添加這行
         let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
         self.displayed_osu_results = 10;
         self.clear_cover_textures();
@@ -984,6 +988,7 @@ impl SearchApp {
                             },
                             external_urls: twc.external_urls.clone(),
                             index: twc.index,
+                            is_liked: None, // 添加缺失的 is_liked 字段
                         })
                         .collect();
 
@@ -1055,7 +1060,7 @@ impl SearchApp {
                                             .images
                                             .first()
                                             .map(|img| img.url.clone()),
-                                        index: 0, // 添加這行，給予一個固定的索引
+                                        index: 0,       // 添加這行，給予一個固定的索引
                                     }])
                                 }
                                 SpotifyUrlStatus::Incomplete => {
@@ -1093,6 +1098,7 @@ impl SearchApp {
                                 Err(anyhow!("Spotify URL 驗證錯誤"))
                             }
                         };
+
                     let osu_query = match spotify_result {
                         Ok(ref tracks_with_cover) => {
                             info!("Spotify 搜索結果: {} 首曲目", tracks_with_cover.len());
@@ -1124,8 +1130,42 @@ impl SearchApp {
                                     },
                                     external_urls: twc.external_urls.clone(),
                                     index: twc.index,
+                                    is_liked: None, // 初始化為 None
                                 })
                                 .collect();
+
+                            // 檢查前十首歌曲的喜歡狀態
+                            if !search_results.is_empty() {
+                                let track_ids: Vec<TrackId> = search_results
+                                    .iter()
+                                    .take(10)
+                                    .filter_map(|track| {
+                                        track
+                                            .external_urls
+                                            .get("spotify")
+                                            .and_then(|url| url.split('/').last())
+                                            .and_then(|id| TrackId::from_id(id).ok())
+                                    })
+                                    .collect();
+                            
+                                let spotify_option = {
+                                    let spotify_guard = spotify_client.lock().unwrap();
+                                    spotify_guard.as_ref().cloned()
+                                };
+                            
+                                if let Some(spotify) = spotify_option {
+                                    match spotify.current_user_saved_tracks_contains(track_ids).await {
+                                        Ok(statuses) => {
+                                            for (track, &is_liked) in search_results.iter_mut().zip(statuses.iter()) {
+                                                track.is_liked = Some(is_liked);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("無法檢查歌曲喜歡狀態: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
 
                             if matches!(is_valid_spotify_url(&query), Ok(SpotifyUrlStatus::Valid))
                                 && !tracks_with_cover.is_empty()
@@ -1152,7 +1192,6 @@ impl SearchApp {
                             return Err(anyhow!("Spotify 錯誤：搜索失敗"));
                         }
                     };
-
                     let results =
                         get_beatmapsets(&*client.lock().await, &osu_token, &osu_query, debug_mode)
                             .await
@@ -1296,7 +1335,7 @@ impl SearchApp {
                 .frame(false)
                 .min_size(egui::vec2(ui.available_width(), 100.0)),
         );
-
+    
         ui.allocate_ui_at_rect(response.rect, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -1304,7 +1343,7 @@ impl SearchApp {
                     if let Some(cover_url) = track.album.images.first().map(|img| &img.url) {
                         let texture_cache = self.texture_cache.clone();
                         let texture_load_queue = self.texture_load_queue.clone();
-
+    
                         if let Ok(cache) = texture_cache.try_read() {
                             if let Some(texture) = cache.get(cover_url) {
                                 let size = egui::Vec2::new(100.0, 100.0);
@@ -1325,9 +1364,9 @@ impl SearchApp {
                         };
                     }
                 });
-
+    
                 ui.add_space(10.0);
-
+    
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(&track.name)
@@ -1352,10 +1391,10 @@ impl SearchApp {
                 });
             });
         });
-
+    
         let button_size = egui::vec2(30.0, 30.0);
         let spacing = 10.0;
-
+    
         // "以此搜尋" 按鈕
         let search_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom()
@@ -1364,7 +1403,7 @@ impl SearchApp {
         );
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-
+    
         if search_button_response.clicked() {
             if let Some(spotify_url) = track.external_urls.get("spotify") {
                 self.search_query = spotify_url.clone();
@@ -1383,9 +1422,9 @@ impl SearchApp {
             let ctx = ui.ctx().clone();
             self.perform_search(ctx);
         }
-
+    
         search_button_response.on_hover_text("以此搜尋");
-
+    
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom()
@@ -1394,7 +1433,7 @@ impl SearchApp {
         );
         let open_button_response =
             self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
-
+    
         if open_button_response.clicked() {
             if let Some(url) = track.external_urls.get("spotify") {
                 if let Err(e) = open_spotify_url(url) {
@@ -1402,9 +1441,9 @@ impl SearchApp {
                 }
             }
         }
-
+    
         open_button_response.on_hover_text("打開");
-
+    
         // "Liked" 按鈕
         if self.spotify_authorized.load(Ordering::SeqCst) {
             let track_id = track
@@ -1412,25 +1451,18 @@ impl SearchApp {
                 .get("spotify")
                 .and_then(|url| url.split('/').last())
                 .unwrap_or("");
-
+    
             let spotify_client = self.spotify_client.clone();
-            let spotify_track_liked_status = self.spotify_track_liked_status.clone();
-
+    
             // 檢查 Spotify 客戶端是否可用
             let spotify_available = {
                 let spotify_guard = spotify_client.lock().unwrap();
                 spotify_guard.is_some()
             };
-
+    
             if spotify_available {
-                let is_liked = self
-                    .spotify_track_liked_status
-                    .lock()
-                    .unwrap()
-                    .get(track_id)
-                    .cloned()
-                    .unwrap_or(false);
-
+                let is_liked = track.is_liked.unwrap_or(false);
+    
                 let like_button_rect = egui::Rect::from_min_size(
                     response.rect.right_bottom()
                         + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
@@ -1438,28 +1470,32 @@ impl SearchApp {
                 );
                 let like_button_response =
                     self.draw_liked_button(ui, index, like_button_rect, is_liked);
-
+    
                 if like_button_response.clicked() {
                     let track_id = track_id.to_string();
                     let ctx = ui.ctx().clone();
-
+                    let search_results = self.search_results.clone();
+    
                     tokio::spawn(async move {
                         let spotify_option = {
                             let spotify_guard = spotify_client.lock().unwrap();
                             spotify_guard.as_ref().cloned()
                         };
-
+    
                         if let Some(spotify) = spotify_option {
                             let result = if is_liked {
                                 remove_track_from_liked(&spotify, &track_id).await
                             } else {
                                 add_track_to_liked(&spotify, &track_id).await
                             };
-
+    
                             match result {
                                 Ok(_) => {
-                                    let mut status = spotify_track_liked_status.lock().unwrap();
-                                    status.insert(track_id.clone(), !is_liked);
+                                    if let Ok(mut results) = search_results.try_lock() {
+                                        if let Some(track) = results.iter_mut().find(|t| t.index == index) {
+                                            track.is_liked = Some(!is_liked);
+                                        }
+                                    }
                                     log::info!("成功更新曲目 {} 的收藏狀態", track_id);
                                     ctx.request_repaint();
                                 }
@@ -1476,17 +1512,15 @@ impl SearchApp {
                         }
                     });
                 }
-
+    
                 like_button_response.on_hover_text(if is_liked {
                     "取消收藏"
                 } else {
                     "收藏"
                 });
-            } else {
             }
-        } else {
         }
-
+    
         response.context_menu(|ui| {
             self.create_context_menu(ui, |add_button| {
                 if let Some(url) = track.external_urls.get("spotify") {
@@ -1508,7 +1542,7 @@ impl SearchApp {
                 }
             });
         });
-
+    
         ui.add_space(5.0);
         ui.separator();
     }
@@ -2142,26 +2176,29 @@ impl SearchApp {
             });
         });
     }
-    
+
     fn render_side_menu(&mut self, ctx: &egui::Context) {
         if !self.show_side_menu {
             return;
         }
-    
+
         let side_panel = egui::SidePanel::left("side_menu")
             .resizable(true)
             .min_width(MIN_SIDE_MENU_WIDTH)
             .max_width(MAX_SIDE_MENU_WIDTH)
             .default_width(self.side_menu_width.unwrap_or(BASE_SIDE_MENU_WIDTH));
-    
+
         side_panel.show(ctx, |ui| {
-            let new_width = ui.available_width().min(MAX_SIDE_MENU_WIDTH).max(MIN_SIDE_MENU_WIDTH);
-            
+            let new_width = ui
+                .available_width()
+                .min(MAX_SIDE_MENU_WIDTH)
+                .max(MIN_SIDE_MENU_WIDTH);
+
             if (new_width - self.side_menu_width.unwrap_or(BASE_SIDE_MENU_WIDTH)).abs() > 1.0 {
                 self.side_menu_width = Some(new_width);
                 info!("側邊欄寬度已更新為: {:.2}", new_width);
             }
-    
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
@@ -2176,9 +2213,8 @@ impl SearchApp {
                 });
         });
     }
-    
-    fn render_main_menu(&mut self, ui: &mut egui::Ui) {
 
+    fn render_main_menu(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let button_size = egui::vec2(40.0, 40.0);
@@ -2189,9 +2225,11 @@ impl SearchApp {
                     let animation_progress = self.side_menu_animation.entry(ui.id()).or_insert(0.0);
 
                     if response.hovered() {
-                        *animation_progress = (*animation_progress + ui.input(|i| i.unstable_dt) * 4.0).min(1.0);
+                        *animation_progress =
+                            (*animation_progress + ui.input(|i| i.unstable_dt) * 4.0).min(1.0);
                     } else {
-                        *animation_progress = (*animation_progress - ui.input(|i| i.unstable_dt) * 4.0).max(0.0);
+                        *animation_progress =
+                            (*animation_progress - ui.input(|i| i.unstable_dt) * 4.0).max(0.0);
                     }
 
                     let color = egui::Color32::from_rgba_unmultiplied(
@@ -2208,7 +2246,9 @@ impl SearchApp {
                     );
 
                     let font_id = egui::FontId::proportional(24.0);
-                    let galley = ui.painter().layout_no_wrap("☰".to_string(), font_id, visuals.text_color());
+                    let galley =
+                        ui.painter()
+                            .layout_no_wrap("☰".to_string(), font_id, visuals.text_color());
 
                     let text_pos = rect.center() - galley.size() / 2.0;
                     ui.painter().galley(text_pos, galley, visuals.text_color());
@@ -2220,10 +2260,9 @@ impl SearchApp {
                 }
             });
         });
-    
-    
+
         ui.style_mut().spacing.item_spacing.y = 8.0;
-    
+
         // Spotify 折疊式視窗
         egui::CollapsingHeader::new(egui::RichText::new("🎵 Spotify").size(20.0))
             .default_open(true)
@@ -2252,7 +2291,7 @@ impl SearchApp {
                     self.show_side_menu = false;
                 }
             });
-    
+
         // Osu 折疊式視窗
         egui::CollapsingHeader::new(egui::RichText::new("🎮 Osu").size(20.0))
             .default_open(true)
@@ -2280,13 +2319,13 @@ impl SearchApp {
                     self.show_side_menu = false;
                 }
             });
-    
+
         // Settings 折疊式視窗
         egui::CollapsingHeader::new(egui::RichText::new("Settings").size(20.0))
             .default_open(true)
             .show(ui, |ui| {
                 ui.add_space(5.0);
-    
+
                 // 整體縮放設置
                 ui.horizontal(|ui| {
                     ui.label("整體縮放:");
@@ -2300,9 +2339,9 @@ impl SearchApp {
                         ui.ctx().set_pixels_per_point(new_scale);
                     }
                 });
-    
+
                 ui.add_space(10.0);
-    
+
                 // Debug 模式設置
                 let mut debug_mode = self.debug_mode;
                 ui.checkbox(&mut debug_mode, "Debug Mode");
@@ -2311,9 +2350,9 @@ impl SearchApp {
                     set_log_level(self.debug_mode);
                     info!("Debug mode: {}", self.debug_mode);
                 }
-    
+
                 ui.add_space(10.0);
-    
+
                 if ui.button("About").clicked() {
                     info!("點擊了: 關於");
                     self.show_side_menu = false;
@@ -2329,16 +2368,16 @@ impl SearchApp {
                 }
                 ui.heading("我的播放清單");
             });
-    
+
             ui.add_space(10.0);
-    
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Liked Songs 項目
                 self.render_liked_songs_item(ui);
-    
+
                 ui.add_space(5.0);
                 ui.separator();
-    
+
                 // 原有的播放清單顯示邏輯
                 let playlists_clone = {
                     if let Ok(playlists) = self.spotify_user_playlists.lock() {
@@ -2347,27 +2386,26 @@ impl SearchApp {
                         Vec::new()
                     }
                 };
-                
+
                 for playlist in playlists_clone {
                     self.render_playlist_item(ui, &playlist);
                 }
             });
         });
     }
-    
+
     fn render_liked_songs_item(&mut self, ui: &mut egui::Ui) {
         ui.add_space(5.0);
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 70.0),
-            egui::Sense::click()
-        );
-    
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::click());
+
         if ui.is_rect_visible(rect) {
-            ui.painter().rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
-    
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
+
             let cover_size = egui::vec2(60.0, 60.0);
             let text_rect = rect.shrink2(egui::vec2(cover_size.x + 30.0, 0.0));
-    
+
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, -10.0),
                 egui::Align2::LEFT_CENTER,
@@ -2375,7 +2413,7 @@ impl SearchApp {
                 egui::FontId::proportional(18.0),
                 ui.visuals().text_color(),
             );
-    
+
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, 15.0),
                 egui::Align2::LEFT_CENTER,
@@ -2383,13 +2421,14 @@ impl SearchApp {
                 egui::FontId::proportional(14.0),
                 ui.visuals().weak_text_color(),
             );
-    
+
             let image_rect = egui::Rect::from_min_size(
                 rect.left_center() - egui::vec2(0.0, cover_size.y / 2.0),
-                cover_size
+                cover_size,
             );
-    
-            ui.painter().rect_filled(image_rect, 0.0, egui::Color32::GREEN);
+
+            ui.painter()
+                .rect_filled(image_rect, 0.0, egui::Color32::GREEN);
             ui.painter().text(
                 image_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -2398,28 +2437,27 @@ impl SearchApp {
                 egui::Color32::WHITE,
             );
         }
-    
+
         if response.clicked() {
             self.load_user_liked_tracks();
             self.selected_playlist = None;
             self.show_liked_tracks = true;
         }
     }
-    
+
     fn render_playlist_item(&mut self, ui: &mut egui::Ui, playlist: &SimplifiedPlaylist) {
         ui.add_space(5.0);
-        
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 70.0),
-            egui::Sense::click()
-        );
-    
+
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::click());
+
         if ui.is_rect_visible(rect) {
-            ui.painter().rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
-    
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
+
             let cover_size = egui::vec2(60.0, 60.0);
             let text_rect = rect.shrink2(egui::vec2(cover_size.x + 30.0, 0.0));
-    
+
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, -10.0),
                 egui::Align2::LEFT_CENTER,
@@ -2427,7 +2465,7 @@ impl SearchApp {
                 egui::FontId::proportional(18.0),
                 ui.visuals().text_color(),
             );
-    
+
             if let Some(owner) = &playlist.owner.display_name {
                 ui.painter().text(
                     text_rect.left_center() + egui::vec2(0.0, 15.0),
@@ -2437,12 +2475,12 @@ impl SearchApp {
                     ui.visuals().weak_text_color(),
                 );
             }
-    
+
             let image_rect = egui::Rect::from_min_size(
                 rect.left_center() - egui::vec2(0.0, cover_size.y / 2.0),
-                cover_size
+                cover_size,
             );
-    
+
             if let Some(cover_url) = playlist.images.first().map(|img| &img.url) {
                 let texture = {
                     let mut textures = self.playlist_cover_textures.lock().unwrap();
@@ -2461,11 +2499,17 @@ impl SearchApp {
                     }
                     textures.get(cover_url).and_then(|t| t.clone())
                 };
-    
+
                 if let Some(texture) = texture {
-                    ui.painter().image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    ui.painter().image(
+                        texture.id(),
+                        image_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 } else {
-                    ui.painter().rect_filled(image_rect, 0.0, ui.visuals().faint_bg_color);
+                    ui.painter()
+                        .rect_filled(image_rect, 0.0, ui.visuals().faint_bg_color);
                     ui.painter().text(
                         image_rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -2475,7 +2519,8 @@ impl SearchApp {
                     );
                 }
             } else {
-                ui.painter().rect_filled(image_rect, 0.0, ui.visuals().faint_bg_color);
+                ui.painter()
+                    .rect_filled(image_rect, 0.0, ui.visuals().faint_bg_color);
                 ui.painter().text(
                     image_rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -2485,7 +2530,7 @@ impl SearchApp {
                 );
             }
         }
-    
+
         if response.clicked() {
             self.selected_playlist = Some(playlist.clone());
             self.load_playlist_tracks(playlist.id.clone());
@@ -2506,16 +2551,16 @@ impl SearchApp {
                     ui.heading(&playlist.name);
                 }
             });
-    
+
             ui.add_space(10.0);
-    
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let tracks = if self.show_liked_tracks {
                     self.spotify_liked_tracks.lock().unwrap()
                 } else {
                     self.spotify_playlist_tracks.lock().unwrap()
                 };
-    
+
                 if tracks.is_empty() {
                     ui.label("正在加載曲目...");
                 } else {
@@ -2568,7 +2613,7 @@ impl SearchApp {
         let playlist_tracks = self.spotify_playlist_tracks.clone();
         let ctx = self.ctx.clone();
         let playlist_id_string = playlist_id.id().to_string();
-    
+
         tokio::spawn(async move {
             match get_playlist_tracks(spotify_client, playlist_id_string).await {
                 Ok(tracks) => {
@@ -2587,7 +2632,7 @@ impl SearchApp {
         let spotify_client = self.spotify_client.clone();
         let liked_tracks = self.spotify_liked_tracks.clone();
         let ctx = self.ctx.clone();
-    
+
         tokio::spawn(async move {
             match get_liked_tracks(spotify_client).await {
                 Ok(tracks) => {
@@ -2952,15 +2997,15 @@ impl SearchApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_width = ui.available_width();
             let available_height = ui.available_height();
-    
+
             egui::Frame::none()
                 .fill(ui.style().visuals.window_fill())
                 .show(ui, |ui| {
                     ui.set_min_width(100.0); // 設置一個合理的最小寬度
                     ui.set_max_width(available_width); // 使用可用寬度作為最大寬度
-    
+
                     let window_size = egui::Vec2::new(available_width, available_height);
-    
+
                     // 使用 egui 的緩存機制來減少重繪
                     let window_size_changed = ui
                         .memory_mut(|mem| {
@@ -2968,21 +3013,21 @@ impl SearchApp {
                                 .get_temp::<egui::Vec2>(egui::Id::new("window_size"))
                         })
                         .map_or(true, |old_size| old_size != window_size);
-    
+
                     if window_size_changed {
                         ui.memory_mut(|mem| {
                             mem.data
                                 .insert_temp(egui::Id::new("window_size"), window_size)
                         });
                     }
-    
+
                     self.render_search_bar(ui, ctx);
-    
+
                     // 使用緩存來減少不必要的樣式更新
                     self.update_font_size(ui);
-    
+
                     self.display_error_message(ui);
-    
+
                     // 根據視窗大小決定佈局
                     if available_width >= 1000.0 {
                         self.render_large_window_layout(ui, window_size);

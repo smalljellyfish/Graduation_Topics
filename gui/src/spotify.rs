@@ -156,8 +156,10 @@ pub struct Track {
     pub artists: Vec<Artist>,
     pub external_urls: HashMap<String, String>,
     pub album: Album,
+    pub is_liked: Option<bool>,
     #[serde(skip)]
     pub index: usize,
+    
 }
 pub struct TrackWithCover {
     pub name: String,
@@ -1082,19 +1084,6 @@ pub async fn add_track_to_liked(
         .map_err(|e| SpotifyError::ApiError(format!("無法將曲目添加到 Liked Songs: {}", e)))?;
     
     Ok(())
-}
-pub async fn is_track_liked(
-    spotify: &AuthCodeSpotify, 
-    track_id: &str
-) -> Result<bool, SpotifyError> {
-    let track_id = TrackId::from_id(track_id)
-        .map_err(|e| SpotifyError::ApiError(format!("無效的曲目 ID: {}", e)))?;
-    
-    let is_saved = spotify.current_user_saved_tracks_contains(vec![track_id])
-        .await
-        .map_err(|e| SpotifyError::ApiError(format!("無法檢查曲目是否已收藏: {}", e)))?;
-    
-    Ok(is_saved[0])
 }
 pub async fn remove_track_from_liked(
     spotify: &AuthCodeSpotify, 
