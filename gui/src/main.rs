@@ -34,7 +34,10 @@ use thiserror::Error;
 use tokio::{
     self,
     net::TcpListener,
-    sync::{mpsc::Sender, Mutex as TokioMutex, RwLock},
+    sync::{
+        mpsc::{Receiver, Sender},
+        Mutex as TokioMutex, RwLock,
+    },
     task::JoinHandle,
 };
 
@@ -44,8 +47,8 @@ use crate::osu::{
     parse_osu_url, print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
-    add_track_to_liked, authorize_spotify, get_access_token,get_playlist_tracks,
-    get_track_info, get_user_playlists, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
+    add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
+    get_user_playlists, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
     remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
@@ -82,6 +85,12 @@ pub enum AuthPlatform {
 enum ButtonType {
     Spotify,
     Osu,
+}
+
+// 定義 PlaylistCache 結構，用於緩存播放列表曲目
+struct PlaylistCache {
+    tracks: Vec<FullTrack>,
+    last_updated: Instant,
 }
 
 // 定義 AuthManager 結構，儲存授權狀態和錯誤記錄
@@ -195,6 +204,12 @@ struct SearchApp {
     osu_open_button_states: HashMap<usize, f32>,
     liked_button_states: HashMap<usize, f32>,
     side_menu_animation: HashMap<egui::Id, f32>,
+    playlist_cache: Arc<Mutex<HashMap<String, PlaylistCache>>>,
+    liked_songs_cache: Arc<Mutex<Option<PlaylistCache>>>,
+    cache_ttl: Duration,
+    update_check_result: Arc<Mutex<Option<bool>>>,
+    update_check_sender: Sender<bool>,
+    update_check_receiver: Receiver<bool>,
 }
 
 impl eframe::App for SearchApp {
@@ -499,6 +514,7 @@ impl SearchApp {
         let spotify_icon = load_spotify_icon(&ctx);
         let config = read_config(debug_mode)?;
 
+        let (update_check_sender, update_check_receiver) = tokio::sync::mpsc::channel(100); // 設置適當的緩衝區大小
         let mut oauth = OAuth::default();
         oauth.redirect_uri = "http://localhost:8888/callback".to_string();
         oauth.scopes = scopes!("user-read-currently-playing");
@@ -689,6 +705,12 @@ impl SearchApp {
             osu_open_button_states: HashMap::new(),
             liked_button_states: HashMap::new(),
             side_menu_animation: HashMap::new(),
+            playlist_cache: Arc::new(Mutex::new(HashMap::new())),
+            liked_songs_cache: Arc::new(Mutex::new(None)),
+            cache_ttl: Duration::from_secs(300), // 5 分鐘的緩存有效期
+            update_check_result: Arc::new(Mutex::new(None)),
+            update_check_sender,
+            update_check_receiver,
         };
 
         app.load_default_avatar();
@@ -1060,7 +1082,7 @@ impl SearchApp {
                                             .images
                                             .first()
                                             .map(|img| img.url.clone()),
-                                        index: 0,       // 添加這行，給予一個固定的索引
+                                        index: 0, // 添加這行，給予一個固定的索引
                                     }])
                                 }
                                 SpotifyUrlStatus::Incomplete => {
@@ -1147,16 +1169,21 @@ impl SearchApp {
                                             .and_then(|id| TrackId::from_id(id).ok())
                                     })
                                     .collect();
-                            
+
                                 let spotify_option = {
                                     let spotify_guard = spotify_client.lock().unwrap();
                                     spotify_guard.as_ref().cloned()
                                 };
-                            
+
                                 if let Some(spotify) = spotify_option {
-                                    match spotify.current_user_saved_tracks_contains(track_ids).await {
+                                    match spotify
+                                        .current_user_saved_tracks_contains(track_ids)
+                                        .await
+                                    {
                                         Ok(statuses) => {
-                                            for (track, &is_liked) in search_results.iter_mut().zip(statuses.iter()) {
+                                            for (track, &is_liked) in
+                                                search_results.iter_mut().zip(statuses.iter())
+                                            {
                                                 track.is_liked = Some(is_liked);
                                             }
                                         }
@@ -1335,7 +1362,7 @@ impl SearchApp {
                 .frame(false)
                 .min_size(egui::vec2(ui.available_width(), 100.0)),
         );
-    
+
         ui.allocate_ui_at_rect(response.rect, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -1343,7 +1370,7 @@ impl SearchApp {
                     if let Some(cover_url) = track.album.images.first().map(|img| &img.url) {
                         let texture_cache = self.texture_cache.clone();
                         let texture_load_queue = self.texture_load_queue.clone();
-    
+
                         if let Ok(cache) = texture_cache.try_read() {
                             if let Some(texture) = cache.get(cover_url) {
                                 let size = egui::Vec2::new(100.0, 100.0);
@@ -1364,9 +1391,9 @@ impl SearchApp {
                         };
                     }
                 });
-    
+
                 ui.add_space(10.0);
-    
+
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(&track.name)
@@ -1391,10 +1418,10 @@ impl SearchApp {
                 });
             });
         });
-    
+
         let button_size = egui::vec2(30.0, 30.0);
         let spacing = 10.0;
-    
+
         // "以此搜尋" 按鈕
         let search_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom()
@@ -1403,7 +1430,7 @@ impl SearchApp {
         );
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-    
+
         if search_button_response.clicked() {
             if let Some(spotify_url) = track.external_urls.get("spotify") {
                 self.search_query = spotify_url.clone();
@@ -1422,9 +1449,9 @@ impl SearchApp {
             let ctx = ui.ctx().clone();
             self.perform_search(ctx);
         }
-    
+
         search_button_response.on_hover_text("以此搜尋");
-    
+
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
             response.rect.right_bottom()
@@ -1433,7 +1460,7 @@ impl SearchApp {
         );
         let open_button_response =
             self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
-    
+
         if open_button_response.clicked() {
             if let Some(url) = track.external_urls.get("spotify") {
                 if let Err(e) = open_spotify_url(url) {
@@ -1441,9 +1468,9 @@ impl SearchApp {
                 }
             }
         }
-    
+
         open_button_response.on_hover_text("打開");
-    
+
         // "Liked" 按鈕
         if self.spotify_authorized.load(Ordering::SeqCst) {
             let track_id = track
@@ -1451,18 +1478,18 @@ impl SearchApp {
                 .get("spotify")
                 .and_then(|url| url.split('/').last())
                 .unwrap_or("");
-    
+
             let spotify_client = self.spotify_client.clone();
-    
+
             // 檢查 Spotify 客戶端是否可用
             let spotify_available = {
                 let spotify_guard = spotify_client.lock().unwrap();
                 spotify_guard.is_some()
             };
-    
+
             if spotify_available {
                 let is_liked = track.is_liked.unwrap_or(false);
-    
+
                 let like_button_rect = egui::Rect::from_min_size(
                     response.rect.right_bottom()
                         + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
@@ -1470,29 +1497,31 @@ impl SearchApp {
                 );
                 let like_button_response =
                     self.draw_liked_button(ui, index, like_button_rect, is_liked);
-    
+
                 if like_button_response.clicked() {
                     let track_id = track_id.to_string();
                     let ctx = ui.ctx().clone();
                     let search_results = self.search_results.clone();
-    
+
                     tokio::spawn(async move {
                         let spotify_option = {
                             let spotify_guard = spotify_client.lock().unwrap();
                             spotify_guard.as_ref().cloned()
                         };
-    
+
                         if let Some(spotify) = spotify_option {
                             let result = if is_liked {
                                 remove_track_from_liked(&spotify, &track_id).await
                             } else {
                                 add_track_to_liked(&spotify, &track_id).await
                             };
-    
+
                             match result {
                                 Ok(_) => {
                                     if let Ok(mut results) = search_results.try_lock() {
-                                        if let Some(track) = results.iter_mut().find(|t| t.index == index) {
+                                        if let Some(track) =
+                                            results.iter_mut().find(|t| t.index == index)
+                                        {
                                             track.is_liked = Some(!is_liked);
                                         }
                                     }
@@ -1512,7 +1541,7 @@ impl SearchApp {
                         }
                     });
                 }
-    
+
                 like_button_response.on_hover_text(if is_liked {
                     "取消收藏"
                 } else {
@@ -1520,7 +1549,7 @@ impl SearchApp {
                 });
             }
         }
-    
+
         response.context_menu(|ui| {
             self.create_context_menu(ui, |add_button| {
                 if let Some(url) = track.external_urls.get("spotify") {
@@ -1542,7 +1571,7 @@ impl SearchApp {
                 }
             });
         });
-    
+
         ui.add_space(5.0);
         ui.separator();
     }
@@ -2182,38 +2211,35 @@ impl SearchApp {
             return;
         }
 
-        let side_panel = egui::SidePanel::left("side_menu")
+        let current_width = self.side_menu_width.unwrap_or(BASE_SIDE_MENU_WIDTH);
+
+        egui::SidePanel::left("side_menu")
             .resizable(true)
             .min_width(MIN_SIDE_MENU_WIDTH)
             .max_width(MAX_SIDE_MENU_WIDTH)
-            .default_width(self.side_menu_width.unwrap_or(BASE_SIDE_MENU_WIDTH));
+            .default_width(current_width)
+            .show(ctx, |ui| {
+                let new_width = ui.available_width();
 
-        side_panel.show(ctx, |ui| {
-            let new_width = ui
-                .available_width()
-                .min(MAX_SIDE_MENU_WIDTH)
-                .max(MIN_SIDE_MENU_WIDTH);
+                // 只有當用戶手動調整寬度時才更新
+                if (new_width - current_width).abs() > 1.0 && ui.input(|i| i.pointer.any_down()) {
+                    self.side_menu_width = Some(new_width);
+                    info!("側邊欄寬度已更新為: {:.2}", new_width);
+                }
 
-            if (new_width - self.side_menu_width.unwrap_or(BASE_SIDE_MENU_WIDTH)).abs() > 1.0 {
-                self.side_menu_width = Some(new_width);
-                info!("側邊欄寬度已更新為: {:.2}", new_width);
-            }
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    ui.set_min_width(new_width - 20.0); // 減去一些邊距
-                    if self.show_liked_tracks {
-                        self.render_playlist_content(ui);
-                    } else if self.selected_playlist.is_some() {
-                        self.render_playlist_content(ui);
-                    } else if self.show_playlists {
-                        self.render_playlists(ui);
-                    } else {
-                        self.render_main_menu(ui);
-                    }
-                });
-        });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.set_min_width(current_width - 20.0); // 使用 current_width 而不是 new_width
+                        if self.show_liked_tracks || self.selected_playlist.is_some() {
+                            self.render_playlist_content(ui);
+                        } else if self.show_playlists {
+                            self.render_playlists(ui);
+                        } else {
+                            self.render_main_menu(ui);
+                        }
+                    });
+            });
     }
 
     fn render_main_menu(&mut self, ui: &mut egui::Ui) {
@@ -2370,16 +2396,16 @@ impl SearchApp {
                 }
                 ui.heading("我的播放清單");
             });
-    
+
             ui.add_space(10.0);
-    
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // Liked Songs 項目
                 self.render_liked_songs_item(ui);
-    
+
                 ui.add_space(5.0);
                 ui.separator();
-    
+
                 // 原有的播放清單顯示邏輯
                 let playlists_clone = {
                     if let Ok(playlists) = self.spotify_user_playlists.lock() {
@@ -2388,7 +2414,7 @@ impl SearchApp {
                         Vec::new()
                     }
                 };
-    
+
                 for playlist in playlists_clone {
                     self.render_playlist_item(ui, &playlist);
                 }
@@ -2400,14 +2426,14 @@ impl SearchApp {
         ui.add_space(5.0);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::click());
-    
+
         if ui.is_rect_visible(rect) {
             ui.painter()
                 .rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
-    
+
             let cover_size = egui::vec2(60.0, 60.0);
             let text_rect = rect.shrink2(egui::vec2(cover_size.x + 30.0, 0.0));
-    
+
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, -10.0),
                 egui::Align2::LEFT_CENTER,
@@ -2415,7 +2441,7 @@ impl SearchApp {
                 egui::FontId::proportional(18.0),
                 ui.visuals().text_color(),
             );
-    
+
             ui.painter().text(
                 text_rect.left_center() + egui::vec2(0.0, 15.0),
                 egui::Align2::LEFT_CENTER,
@@ -2423,12 +2449,12 @@ impl SearchApp {
                 egui::FontId::proportional(14.0),
                 ui.visuals().weak_text_color(),
             );
-    
+
             let image_rect = egui::Rect::from_min_size(
                 rect.left_center() - egui::vec2(0.0, cover_size.y / 2.0),
                 cover_size,
             );
-    
+
             ui.painter()
                 .rect_filled(image_rect, 0.0, egui::Color32::GREEN);
             ui.painter().text(
@@ -2439,7 +2465,7 @@ impl SearchApp {
                 egui::Color32::WHITE,
             );
         }
-    
+
         if response.clicked() {
             if self.spotify_liked_tracks.lock().unwrap().is_empty() {
                 self.load_user_liked_tracks();
@@ -2541,6 +2567,7 @@ impl SearchApp {
             self.selected_playlist = Some(playlist.clone());
             self.load_playlist_tracks(playlist.id.clone());
             self.show_liked_tracks = false;
+            self.show_playlists = false; // 確保關閉播放清單列表視圖
             info!("正在加載播放清單: {}", playlist.name);
         }
     }
@@ -2552,58 +2579,196 @@ impl SearchApp {
                     self.show_liked_tracks = false;
                     self.show_playlists = true;
                 }
-                if self.show_liked_tracks {
-                    ui.heading(egui::RichText::new("Liked Songs").size(24.0));
+
+                let available_width = ui.available_width();
+                let mut title = if self.show_liked_tracks {
+                    "Liked Songs".to_string()
                 } else if let Some(playlist) = &self.selected_playlist {
-                    ui.heading(egui::RichText::new(&playlist.name).size(24.0));
-                }
-            });
-    
-            ui.add_space(10.0);
-    
-            let is_loading = self.is_searching.load(Ordering::SeqCst);
-            let tracks = if self.show_liked_tracks {
-                self.spotify_liked_tracks.lock().unwrap()
-            } else {
-                self.spotify_playlist_tracks.lock().unwrap()
-            };
-    
-            if is_loading {
-                ui.spinner();
-                ui.label(egui::RichText::new(format!("正在加載... ({}/未知)", tracks.len())).size(18.0));
-            } else {
-                egui::ScrollArea::vertical().show_rows(
-                    ui,
-                    40.0, // 增加每個項目的高度
-                    tracks.len(),
-                    |ui, row_range| {
-                        for i in row_range {
-                            if let Some(track) = tracks.get(i) {
-                                ui.add_space(5.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(format!("{}.", i + 1)).size(18.0));
-                                    ui.add_space(10.0);
-                                    ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new(&track.name).size(18.0).strong());
-                                        ui.label(
-                                            egui::RichText::new(
-                                                track.artists
-                                                    .iter()
-                                                    .map(|a| a.name.clone())
-                                                    .collect::<Vec<_>>()
-                                                    .join(", "),
-                                            )
-                                            .size(16.0)
-                                            .weak(),
-                                        );
-                                    });
-                                });
-                                ui.add_space(5.0);
-                                ui.separator();
+                    playlist.name.clone()
+                } else {
+                    "".to_string()
+                };
+
+                // 動態調整標題大小或截斷
+                let mut font_size = 24.0;
+                while ui
+                    .fonts(|f| {
+                        f.layout_no_wrap(
+                            title.clone(),
+                            egui::FontId::new(font_size, egui::FontFamily::Proportional),
+                            egui::Color32::WHITE,
+                        )
+                    })
+                    .size()
+                    .x
+                    > available_width - 100.0
+                {
+                    font_size -= 1.0;
+                    if font_size < 16.0 {
+                        // 如果字體大小太小，開始截斷文字
+                        while ui
+                            .fonts(|f| {
+                                f.layout_no_wrap(
+                                    title.clone(),
+                                    egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                                    egui::Color32::WHITE,
+                                )
+                            })
+                            .size()
+                            .x
+                            > available_width - 100.0
+                        {
+                            if title.chars().count() > 3 {
+                                title.pop();
+                            } else {
+                                break;
                             }
                         }
-                    },
-                );
+                        title.push_str("...");
+                        font_size = 16.0;
+                        break;
+                    }
+                }
+
+                ui.heading(egui::RichText::new(title).size(font_size));
+
+                if ui.button("🔄 重新加載").clicked() {
+                    if self.show_liked_tracks {
+                        self.load_user_liked_tracks();
+                    } else if let Some(playlist) = &self.selected_playlist {
+                        self.load_playlist_tracks(playlist.id.clone());
+                    }
+
+                    // 觸發更新檢查
+                    let spotify_client = self.spotify_client.clone();
+                    let liked_songs_cache = self.liked_songs_cache.clone();
+                    let playlist_cache = self.playlist_cache.clone();
+                    let sender = self.update_check_sender.clone();
+
+                    tokio::spawn(async move {
+                        let spotify = spotify_client.lock().unwrap().clone();
+
+                        if let Some(spotify) = spotify {
+                            match Self::check_for_updates(
+                                &spotify,
+                                &liked_songs_cache,
+                                &playlist_cache,
+                            )
+                            .await
+                            {
+                                Ok(has_updates) => {
+                                    if let Err(e) = sender.send(has_updates).await {
+                                        error!("發送更新檢查結果時發生錯誤: {:?}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("檢查更新時發生錯誤: {:?}", e);
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
+            // 處理更新檢查結果
+            while let Ok(has_updates) = self.update_check_receiver.try_recv() {
+                if has_updates {
+                    info!("發現更新，正在重新加載...");
+                    ui.label("發現更新，正在重新加載...");
+                    if self.show_liked_tracks {
+                        self.load_user_liked_tracks();
+                    } else if let Some(playlist) = &self.selected_playlist {
+                        self.load_playlist_tracks(playlist.id.clone());
+                    }
+                } else {
+                    info!("沒有發現更新，使用緩存數據");
+                    ui.label("沒有發現更新，使用緩存數據");
+                }
+            }
+
+            ui.add_space(10.0);
+
+            let is_loading = self.is_searching.load(Ordering::SeqCst);
+            let tracks = if self.show_liked_tracks {
+                self.spotify_liked_tracks.lock().unwrap().clone()
+            } else {
+                self.spotify_playlist_tracks.lock().unwrap().clone()
+            };
+
+            if is_loading {
+                ui.add_space(20.0);
+                ui.add(egui::Spinner::new().size(32.0));
+                ui.label("正在加載...");
+            } else if tracks.is_empty() {
+                ui.add_space(20.0);
+                ui.label("沒有找到曲目");
+            } else {
+                egui::ScrollArea::vertical().show_rows(ui, 40.0, tracks.len(), |ui, row_range| {
+                    for i in row_range {
+                        if let Some(track) = tracks.get(i) {
+                            ui.add_space(5.0);
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Label::new(egui::RichText::new(format!("{}.", i + 1)).size(18.0)).wrap(false));
+                                ui.add_space(10.0);
+                                
+                                let content_width = ui.available_width() - 40.0; // 為按鈕預留空間
+                                
+                                ui.vertical(|ui| {
+                                    ui.set_width(content_width);
+                                    
+                                    // 歌曲名稱
+                                    let title = track.name.clone();
+                                    let title_galley = ui.fonts(|f| {
+                                        f.layout(title, egui::FontId::new(18.0, egui::FontFamily::Proportional), egui::Color32::WHITE, content_width)
+                                    });
+                                    ui.label(egui::RichText::new(title_galley.text()).size(18.0).strong());
+                            
+                                    // 歌手名稱
+                                    let artists = track.artists
+                                        .iter()
+                                        .map(|a| a.name.clone())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let artists_galley = ui.fonts(|f| {
+                                        f.layout(artists, egui::FontId::new(16.0, egui::FontFamily::Proportional), egui::Color32::WHITE, content_width)
+                                    });
+                                    ui.label(egui::RichText::new(artists_galley.text()).size(16.0).weak());
+                                });
+                            
+                                // 添加搜索按鈕
+                                let button_size = egui::vec2(24.0, 24.0); // 縮小按鈕大小
+                                let search_button_rect = ui.max_rect();
+                                let search_button_rect = egui::Rect::from_center_size(
+                                    search_button_rect.center() + egui::vec2(search_button_rect.width() / 2.0 - button_size.x / 2.0 - 5.0, 0.0),
+                                    button_size
+                                );
+                                let search_button_response = self.draw_search_button(ui, i, search_button_rect, ButtonType::Spotify);
+                            
+                                if search_button_response.clicked() {
+                                    if let Some(spotify_url) = track.external_urls.get("spotify") {
+                                        self.search_query = spotify_url.clone();
+                                    } else {
+                                        self.search_query = format!(
+                                            "{} {}",
+                                            track.name,
+                                            track.artists
+                                                .iter()
+                                                .map(|a| a.name.as_str())
+                                                .collect::<Vec<_>>()
+                                                .join(" ")
+                                        );
+                                    }
+                                    let ctx = ui.ctx().clone();
+                                    self.perform_search(ctx);
+                                }
+                            
+                                search_button_response.on_hover_text("以此搜尋");
+                            });
+                            ui.add_space(5.0);
+                            ui.separator();
+                        }
+                    }
+                });
             }
         });
     }
@@ -2628,20 +2793,83 @@ impl SearchApp {
         let spotify_client = self.spotify_client.clone();
         let playlist_tracks = self.spotify_playlist_tracks.clone();
         let ctx = self.ctx.clone();
+        let is_searching = self.is_searching.clone();
         let playlist_id_string = playlist_id.id().to_string();
+        let playlist_cache = self.playlist_cache.clone();
+        let cache_ttl = self.cache_ttl;
+        let update_check_result = self.update_check_result.clone();
 
         tokio::spawn(async move {
-            match get_playlist_tracks(spotify_client, playlist_id_string).await {
-                Ok(tracks) => {
-                    let tracks_len = tracks.len();
-                    *playlist_tracks.lock().unwrap() = tracks;
-                    ctx.request_repaint();
-                    info!("成功加載 {} 首曲目", tracks_len);
+            is_searching.store(true, Ordering::SeqCst);
+
+            let should_update = {
+                let cache = playlist_cache.lock().unwrap();
+                cache
+                    .get(&playlist_id_string)
+                    .map_or(true, |cached| cached.last_updated.elapsed() > cache_ttl)
+            };
+
+            // 檢查是否有更新
+            let has_updates = {
+                let spotify_option = spotify_client.lock().unwrap().clone();
+                if let Some(spotify) = spotify_option {
+                    match Self::check_for_updates(&spotify, &Default::default(), &playlist_cache)
+                        .await
+                    {
+                        Ok(updates) => updates,
+                        Err(e) => {
+                            error!("檢查更新時發生錯誤: {:?}", e);
+                            false
+                        }
+                    }
+                } else {
+                    false
                 }
-                Err(e) => {
-                    error!("獲取播放清單曲目失敗: {:?}", e);
+            };
+
+            if should_update || has_updates {
+                info!("正在更新播放列表 {} 的緩存", playlist_id_string);
+
+                match get_playlist_tracks(spotify_client.clone(), playlist_id_string.clone()).await
+                {
+                    Ok(tracks) => {
+                        let tracks_len = tracks.len();
+                        *playlist_tracks.lock().unwrap() = tracks.clone();
+                        playlist_cache.lock().unwrap().insert(
+                            playlist_id_string.clone(),
+                            PlaylistCache {
+                                tracks,
+                                last_updated: Instant::now(),
+                            },
+                        );
+                        info!(
+                            "成功更新緩存並加載 {} 首曲目，播放列表 ID: {}",
+                            tracks_len, playlist_id_string
+                        );
+                    }
+                    Err(e) => {
+                        error!("獲取播放列表 {} 曲目失敗: {:?}", playlist_id_string, e);
+                    }
                 }
+            } else {
+                let cached_tracks = playlist_cache
+                    .lock()
+                    .unwrap()
+                    .get(&playlist_id_string)
+                    .unwrap()
+                    .tracks
+                    .clone();
+                *playlist_tracks.lock().unwrap() = cached_tracks.clone();
+                info!(
+                    "使用緩存的播放列表曲目，播放列表 ID: {}, 曲目數量: {}",
+                    playlist_id_string,
+                    cached_tracks.len()
+                );
             }
+
+            *update_check_result.lock().unwrap() = None;
+            is_searching.store(false, Ordering::SeqCst);
+            ctx.request_repaint();
         });
     }
     fn load_user_liked_tracks(&self) {
@@ -2649,53 +2877,165 @@ impl SearchApp {
         let liked_tracks = self.spotify_liked_tracks.clone();
         let is_searching = self.is_searching.clone();
         let ctx = self.ctx.clone();
+        let liked_songs_cache = self.liked_songs_cache.clone();
+        let cache_ttl = self.cache_ttl;
+        let update_check_result = self.update_check_result.clone();
 
         tokio::spawn(async move {
             is_searching.store(true, Ordering::SeqCst);
-            let spotify = match spotify_client.lock() {
-                Ok(guard) => guard.clone(),
-                Err(_) => {
-                    error!("無法獲取 Spotify 客戶端鎖");
-                    is_searching.store(false, Ordering::SeqCst);
-                    return;
-                }
+
+            let should_update = {
+                let cache = liked_songs_cache.lock().unwrap();
+                cache
+                    .as_ref()
+                    .map_or(true, |cached| cached.last_updated.elapsed() > cache_ttl)
             };
-            
-            if let Some(spotify) = spotify {
-                let mut all_tracks = Vec::new();
-                let mut offset = 0;
-                loop {
-                    match spotify.current_user_saved_tracks_manual(None, Some(50), Some(offset)).await {
-                        Ok(page) => {
-                            let page_items_len = page.items.len();
-                            all_tracks.extend(page.items.into_iter().map(|saved_track| saved_track.track));
-                            
-                            // 每次獲取到新的曲目就更新 liked_tracks
-                            {
-                                let mut tracks = liked_tracks.lock().unwrap();
-                                tracks.extend(all_tracks.drain(..));
-                            }
-                            
-                            ctx.request_repaint();
-                            
-                            if page.next.is_none() {
-                                break;
-                            }
-                            offset += page_items_len as u32;
-                        }
+
+            // 檢查是否有更新
+            let has_updates = {
+                let spotify_option = spotify_client.lock().unwrap().clone();
+                if let Some(spotify) = spotify_option {
+                    match Self::check_for_updates(&spotify, &liked_songs_cache, &Default::default())
+                        .await
+                    {
+                        Ok(updates) => updates,
                         Err(e) => {
-                            error!("獲取用戶喜歡的曲目失敗: {:?}", e);
-                            break;
+                            error!("檢查更新時發生錯誤: {:?}", e);
+                            false
                         }
                     }
+                } else {
+                    false
                 }
-                info!("成功加載 {} 首喜歡的曲目", liked_tracks.lock().unwrap().len());
+            };
+
+            if should_update || has_updates {
+                info!("正在更新喜歡的曲目緩存");
+                let mut all_tracks = Vec::new();
+                let spotify_option = spotify_client.lock().unwrap().clone();
+
+                if let Some(spotify) = spotify_option {
+                    let mut offset = 0;
+                    loop {
+                        match spotify
+                            .current_user_saved_tracks_manual(None, Some(50), Some(offset))
+                            .await
+                        {
+                            Ok(page) => {
+                                let page_items_len = page.items.len();
+                                all_tracks.extend(
+                                    page.items.into_iter().map(|saved_track| saved_track.track),
+                                );
+
+                                if page.next.is_none() {
+                                    break;
+                                }
+                                offset += page_items_len as u32;
+                            }
+                            Err(e) => {
+                                error!("獲取用戶喜歡的曲目失敗: {:?}", e);
+                                break;
+                            }
+                        }
+                    }
+
+                    *liked_tracks.lock().unwrap() = all_tracks.clone();
+                    *liked_songs_cache.lock().unwrap() = Some(PlaylistCache {
+                        tracks: all_tracks.clone(),
+                        last_updated: Instant::now(),
+                    });
+
+                    info!("成功更新緩存並加載 {} 首喜歡的曲目", all_tracks.len());
+                } else {
+                    error!("Spotify 客戶端未初始化");
+                }
             } else {
-                error!("Spotify 客戶端未初始化");
+                let cached_tracks = liked_songs_cache
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .tracks
+                    .clone();
+                *liked_tracks.lock().unwrap() = cached_tracks.clone();
+                info!("使用緩存的喜歡的曲目，曲目數量: {}", cached_tracks.len());
             }
+
+            *update_check_result.lock().unwrap() = None;
             is_searching.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
+    }
+    async fn check_for_updates(
+        spotify: &AuthCodeSpotify,
+        liked_songs_cache: &Mutex<Option<PlaylistCache>>,
+        playlist_cache: &Mutex<HashMap<String, PlaylistCache>>,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let mut has_updates = false;
+
+        // 檢查 Liked Songs 是否有更新
+        let liked_songs = spotify
+            .current_user_saved_tracks_manual(None, Some(1), Some(0))
+            .await?;
+        if let Some(cached) = liked_songs_cache.lock().unwrap().as_ref() {
+            if liked_songs.total != cached.tracks.len() as u32 {
+                has_updates = true;
+                info!(
+                    "Liked Songs 有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                    liked_songs.total,
+                    cached.tracks.len()
+                );
+            } else {
+                info!(
+                    "Liked Songs 沒有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                    liked_songs.total,
+                    cached.tracks.len()
+                );
+            }
+        } else {
+            info!("Liked Songs 緩存不存在");
+            has_updates = true;
+        }
+
+        // 檢查播放列表是否有更新
+        let playlists = spotify
+            .current_user_playlists_manual(None, Some(50))
+            .await?;
+        for playlist in playlists.items {
+            if let Some(cached) = playlist_cache.lock().unwrap().get(&playlist.id.to_string()) {
+                if playlist.tracks.total != cached.tracks.len() as u32 {
+                    has_updates = true;
+                    info!(
+                        "播放列表 {} 有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                        playlist.name,
+                        playlist.tracks.total,
+                        cached.tracks.len()
+                    );
+                    break;
+                } else {
+                    info!(
+                        "播放列表 {} 沒有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                        playlist.name,
+                        playlist.tracks.total,
+                        cached.tracks.len()
+                    );
+                }
+            } else {
+                info!("播放列表 {} 緩存不存在", playlist.name);
+                has_updates = true;
+                break;
+            }
+        }
+
+        info!(
+            "檢查更新結果: {}",
+            if has_updates {
+                "有更新"
+            } else {
+                "沒有更新"
+            }
+        );
+        Ok(has_updates)
     }
     //渲染正在播放的彈窗
     fn render_now_playing_popup(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
