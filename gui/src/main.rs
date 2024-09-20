@@ -20,6 +20,7 @@ use eframe::{self, egui};
 use egui::{
     FontData, FontDefinitions, FontFamily, TextureHandle, TextureWrapMode, ViewportBuilder,
 };
+use egui_extras::{Column, TableBuilder};
 
 use log::{debug, error, info, LevelFilter};
 use reqwest::Client;
@@ -2207,10 +2208,6 @@ impl SearchApp {
     }
 
     fn render_side_menu(&mut self, ctx: &egui::Context) {
-        if !self.show_side_menu {
-            return;
-        }
-
         let current_width = self.side_menu_width.unwrap_or(BASE_SIDE_MENU_WIDTH);
 
         egui::SidePanel::left("side_menu")
@@ -2218,7 +2215,7 @@ impl SearchApp {
             .min_width(MIN_SIDE_MENU_WIDTH)
             .max_width(MAX_SIDE_MENU_WIDTH)
             .default_width(current_width)
-            .show(ctx, |ui| {
+            .show_animated(ctx, self.show_side_menu, |ui| {
                 let new_width = ui.available_width();
 
                 // 只有當用戶手動調整寬度時才更新
@@ -2230,16 +2227,20 @@ impl SearchApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        ui.set_min_width(current_width - 20.0); // 使用 current_width 而不是 new_width
-                        if self.show_liked_tracks || self.selected_playlist.is_some() {
-                            self.render_playlist_content(ui);
-                        } else if self.show_playlists {
-                            self.render_playlists(ui);
-                        } else {
-                            self.render_main_menu(ui);
-                        }
+                        ui.set_min_width(current_width - 20.0);
+                        self.render_side_menu_content(ui);
                     });
             });
+    }
+
+    fn render_side_menu_content(&mut self, ui: &mut egui::Ui) {
+        if self.show_liked_tracks || self.selected_playlist.is_some() {
+            self.render_playlist_content(ui);
+        } else if self.show_playlists {
+            self.render_playlists(ui);
+        } else {
+            self.render_main_menu(ui);
+        }
     }
 
     fn render_main_menu(&mut self, ui: &mut egui::Ui) {
@@ -2703,75 +2704,79 @@ impl SearchApp {
                 ui.add_space(20.0);
                 ui.label("沒有找到曲目");
             } else {
-                egui::ScrollArea::vertical().show_rows(ui, 40.0, tracks.len(), |ui, row_range| {
-                    for i in row_range {
-                        if let Some(track) = tracks.get(i) {
-                            ui.add_space(5.0);
-                            ui.horizontal(|ui| {
-                                ui.add(egui::Label::new(egui::RichText::new(format!("{}.", i + 1)).size(18.0)).wrap(false));
-                                ui.add_space(10.0);
-                                
-                                let content_width = ui.available_width() - 40.0; // 為按鈕預留空間
-                                
-                                ui.vertical(|ui| {
-                                    ui.set_width(content_width);
-                                    
-                                    // 歌曲名稱
-                                    let title = track.name.clone();
-                                    let title_galley = ui.fonts(|f| {
-                                        f.layout(title, egui::FontId::new(18.0, egui::FontFamily::Proportional), egui::Color32::WHITE, content_width)
-                                    });
-                                    ui.label(egui::RichText::new(title_galley.text()).size(18.0).strong());
-                            
-                                    // 歌手名稱
-                                    let artists = track.artists
-                                        .iter()
-                                        .map(|a| a.name.clone())
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    let artists_galley = ui.fonts(|f| {
-                                        f.layout(artists, egui::FontId::new(16.0, egui::FontFamily::Proportional), egui::Color32::WHITE, content_width)
-                                    });
-                                    ui.label(egui::RichText::new(artists_galley.text()).size(16.0).weak());
-                                });
-                            
-                                // 添加搜索按鈕
-                                let button_size = egui::vec2(24.0, 24.0); // 縮小按鈕大小
-                                let search_button_rect = ui.max_rect();
-                                let search_button_rect = egui::Rect::from_center_size(
-                                    search_button_rect.center() + egui::vec2(search_button_rect.width() / 2.0 - button_size.x / 2.0 - 5.0, 0.0),
-                                    button_size
-                                );
-                                let search_button_response = self.draw_search_button(ui, i, search_button_rect, ButtonType::Spotify);
-                            
-                                if search_button_response.clicked() {
-                                    if let Some(spotify_url) = track.external_urls.get("spotify") {
-                                        self.search_query = spotify_url.clone();
-                                    } else {
-                                        self.search_query = format!(
-                                            "{} {}",
-                                            track.name,
-                                            track.artists
-                                                .iter()
-                                                .map(|a| a.name.as_str())
-                                                .collect::<Vec<_>>()
-                                                .join(" ")
-                                        );
-                                    }
-                                    let ctx = ui.ctx().clone();
-                                    self.perform_search(ctx);
-                                }
-                            
-                                search_button_response.on_hover_text("以此搜尋");
-                            });
-                            ui.add_space(5.0);
-                            ui.separator();
+                egui::ScrollArea::vertical().show_rows(
+                    ui,
+                    40.0,
+                    tracks.len(),
+                    |ui, row_range| {
+                        for i in row_range {
+                            if let Some(track) = tracks.get(i) {
+                                self.render_track_item(ui, track, i);
+                            }
                         }
-                    }
-                });
+                    },
+                );
             }
         });
     }
+
+    fn render_track_item(&mut self, ui: &mut egui::Ui, track: &FullTrack, index: usize) {
+        ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(egui::RichText::new(format!("{}.", index + 1)).size(18.0)).wrap(false));
+            ui.add_space(10.0);
+            
+            let content_width = ui.available_width() - 40.0; // 為按鈕預留空間
+            
+            ui.vertical(|ui| {
+                ui.set_width(content_width);
+                
+                // 歌曲名稱
+                let title = track.name.clone();
+                ui.label(egui::RichText::new(title).size(18.0).strong());
+        
+                // 歌手名稱
+                let artists = track.artists
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ui.label(egui::RichText::new(artists).size(16.0).weak());
+            });
+        
+            // 添加搜索按鈕
+            let button_size = egui::vec2(24.0, 24.0);
+            let search_button_rect = ui.max_rect();
+            let search_button_rect = egui::Rect::from_center_size(
+                search_button_rect.center() + egui::vec2(search_button_rect.width() / 2.0 - button_size.x / 2.0 - 5.0, 0.0),
+                button_size
+            );
+            let search_button_response = self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
+        
+            if search_button_response.clicked() {
+                if let Some(spotify_url) = track.external_urls.get("spotify") {
+                    self.search_query = spotify_url.clone();
+                } else {
+                    self.search_query = format!(
+                        "{} {}",
+                        track.name,
+                        track.artists
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+                let ctx = ui.ctx().clone();
+                self.perform_search(ctx);
+            }
+        
+            search_button_response.on_hover_text("以此搜尋");
+        });
+        ui.add_space(5.0);
+        ui.separator();
+    }
+
     fn load_user_playlists(&self) {
         let spotify_client = self.spotify_client.clone();
         let user_playlists = self.spotify_user_playlists.clone();
