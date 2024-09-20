@@ -3,11 +3,14 @@ use std::fs::File;
 use std::fs;
 use std::io::Read;
 use std::sync::Mutex;
+use std::path::PathBuf;
 
 // 第三方庫導入
 use anyhow::Result;
 use chrono::Utc;
 use chrono::DateTime;
+use dirs;
+use dirs::home_dir;
 use reqwest::Client;
 use lazy_static::lazy_static;
 use log::{debug, error, LevelFilter};
@@ -199,15 +202,30 @@ pub fn set_log_level(debug_mode: bool) {
     };
     log::set_max_level(log_level);
 }
+// 新增輔助函數來獲取保存路徑
+pub fn get_app_data_path() -> PathBuf {
+    let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push("SongSearch");
+    path
+}
+
 pub fn save_login_info(login_info: &LoginInfo) -> Result<(), ConfigError> {
+    let app_data_path = get_app_data_path();
+    fs::create_dir_all(&app_data_path)
+        .map_err(|e| ConfigError::Other(format!("無法創建應用數據目錄: {}", e)))?;
+
+    let file_path = app_data_path.join("login_info.json");
     let json = serde_json::to_string(login_info)
         .map_err(|e| ConfigError::Other(format!("無法序列化登入信息: {}", e)))?;
-    fs::write("login_info.json", json)
+    
+    fs::write(&file_path, json)
         .map_err(|e| ConfigError::FileOpenError(format!("無法保存登入信息: {}", e)))
 }
 
 pub fn read_login_info() -> Result<Option<LoginInfo>, ConfigError> {
-    match fs::read_to_string("login_info.json") {
+    let file_path = get_app_data_path().join("login_info.json");
+    
+    match fs::read_to_string(file_path) {
         Ok(contents) => {
             let login_info: LoginInfo = serde_json::from_str(&contents)
                 .map_err(|e| ConfigError::JsonParseError(format!("無法解析登入信息: {}", e)))?;
@@ -279,4 +297,40 @@ async fn refresh_spotify_token(
             .map_err(|e| ConfigError::Other(format!("讀取錯誤響應失敗: {}", e)))?;
         Err(ConfigError::Other(format!("刷新令牌失敗: {}", error_text)))
     }
+}
+
+pub fn load_download_directory() -> Option<PathBuf> {
+    // 首先嘗試讀取保存的下載目錄
+    let saved_path = get_app_data_path().join("download_directory.txt");
+    if let Ok(path_str) = fs::read_to_string(&saved_path) {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 如果沒有保存的目錄或目錄不存在，嘗試默認的osu!歌曲目錄
+    if let Some(home) = home_dir() {
+        let default_osu_path = home.join("AppData\\Local\\osu!\\Songs");
+        if default_osu_path.exists() {
+            // 如果默認目錄存在，保存並返回它
+            let _ = save_download_directory(&default_osu_path);
+            return Some(default_osu_path);
+        }
+    }
+
+    // 如果默認目錄也不存在，返回None
+    None
+}
+
+pub fn save_download_directory(download_directory: &PathBuf) -> Result<(), std::io::Error> {
+    let path = get_app_data_path().join("download_directory.txt");
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(&path, download_directory.to_str().unwrap())?;
+    Ok(())
+}
+
+// 新增一個函數來檢查是否需要選擇下載目錄
+pub fn need_select_download_directory() -> bool {
+    load_download_directory().is_none()
 }

@@ -8,8 +8,11 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::default::Default;
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 // 第三方庫導入
@@ -20,16 +23,16 @@ use eframe::{self, egui};
 use egui::{
     FontData, FontDefinitions, FontFamily, TextureHandle, TextureWrapMode, ViewportBuilder,
 };
-use egui_extras::{Column, TableBuilder};
 
 use log::{debug, error, info, LevelFilter};
 use reqwest::Client;
 use rspotify::{
-    clients::OAuthClient,
+    clients::{BaseClient, OAuthClient},
     model::{FullTrack, PlaylistId, SimplifiedPlaylist, TrackId},
     prelude::Id,
     scopes, AuthCodeSpotify, Credentials, OAuth, Token,
 };
+use serde::{Deserialize, Serialize};
 use simplelog::*;
 use thiserror::Error;
 use tokio::{
@@ -53,7 +56,10 @@ use crate::spotify::{
     remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
-use lib::{check_and_refresh_token, read_config, read_login_info, set_log_level, ConfigError};
+use lib::{
+    check_and_refresh_token, get_app_data_path, load_download_directory, read_config,
+    read_login_info, save_download_directory, set_log_level, ConfigError,need_select_download_directory
+};
 
 const BASE_SIDE_MENU_WIDTH: f32 = 300.0;
 const MIN_SIDE_MENU_WIDTH: f32 = 200.0;
@@ -81,17 +87,24 @@ pub enum AuthPlatform {
     Spotify,
     // 未來可以添加其他平台
 }
-
+// 定義 ButtonType 列舉，用於標識不同的按鈕類型
 #[derive(Clone, Copy)]
 enum ButtonType {
     Spotify,
     Osu,
 }
-
+// 定義 DownloadStatus 列舉，用於標識不同的下載狀態
+#[derive(PartialEq, Clone)]
+enum DownloadStatus {
+    NotStarted,
+    Downloading,
+    Completed,
+}
 // 定義 PlaylistCache 結構，用於緩存播放列表曲目
+#[derive(Serialize, Deserialize)]
 struct PlaylistCache {
     tracks: Vec<FullTrack>,
-    last_updated: Instant,
+    last_updated: SystemTime,
 }
 
 // 定義 AuthManager 結構，儲存授權狀態和錯誤記錄
@@ -204,13 +217,15 @@ struct SearchApp {
     osu_search_button_states: HashMap<usize, f32>,
     osu_open_button_states: HashMap<usize, f32>,
     liked_button_states: HashMap<usize, f32>,
+    osu_download_button_states: HashMap<usize, f32>,
+    osu_download_statuses: HashMap<usize, DownloadStatus>,
     side_menu_animation: HashMap<egui::Id, f32>,
-    playlist_cache: Arc<Mutex<HashMap<String, PlaylistCache>>>,
     liked_songs_cache: Arc<Mutex<Option<PlaylistCache>>>,
     cache_ttl: Duration,
     update_check_result: Arc<Mutex<Option<bool>>>,
     update_check_sender: Sender<bool>,
     update_check_receiver: Receiver<bool>,
+    download_directory: PathBuf,
 }
 
 impl eframe::App for SearchApp {
@@ -537,6 +552,8 @@ impl SearchApp {
         let ctx_clone2 = ctx.clone();
         let spotify_user_avatar_clone = spotify_user_avatar.clone();
 
+        let download_directory = load_download_directory().unwrap_or_else(|| PathBuf::from("."));
+
         tokio::spawn(async move {
             let client_guard = client_for_refresh.lock().await;
             match check_and_refresh_token(&client_guard, &config).await {
@@ -705,13 +722,15 @@ impl SearchApp {
             osu_search_button_states: HashMap::new(),
             osu_open_button_states: HashMap::new(),
             liked_button_states: HashMap::new(),
+            osu_download_button_states: HashMap::new(),
+            osu_download_statuses: HashMap::new(),
             side_menu_animation: HashMap::new(),
-            playlist_cache: Arc::new(Mutex::new(HashMap::new())),
             liked_songs_cache: Arc::new(Mutex::new(None)),
             cache_ttl: Duration::from_secs(300), // 5 分鐘的緩存有效期
             update_check_result: Arc::new(Mutex::new(None)),
             update_check_sender,
             update_check_receiver,
+            download_directory,
         };
 
         app.load_default_avatar();
@@ -1421,12 +1440,16 @@ impl SearchApp {
         });
 
         let button_size = egui::vec2(30.0, 30.0);
-        let spacing = 10.0;
+        let spacing = 5.0;
+        let total_width = 3.0 * button_size.x + 2.0 * spacing;
+
+        // 計算按鈕的起始位置
+        let start_x = response.rect.right() - total_width - 5.0;
+        let start_y = response.rect.bottom() - button_size.y - 5.0;
 
         // "以此搜尋" 按鈕
         let search_button_rect = egui::Rect::from_min_size(
-            response.rect.right_bottom()
-                + egui::vec2(-(4.0 * button_size.x + 3.0 * spacing), -button_size.y - 5.0),
+            egui::pos2(start_x, start_y),
             button_size,
         );
         let search_button_response =
@@ -1455,8 +1478,7 @@ impl SearchApp {
 
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
-            response.rect.right_bottom()
-                + egui::vec2(-(3.0 * button_size.x + 2.0 * spacing), -button_size.y - 5.0),
+            egui::pos2(start_x + button_size.x + spacing, start_y),
             button_size,
         );
         let open_button_response =
@@ -1492,8 +1514,7 @@ impl SearchApp {
                 let is_liked = track.is_liked.unwrap_or(false);
 
                 let like_button_rect = egui::Rect::from_min_size(
-                    response.rect.right_bottom()
-                        + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
+                    egui::pos2(start_x + 2.0 * (button_size.x + spacing), start_y),
                     button_size,
                 );
                 let like_button_response =
@@ -1779,12 +1800,16 @@ impl SearchApp {
         });
 
         let button_size = egui::vec2(30.0, 30.0);
-        let spacing = 10.0;
+        let spacing = 5.0;
+        let total_width = 3.0 * button_size.x + 2.0 * spacing;
+
+        // 計算按鈕的起始位置
+        let start_x = response.rect.right() - total_width - 5.0;
+        let start_y = response.rect.bottom() - button_size.y - 5.0;
 
         // "以此搜尋" 按鈕
         let search_button_rect = egui::Rect::from_min_size(
-            response.rect.right_bottom()
-                + egui::vec2(-(2.0 * button_size.x + spacing), -button_size.y - 5.0),
+            egui::pos2(start_x, start_y),
             button_size,
         );
         let search_button_response =
@@ -1799,9 +1824,28 @@ impl SearchApp {
 
         search_button_response.on_hover_text("以此搜尋");
 
+        // "下載" 按鈕
+        let download_button_rect = egui::Rect::from_min_size(
+            egui::pos2(start_x + button_size.x + spacing, start_y),
+            button_size,
+        );
+        let download_status = self
+            .osu_download_statuses
+            .get(&index)
+            .cloned()
+            .unwrap_or(DownloadStatus::NotStarted);
+        let download_button_response =
+            self.draw_download_button(ui, index, download_button_rect, download_status);
+
+        if download_button_response.clicked() {
+            info!("點擊了下載按鈕，但暫時沒有動作");
+        }
+
+        download_button_response.on_hover_text("下載");
+
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
-            response.rect.right_bottom() + egui::vec2(-(button_size.x + 5.0), -button_size.y - 5.0),
+            egui::pos2(start_x + 2.0 * (button_size.x + spacing), start_y),
             button_size,
         );
         let open_button_response =
@@ -1862,6 +1906,114 @@ impl SearchApp {
         if let Ok(mut textures) = self.cover_textures.try_write() {
             textures.clear();
         }
+    }
+    //繪製下載按鈕
+    fn draw_download_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        rect: egui::Rect,
+        status: DownloadStatus,
+    ) -> egui::Response {
+        let animation_progress = self.osu_download_button_states.entry(index).or_insert(0.0);
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+
+        if response.hovered() {
+            *animation_progress =
+                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
+        } else {
+            *animation_progress =
+                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
+        }
+
+        let center = rect.center();
+        let radius = rect.height() / 2.0;
+
+        // 繪製圓形背景
+        let bg_color = match status {
+            DownloadStatus::NotStarted => egui::Color32::from_rgba_unmultiplied(
+                200 + ((55) as f32 * *animation_progress) as u8,
+                200 + ((55) as f32 * *animation_progress) as u8,
+                200 + ((55) as f32 * *animation_progress) as u8,
+                255,
+            ),
+            DownloadStatus::Downloading => egui::Color32::from_rgba_unmultiplied(
+                255, 165, 0, 255, // 橙色
+            ),
+            DownloadStatus::Completed => egui::Color32::from_rgba_unmultiplied(
+                0, 255, 0, 255, // 綠色
+            ),
+        };
+        ui.painter()
+            .circle(center, radius, bg_color, egui::Stroke::NONE);
+
+        // 繪製圖標
+        let icon_color = egui::Color32::from_rgba_unmultiplied(
+            0 + ((255) as f32 * *animation_progress) as u8,
+            0 + ((255) as f32 * *animation_progress) as u8,
+            0 + ((255) as f32 * *animation_progress) as u8,
+            255,
+        );
+
+        match status {
+            DownloadStatus::NotStarted => {
+                // 繪製下載圖標 (箭頭指向下方)
+                let arrow_top = center + egui::vec2(0.0, -radius * 0.3);
+                let arrow_bottom = center + egui::vec2(0.0, radius * 0.3);
+                ui.painter().line_segment(
+                    [arrow_top, arrow_bottom],
+                    egui::Stroke::new(2.0, icon_color),
+                );
+                let arrow_left = center + egui::vec2(-radius * 0.2, radius * 0.1);
+                let arrow_right = center + egui::vec2(radius * 0.2, radius * 0.1);
+                ui.painter().line_segment(
+                    [arrow_left, arrow_bottom],
+                    egui::Stroke::new(2.0, icon_color),
+                );
+                ui.painter().line_segment(
+                    [arrow_right, arrow_bottom],
+                    egui::Stroke::new(2.0, icon_color),
+                );
+            }
+            DownloadStatus::Downloading => {
+                // 繪製旋轉的圓圈表示下載中
+                let angle = (ui.input(|i| i.time) as f32 * 5.0) % (2.0 * std::f32::consts::PI);
+                let end_angle = angle + std::f32::consts::PI * 1.5;
+                ui.painter().circle(
+                    center,
+                    radius * 0.7,
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+                ui.painter().line_segment(
+                    [
+                        center,
+                        center
+                            + egui::vec2(
+                                radius * 0.7 * end_angle.cos(),
+                                radius * 0.7 * end_angle.sin(),
+                            ),
+                    ],
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+            }
+            DownloadStatus::Completed => {
+                // 繪製勾勾表示下載完成
+                let check_left = center + egui::vec2(-radius * 0.3, 0.0);
+                let check_middle = center + egui::vec2(-radius * 0.1, radius * 0.2);
+                let check_right = center + egui::vec2(radius * 0.3, -radius * 0.2);
+                ui.painter().line_segment(
+                    [check_left, check_middle],
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+                ui.painter().line_segment(
+                    [check_middle, check_right],
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+            }
+        }
+
+        response
     }
     //繪製搜索按鈕
     fn draw_search_button(
@@ -2382,6 +2534,56 @@ impl SearchApp {
 
                 ui.add_space(10.0);
 
+                // 下載目錄設置
+                ui.horizontal(|ui| {
+                    ui.label("圖譜下載目錄:");
+                    if ui.button("更改").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.download_directory = path;
+                            if let Err(e) = save_download_directory(&self.download_directory) {
+                                error!("保存下載目錄失敗: {:?}", e);
+                            }
+                            info!("下載目錄已更改為: {:?}", self.download_directory);
+                        }
+                    }
+                });
+                ui.add_space(5.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    let path_str = self.download_directory.to_string_lossy().to_string();
+                    let available_width = ui.available_width();
+
+                    let mut lines = Vec::new();
+                    let mut current_line = String::new();
+                    for word in path_str.split(std::path::MAIN_SEPARATOR) {
+                        let test_line = if current_line.is_empty() {
+                            word.to_string()
+                        } else {
+                            format!("{}{}{}", current_line, std::path::MAIN_SEPARATOR, word)
+                        };
+
+                        let galley = ui.painter().layout_no_wrap(
+                            test_line.clone(),
+                            egui::FontId::default(),
+                            ui.style().visuals.text_color(),
+                        );
+                        if galley.rect.width() <= available_width {
+                            current_line = test_line;
+                        } else {
+                            if !current_line.is_empty() {
+                                lines.push(current_line);
+                            }
+                            current_line = word.to_string();
+                        }
+                    }
+                    if !current_line.is_empty() {
+                        lines.push(current_line);
+                    }
+
+                    for line in lines {
+                        ui.label(line);
+                    }
+                });
+
                 if ui.button("About").clicked() {
                     info!("點擊了: 關於");
                     self.show_side_menu = false;
@@ -2643,28 +2845,32 @@ impl SearchApp {
                     // 觸發更新檢查
                     let spotify_client = self.spotify_client.clone();
                     let liked_songs_cache = self.liked_songs_cache.clone();
-                    let playlist_cache = self.playlist_cache.clone();
                     let sender = self.update_check_sender.clone();
 
                     tokio::spawn(async move {
                         let spotify = spotify_client.lock().unwrap().clone();
 
                         if let Some(spotify) = spotify {
-                            match Self::check_for_updates(
-                                &spotify,
-                                &liked_songs_cache,
-                                &playlist_cache,
-                            )
-                            .await
-                            {
-                                Ok(has_updates) => {
-                                    if let Err(e) = sender.send(has_updates).await {
-                                        error!("發送更新檢查結果時發生錯誤: {:?}", e);
+                            let cache_path = {
+                                let cache = liked_songs_cache.lock().unwrap();
+                                cache
+                                    .as_ref()
+                                    .map(|c| PathBuf::from(&format!("{:?}", c.last_updated)))
+                            };
+
+                            if let Some(path) = cache_path {
+                                match Self::check_for_updates(&spotify, &path).await {
+                                    Ok(has_updates) => {
+                                        if let Err(e) = sender.send(has_updates).await {
+                                            error!("發送更新檢查結果時發生錯誤: {:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("檢查更新時發生錯誤: {:?}", e);
                                     }
                                 }
-                                Err(e) => {
-                                    error!("檢查更新時發生錯誤: {:?}", e);
-                                }
+                            } else {
+                                error!("無法獲取緩存路徑");
                             }
                         }
                     });
@@ -2704,18 +2910,13 @@ impl SearchApp {
                 ui.add_space(20.0);
                 ui.label("沒有找到曲目");
             } else {
-                egui::ScrollArea::vertical().show_rows(
-                    ui,
-                    40.0,
-                    tracks.len(),
-                    |ui, row_range| {
-                        for i in row_range {
-                            if let Some(track) = tracks.get(i) {
-                                self.render_track_item(ui, track, i);
-                            }
+                egui::ScrollArea::vertical().show_rows(ui, 40.0, tracks.len(), |ui, row_range| {
+                    for i in row_range {
+                        if let Some(track) = tracks.get(i) {
+                            self.render_track_item(ui, track, i);
                         }
-                    },
-                );
+                    }
+                });
             }
         });
     }
@@ -2723,36 +2924,45 @@ impl SearchApp {
     fn render_track_item(&mut self, ui: &mut egui::Ui, track: &FullTrack, index: usize) {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.add(egui::Label::new(egui::RichText::new(format!("{}.", index + 1)).size(18.0)).wrap(false));
+            ui.add(
+                egui::Label::new(egui::RichText::new(format!("{}.", index + 1)).size(18.0))
+                    .wrap(false),
+            );
             ui.add_space(10.0);
-            
+
             let content_width = ui.available_width() - 40.0; // 為按鈕預留空間
-            
+
             ui.vertical(|ui| {
                 ui.set_width(content_width);
-                
+
                 // 歌曲名稱
                 let title = track.name.clone();
                 ui.label(egui::RichText::new(title).size(18.0).strong());
-        
+
                 // 歌手名稱
-                let artists = track.artists
+                let artists = track
+                    .artists
                     .iter()
                     .map(|a| a.name.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
                 ui.label(egui::RichText::new(artists).size(16.0).weak());
             });
-        
+
             // 添加搜索按鈕
             let button_size = egui::vec2(24.0, 24.0);
             let search_button_rect = ui.max_rect();
             let search_button_rect = egui::Rect::from_center_size(
-                search_button_rect.center() + egui::vec2(search_button_rect.width() / 2.0 - button_size.x / 2.0 - 5.0, 0.0),
-                button_size
+                search_button_rect.center()
+                    + egui::vec2(
+                        search_button_rect.width() / 2.0 - button_size.x / 2.0 - 5.0,
+                        0.0,
+                    ),
+                button_size,
             );
-            let search_button_response = self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-        
+            let search_button_response =
+                self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
+
             if search_button_response.clicked() {
                 if let Some(spotify_url) = track.external_urls.get("spotify") {
                     self.search_query = spotify_url.clone();
@@ -2760,7 +2970,8 @@ impl SearchApp {
                     self.search_query = format!(
                         "{} {}",
                         track.name,
-                        track.artists
+                        track
+                            .artists
                             .iter()
                             .map(|a| a.name.as_str())
                             .collect::<Vec<_>>()
@@ -2770,7 +2981,7 @@ impl SearchApp {
                 let ctx = ui.ctx().clone();
                 self.perform_search(ctx);
             }
-        
+
             search_button_response.on_hover_text("以此搜尋");
         });
         ui.add_space(5.0);
@@ -2781,11 +2992,18 @@ impl SearchApp {
         let spotify_client = self.spotify_client.clone();
         let user_playlists = self.spotify_user_playlists.clone();
         let ctx = self.ctx.clone();
+        let cache_path = get_app_data_path().join("playlists_cache.json");
 
         tokio::spawn(async move {
             match get_user_playlists(spotify_client).await {
                 Ok(playlists) => {
-                    *user_playlists.lock().unwrap() = playlists;
+                    *user_playlists.lock().unwrap() = playlists.clone();
+                    // 將播放列表緩存保存到文件
+                    if let Err(e) =
+                        fs::write(&cache_path, serde_json::to_string(&playlists).unwrap())
+                    {
+                        error!("保存播放列表緩存失敗: {:?}", e);
+                    }
                     ctx.request_repaint();
                 }
                 Err(e) => {
@@ -2794,33 +3012,32 @@ impl SearchApp {
             }
         });
     }
+
     fn load_playlist_tracks(&self, playlist_id: PlaylistId) {
         let spotify_client = self.spotify_client.clone();
         let playlist_tracks = self.spotify_playlist_tracks.clone();
         let ctx = self.ctx.clone();
         let is_searching = self.is_searching.clone();
         let playlist_id_string = playlist_id.id().to_string();
-        let playlist_cache = self.playlist_cache.clone();
         let cache_ttl = self.cache_ttl;
         let update_check_result = self.update_check_result.clone();
+        let cache_path =
+            get_app_data_path().join(format!("playlist_{}_cache.json", playlist_id_string));
 
         tokio::spawn(async move {
             is_searching.store(true, Ordering::SeqCst);
 
-            let should_update = {
-                let cache = playlist_cache.lock().unwrap();
-                cache
-                    .get(&playlist_id_string)
-                    .map_or(true, |cached| cached.last_updated.elapsed() > cache_ttl)
+            let should_update = if let Ok(metadata) = fs::metadata(&cache_path) {
+                metadata.modified().unwrap().elapsed().unwrap() > cache_ttl
+            } else {
+                true
             };
 
             // 檢查是否有更新
             let has_updates = {
                 let spotify_option = spotify_client.lock().unwrap().clone();
                 if let Some(spotify) = spotify_option {
-                    match Self::check_for_updates(&spotify, &Default::default(), &playlist_cache)
-                        .await
-                    {
+                    match Self::check_for_updates(&spotify, &cache_path).await {
                         Ok(updates) => updates,
                         Err(e) => {
                             error!("檢查更新時發生錯誤: {:?}", e);
@@ -2840,13 +3057,15 @@ impl SearchApp {
                     Ok(tracks) => {
                         let tracks_len = tracks.len();
                         *playlist_tracks.lock().unwrap() = tracks.clone();
-                        playlist_cache.lock().unwrap().insert(
-                            playlist_id_string.clone(),
-                            PlaylistCache {
-                                tracks,
-                                last_updated: Instant::now(),
-                            },
-                        );
+                        let cache = PlaylistCache {
+                            tracks,
+                            last_updated: SystemTime::now(),
+                        };
+                        if let Err(e) =
+                            fs::write(&cache_path, serde_json::to_string(&cache).unwrap())
+                        {
+                            error!("保存播放列表緩存失敗: {:?}", e);
+                        }
                         info!(
                             "成功更新緩存並加載 {} 首曲目，播放列表 ID: {}",
                             tracks_len, playlist_id_string
@@ -2857,19 +3076,16 @@ impl SearchApp {
                     }
                 }
             } else {
-                let cached_tracks = playlist_cache
-                    .lock()
-                    .unwrap()
-                    .get(&playlist_id_string)
-                    .unwrap()
-                    .tracks
-                    .clone();
-                *playlist_tracks.lock().unwrap() = cached_tracks.clone();
-                info!(
-                    "使用緩存的播放列表曲目，播放列表 ID: {}, 曲目數量: {}",
-                    playlist_id_string,
-                    cached_tracks.len()
-                );
+                if let Ok(cached_data) = fs::read_to_string(&cache_path) {
+                    if let Ok(cached) = serde_json::from_str::<PlaylistCache>(&cached_data) {
+                        *playlist_tracks.lock().unwrap() = cached.tracks;
+                        info!(
+                            "使用緩存的播放列表曲目，播放列表 ID: {}, 曲目數量: {}",
+                            playlist_id_string,
+                            playlist_tracks.lock().unwrap().len()
+                        );
+                    }
+                }
             }
 
             *update_check_result.lock().unwrap() = None;
@@ -2877,32 +3093,30 @@ impl SearchApp {
             ctx.request_repaint();
         });
     }
+
     fn load_user_liked_tracks(&self) {
         let spotify_client = self.spotify_client.clone();
         let liked_tracks = self.spotify_liked_tracks.clone();
         let is_searching = self.is_searching.clone();
         let ctx = self.ctx.clone();
-        let liked_songs_cache = self.liked_songs_cache.clone();
         let cache_ttl = self.cache_ttl;
         let update_check_result = self.update_check_result.clone();
+        let cache_path = get_app_data_path().join("liked_tracks_cache.json");
 
         tokio::spawn(async move {
             is_searching.store(true, Ordering::SeqCst);
 
-            let should_update = {
-                let cache = liked_songs_cache.lock().unwrap();
-                cache
-                    .as_ref()
-                    .map_or(true, |cached| cached.last_updated.elapsed() > cache_ttl)
+            let should_update = if let Ok(metadata) = fs::metadata(&cache_path) {
+                metadata.modified().unwrap().elapsed().unwrap() > cache_ttl
+            } else {
+                true
             };
 
             // 檢查是否有更新
             let has_updates = {
                 let spotify_option = spotify_client.lock().unwrap().clone();
                 if let Some(spotify) = spotify_option {
-                    match Self::check_for_updates(&spotify, &liked_songs_cache, &Default::default())
-                        .await
-                    {
+                    match Self::check_for_updates(&spotify, &cache_path).await {
                         Ok(updates) => updates,
                         Err(e) => {
                             error!("檢查更新時發生錯誤: {:?}", e);
@@ -2945,25 +3159,28 @@ impl SearchApp {
                     }
 
                     *liked_tracks.lock().unwrap() = all_tracks.clone();
-                    *liked_songs_cache.lock().unwrap() = Some(PlaylistCache {
+                    let cache = PlaylistCache {
                         tracks: all_tracks.clone(),
-                        last_updated: Instant::now(),
-                    });
+                        last_updated: SystemTime::now(),
+                    };
+                    if let Err(e) = fs::write(&cache_path, serde_json::to_string(&cache).unwrap()) {
+                        error!("保存喜歡的曲目緩存失敗: {:?}", e);
+                    }
 
                     info!("成功更新緩存並加載 {} 首喜歡的曲目", all_tracks.len());
                 } else {
                     error!("Spotify 客戶端未初始化");
                 }
             } else {
-                let cached_tracks = liked_songs_cache
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .tracks
-                    .clone();
-                *liked_tracks.lock().unwrap() = cached_tracks.clone();
-                info!("使用緩存的喜歡的曲目，曲目數量: {}", cached_tracks.len());
+                if let Ok(cached_data) = fs::read_to_string(&cache_path) {
+                    if let Ok(cached) = serde_json::from_str::<PlaylistCache>(&cached_data) {
+                        *liked_tracks.lock().unwrap() = cached.tracks;
+                        info!(
+                            "使用緩存的喜歡的曲目，曲目數量: {}",
+                            liked_tracks.lock().unwrap().len()
+                        );
+                    }
+                }
             }
 
             *update_check_result.lock().unwrap() = None;
@@ -2971,64 +3188,73 @@ impl SearchApp {
             ctx.request_repaint();
         });
     }
+
     async fn check_for_updates(
         spotify: &AuthCodeSpotify,
-        liked_songs_cache: &Mutex<Option<PlaylistCache>>,
-        playlist_cache: &Mutex<HashMap<String, PlaylistCache>>,
+        cache_path: &PathBuf,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut has_updates = false;
 
-        // 檢查 Liked Songs 是否有更新
-        let liked_songs = spotify
-            .current_user_saved_tracks_manual(None, Some(1), Some(0))
-            .await?;
-        if let Some(cached) = liked_songs_cache.lock().unwrap().as_ref() {
-            if liked_songs.total != cached.tracks.len() as u32 {
-                has_updates = true;
-                info!(
-                    "Liked Songs 有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
-                    liked_songs.total,
-                    cached.tracks.len()
-                );
+        if cache_path.file_name().unwrap() == "liked_tracks_cache.json" {
+            // 檢查 Liked Songs 是否有更新
+            let liked_songs = spotify
+                .current_user_saved_tracks_manual(None, Some(1), Some(0))
+                .await?;
+            if let Ok(cached_data) = fs::read_to_string(cache_path) {
+                if let Ok(cached) = serde_json::from_str::<PlaylistCache>(&cached_data) {
+                    if liked_songs.total != cached.tracks.len() as u32 {
+                        has_updates = true;
+                        info!(
+                            "Liked Songs 有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                            liked_songs.total,
+                            cached.tracks.len()
+                        );
+                    } else {
+                        info!(
+                            "Liked Songs 沒有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                            liked_songs.total,
+                            cached.tracks.len()
+                        );
+                    }
+                }
             } else {
-                info!(
-                    "Liked Songs 沒有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
-                    liked_songs.total,
-                    cached.tracks.len()
-                );
+                info!("Liked Songs 緩存不存在");
+                has_updates = true;
             }
         } else {
-            info!("Liked Songs 緩存不存在");
-            has_updates = true;
-        }
-
-        // 檢查播放列表是否有更新
-        let playlists = spotify
-            .current_user_playlists_manual(None, Some(50))
-            .await?;
-        for playlist in playlists.items {
-            if let Some(cached) = playlist_cache.lock().unwrap().get(&playlist.id.to_string()) {
-                if playlist.tracks.total != cached.tracks.len() as u32 {
-                    has_updates = true;
-                    info!(
-                        "播放列表 {} 有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
-                        playlist.name,
-                        playlist.tracks.total,
-                        cached.tracks.len()
-                    );
-                    break;
-                } else {
-                    info!(
-                        "播放列表 {} 沒有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
-                        playlist.name,
-                        playlist.tracks.total,
-                        cached.tracks.len()
-                    );
+            // 檢查播放列表是否有更新
+            let playlist_id = cache_path
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace("playlist_", "")
+                .replace("_cache", "");
+            let playlist = spotify
+                .playlist(PlaylistId::from_id(&playlist_id).unwrap(), None, None)
+                .await?;
+            if let Ok(cached_data) = fs::read_to_string(cache_path) {
+                if let Ok(cached) = serde_json::from_str::<PlaylistCache>(&cached_data) {
+                    if playlist.tracks.total != cached.tracks.len() as u32 {
+                        has_updates = true;
+                        info!(
+                            "播放列表 {} 有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                            playlist.name,
+                            playlist.tracks.total,
+                            cached.tracks.len()
+                        );
+                    } else {
+                        info!(
+                            "播放列表 {} 沒有更新: API 返回 {} 首歌曲，緩存中有 {} 首歌曲",
+                            playlist.name,
+                            playlist.tracks.total,
+                            cached.tracks.len()
+                        );
+                    }
                 }
             } else {
                 info!("播放列表 {} 緩存不存在", playlist.name);
                 has_updates = true;
-                break;
             }
         }
 
@@ -3042,6 +3268,7 @@ impl SearchApp {
         );
         Ok(has_updates)
     }
+
     //渲染正在播放的彈窗
     fn render_now_playing_popup(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         egui::popup::popup_below_widget(ui, egui::Id::new("now_playing_popup"), response, |ui| {
@@ -3258,6 +3485,12 @@ impl SearchApp {
         self.auth_start_time = None;
         self.auth_in_progress.store(false, Ordering::SeqCst);
         self.show_auth_progress = false;
+
+        // 刪除 login_info.json 文件
+        let file_path = get_app_data_path().join("login_info.json");
+        if let Err(e) = std::fs::remove_file(file_path) {
+            error!("刪除 login_info.json 失敗: {}", e);
+        }
     }
 
     fn render_guest_user(&mut self, ui: &mut egui::Ui) {
@@ -3604,6 +3837,8 @@ impl SearchApp {
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
+    let app_data_path = get_app_data_path();
+    fs::create_dir_all(&app_data_path).expect("無法創建應用程序數據目錄");
     // 初始化日誌
     let log_file = std::fs::File::create("output.log").context("Failed to create log file")?;
     let mut config_builder = simplelog::ConfigBuilder::new();
@@ -3645,6 +3880,26 @@ async fn main() -> Result<(), AppError> {
         Arc::new(RwLock::new(HashMap::new()));
     let need_repaint = Arc::new(AtomicBool::new(false));
 
+    // 檢查下載目錄
+    if need_select_download_directory() {
+        info!("需要選擇下載目錄");
+        // 使用 rfd 庫來顯示目錄選擇對話框
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            if let Err(e) = save_download_directory(&path) {
+                error!("保存下載目錄失敗: {:?}", e);
+            } else {
+                info!("已選擇並保存下載目錄: {:?}", path);
+            }
+        } else {
+            error!("用戶未選擇下載目錄");
+            // 可以在這裡添加錯誤處理邏輯,例如退出程序
+            return Err(AppError::Other("未選擇下載目錄".to_string()));
+        }
+    }
+
+    let download_dir = load_download_directory().expect("無法獲取下載目錄");
+    info!("下載目錄: {:?}", download_dir);
+
     let mut native_options = eframe::NativeOptions::default();
     native_options.hardware_acceleration = eframe::HardwareAcceleration::Preferred;
     native_options.viewport = ViewportBuilder {
@@ -3677,7 +3932,7 @@ async fn main() -> Result<(), AppError> {
                 need_repaint.clone(),
                 ctx,
                 config_errors.clone(),
-                debug_mode,
+                debug_mode, // 新增: 傳遞下載目錄
             ) {
                 Ok(app) => Box::new(app),
                 Err(e) => {
