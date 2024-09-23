@@ -1,5 +1,7 @@
 // 標準庫導入
 use std::sync::Arc;
+use std::path::Path;
+use std::fs;
 
 // 第三方庫導入
 use anyhow::Result;
@@ -329,3 +331,15 @@ pub async fn load_osu_covers(
     }
 }
 
+pub fn is_beatmap_downloaded(download_directory: &Path, beatmapset_id: i32) -> bool {
+    if let Ok(entries) = fs::read_dir(download_directory) {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                if file_name.contains(&beatmapset_id.to_string()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}

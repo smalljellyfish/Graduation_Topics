@@ -95,7 +95,7 @@ enum ButtonType {
     Osu,
 }
 // 定義 DownloadStatus 列舉，用於標識不同的下載狀態
-#[derive(PartialEq, Clone)]
+#[derive(Clone, Copy, PartialEq)]
 enum DownloadStatus {
     NotStarted,
     Downloading,
@@ -1809,19 +1809,35 @@ impl SearchApp {
             egui::pos2(start_x + button_size.x + spacing, start_y),
             button_size,
         );
-        let download_status = self
-            .osu_download_statuses
-            .get(&index)
-            .cloned()
-            .unwrap_or(DownloadStatus::NotStarted);
+
+        // 檢查圖譜是否已下載
+        let is_downloaded = osu::is_beatmap_downloaded(&self.download_directory, beatmapset.id);
+        let download_status = if is_downloaded {
+            DownloadStatus::Completed
+        } else {
+            self.osu_download_statuses
+                .get(&index)
+                .cloned()
+                .unwrap_or(DownloadStatus::NotStarted)
+        };
+
         let download_button_response =
             self.draw_download_button(ui, index, download_button_rect, download_status);
 
         if download_button_response.clicked() {
-            info!("點擊了下載按鈕，但暫時沒有動作");
+            if download_status == DownloadStatus::Completed {
+                info!("圖譜已下載");
+            } else {
+                info!("點擊了下載按鈕，開始下載圖譜");
+                // 這裡可以添加開始下載的邏輯
+            }
         }
 
-        download_button_response.on_hover_text("下載");
+        download_button_response.on_hover_text(match download_status {
+            DownloadStatus::NotStarted => "下載",
+            DownloadStatus::Downloading => "下載中",
+            DownloadStatus::Completed => "已下載",
+        });
 
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
@@ -3686,7 +3702,7 @@ impl SearchApp {
 
     fn render_small_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         let scroll_area = egui::ScrollArea::vertical().id_source("small_window_scroll");
-    
+
         scroll_area.show(ui, |ui| {
             // Spotify 結果
             egui::CollapsingHeader::new(
@@ -3701,10 +3717,10 @@ impl SearchApp {
                 }
                 self.display_spotify_results(ui, window_size);
             });
-    
+
             // 添加一些間距
             ui.add_space(20.0);
-    
+
             // Osu 結果
             egui::CollapsingHeader::new(
                 egui::RichText::new("Osu 結果").size(self.global_font_size * 1.1),
