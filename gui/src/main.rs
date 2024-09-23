@@ -1294,86 +1294,66 @@ impl SearchApp {
     }
     //顯示Spotify搜索結果
     fn display_spotify_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        egui::ScrollArea::vertical()
-            .id_source("spotify_results_scroll")
-            .show(ui, |ui| {
-                let sorted_results = {
-                    if let Ok(search_results_guard) = self.search_results.try_lock() {
-                        let mut results = search_results_guard.clone();
-                        results.sort_by_key(|track| track.index);
-                        results
-                    } else {
-                        return;
-                    }
-                };
-
-                let total_results = sorted_results.len();
-                let displayed_results = self.displayed_spotify_results.min(total_results);
-
-                // 記錄整個可視區域的頂部
-                let top_rect = ui.max_rect();
-
-                ui.horizontal(|ui| {
-                    if window_size.x >= 1000.0 {
-                        ui.heading(
-                            egui::RichText::new("Spotify Results")
-                                .size(self.global_font_size * 1.2),
-                        );
-                        ui.add_space(10.0);
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("總結果數: {}", total_results))
-                            .size(self.global_font_size),
-                    );
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
-                            .size(self.global_font_size),
-                    );
-                });
-
+        let sorted_results = {
+            if let Ok(search_results_guard) = self.search_results.try_lock() {
+                let mut results = search_results_guard.clone();
+                results.sort_by_key(|track| track.index);
+                results
+            } else {
+                return;
+            }
+        };
+    
+        let total_results = sorted_results.len();
+        let displayed_results = self.displayed_spotify_results.min(total_results);
+    
+        ui.horizontal(|ui| {
+            if window_size.x >= 1000.0 {
+                ui.heading(
+                    egui::RichText::new("Spotify Results")
+                        .size(self.global_font_size * 1.2),
+                );
                 ui.add_space(10.0);
-
-                if !sorted_results.is_empty() {
-                    for (index, track) in sorted_results.iter().take(displayed_results).enumerate()
+            }
+            ui.label(
+                egui::RichText::new(format!("總結果數: {}", total_results))
+                    .size(self.global_font_size),
+            );
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
+                    .size(self.global_font_size),
+            );
+        });
+    
+        ui.add_space(10.0);
+    
+        if !sorted_results.is_empty() {
+            for (index, track) in sorted_results.iter().take(displayed_results).enumerate() {
+                self.display_spotify_track(ui, track, index);
+            }
+    
+            ui.add_space(30.0);
+            if displayed_results < total_results {
+                ui.vertical_centered(|ui| {
+                    if ui
+                        .add_sized(
+                            [200.0, 40.0],
+                            egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
+                        )
+                        .clicked()
                     {
-                        self.display_spotify_track(ui, track, index);
+                        self.displayed_spotify_results =
+                            (self.displayed_spotify_results + 10).min(total_results);
                     }
-
-                    ui.add_space(30.0);
-                    if displayed_results < total_results {
-                        ui.vertical_centered(|ui| {
-                            if ui
-                                .add_sized(
-                                    [200.0, 40.0],
-                                    egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.displayed_spotify_results =
-                                    (self.displayed_spotify_results + 10).min(total_results);
-                            }
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
-                            if ui
-                                .add_sized(
-                                    [120.0, 40.0],
-                                    egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
-                                )
-                                .clicked()
-                            {
-                                // 滾動到整個可視區域的頂部
-                                ui.scroll_to_rect(top_rect, Some(egui::Align::TOP));
-                            }
-                        });
-                    }
-                    ui.add_space(50.0);
-                } else {
-                    ui.label("沒有搜索結果");
-                }
-            });
+                });
+            } else {
+                ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+            }
+            ui.add_space(50.0);
+        } else {
+            ui.label("沒有搜索結果");
+        }
     }
 
     fn display_spotify_track(&mut self, ui: &mut egui::Ui, track: &Track, index: usize) {
@@ -1599,106 +1579,85 @@ impl SearchApp {
     }
     //顯示osu搜索結果
     fn display_osu_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        let mut scroll_area = egui::ScrollArea::vertical().id_source("osu_results_scroll");
-
-        if self.scroll_to_top {
-            scroll_area = scroll_area.scroll_offset(egui::vec2(0.0, 0.0));
-            self.scroll_to_top = false;
-        }
-
-        scroll_area.show(ui, |ui| {
-            let mut should_load_more = false;
-            let mut new_displayed_results = self.displayed_osu_results;
-
-            let total_results;
-            let displayed_results;
-            let mut beatmapsets_to_display = Vec::new();
-
-            {
-                if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
-                    total_results = osu_search_results_guard.len();
-                    displayed_results = self.displayed_osu_results.min(total_results);
-                    beatmapsets_to_display = osu_search_results_guard
-                        .iter()
-                        .take(displayed_results)
-                        .cloned()
-                        .collect();
-                } else {
-                    total_results = 0;
-                    displayed_results = 0;
-                }
+        let mut should_load_more = false;
+        let mut new_displayed_results = self.displayed_osu_results;
+    
+        let total_results;
+        let displayed_results;
+        let mut beatmapsets_to_display = Vec::new();
+    
+        {
+            if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
+                total_results = osu_search_results_guard.len();
+                displayed_results = self.displayed_osu_results.min(total_results);
+                beatmapsets_to_display = osu_search_results_guard
+                    .iter()
+                    .take(displayed_results)
+                    .cloned()
+                    .collect();
+            } else {
+                total_results = 0;
+                displayed_results = 0;
             }
-
-            ui.horizontal(|ui| {
-                if window_size.x >= 1000.0 {
-                    ui.heading(
-                        egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
-                    );
-                    ui.add_space(10.0);
-                }
-                ui.label(
-                    egui::RichText::new(format!("總結果數: {}", total_results))
-                        .size(self.global_font_size),
+        }
+    
+        ui.horizontal(|ui| {
+            if window_size.x >= 1000.0 {
+                ui.heading(
+                    egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
                 );
                 ui.add_space(10.0);
-                ui.label(
-                    egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
-                        .size(self.global_font_size),
-                );
-            });
-
+            }
+            ui.label(
+                egui::RichText::new(format!("總結果數: {}", total_results))
+                    .size(self.global_font_size),
+            );
             ui.add_space(10.0);
-
-            if !beatmapsets_to_display.is_empty() {
-                if let Some(selected_index) = self.selected_beatmapset {
-                    if let Some(selected_beatmapset) = beatmapsets_to_display.get(selected_index) {
-                        self.display_selected_beatmapset(ui, selected_beatmapset);
-                    }
-                } else {
-                    for (index, beatmapset) in beatmapsets_to_display.iter().enumerate() {
-                        self.display_beatmapset(ui, beatmapset, index);
-                    }
-
-                    ui.add_space(30.0);
-                    if displayed_results < total_results {
-                        ui.vertical_centered(|ui| {
-                            if ui
-                                .add_sized(
-                                    [200.0, 40.0],
-                                    egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
-                                )
-                                .clicked()
-                            {
-                                new_displayed_results = (displayed_results + 10).min(total_results);
-                                should_load_more = true;
-                            }
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
-                            if ui
-                                .add_sized(
-                                    [120.0, 40.0],
-                                    egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.scroll_to_top = true;
-                                ui.ctx().request_repaint();
-                            }
-                        });
-                    }
-                    ui.add_space(50.0);
+            ui.label(
+                egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
+                    .size(self.global_font_size),
+            );
+        });
+    
+        ui.add_space(10.0);
+    
+        if !beatmapsets_to_display.is_empty() {
+            if let Some(selected_index) = self.selected_beatmapset {
+                if let Some(selected_beatmapset) = beatmapsets_to_display.get(selected_index) {
+                    self.display_selected_beatmapset(ui, selected_beatmapset);
                 }
             } else {
-                ui.label("沒有搜索結果");
+                for (index, beatmapset) in beatmapsets_to_display.iter().enumerate() {
+                    self.display_beatmapset(ui, beatmapset, index);
+                }
+    
+                ui.add_space(30.0);
+                if displayed_results < total_results {
+                    ui.vertical_centered(|ui| {
+                        if ui
+                            .add_sized(
+                                [200.0, 40.0],
+                                egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
+                            )
+                            .clicked()
+                        {
+                            new_displayed_results = (displayed_results + 10).min(total_results);
+                            should_load_more = true;
+                        }
+                    });
+                } else {
+                    ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+                }
+                ui.add_space(50.0);
             }
-
-            if should_load_more {
-                self.displayed_osu_results = new_displayed_results;
-                self.load_more_osu_covers(displayed_results, new_displayed_results);
-            }
-        });
+        } else {
+            ui.label("沒有搜索結果");
+        }
+    
+        if should_load_more {
+            self.displayed_osu_results = new_displayed_results;
+            self.load_more_osu_covers(displayed_results, new_displayed_results);
+        }
     }
 
     //加載更多osu封面
@@ -3668,23 +3627,32 @@ impl SearchApp {
         });
     }
 
-    fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        ui.columns(2, |columns| {
-            columns[0].vertical(|ui| {
-                ui.set_min_width(0.48 * window_size.x);
-                ui.set_max_width(0.48 * window_size.x);
-                self.display_spotify_results(ui, window_size);
-            });
-            columns[1].vertical(|ui| {
-                ui.set_min_width(0.48 * window_size.x);
-                ui.set_max_width(0.48 * window_size.x);
-                self.display_osu_results(ui, window_size);
-            });
+fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
+    ui.columns(2, |columns| {
+        columns[0].vertical(|ui| {
+            ui.set_min_width(0.48 * window_size.x);
+            ui.set_max_width(0.48 * window_size.x);
+            egui::ScrollArea::vertical()
+                .id_source("spotify_scroll")  // 添加唯一標識符
+                .show(ui, |ui| {
+                    self.display_spotify_results(ui, window_size);
+                });
         });
-    }
+        columns[1].vertical(|ui| {
+            ui.set_min_width(0.48 * window_size.x);
+            ui.set_max_width(0.48 * window_size.x);
+            egui::ScrollArea::vertical()
+                .id_source("osu_scroll")  // 添加唯一標識符
+                .show(ui, |ui| {
+                    self.display_osu_results(ui, window_size);
+                });
+        });
+    });
+}
 
     fn render_small_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // Spotify 結果
             egui::CollapsingHeader::new(
                 egui::RichText::new("Spotify 結果").size(self.global_font_size * 1.1),
             )
@@ -3692,7 +3660,11 @@ impl SearchApp {
             .show(ui, |ui| {
                 self.display_spotify_results(ui, window_size);
             });
-
+    
+            // 添加一些間距
+            ui.add_space(20.0);
+    
+            // Osu 結果
             egui::CollapsingHeader::new(
                 egui::RichText::new("Osu 結果").size(self.global_font_size * 1.1),
             )
