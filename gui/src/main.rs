@@ -96,7 +96,7 @@ enum ButtonType {
 }
 // 定義 DownloadStatus 列舉，用於標識不同的下載狀態
 #[derive(Clone, Copy, PartialEq)]
-enum DownloadStatus {
+pub enum DownloadStatus {
     NotStarted,
     Downloading,
     Completed,
@@ -228,6 +228,8 @@ struct SearchApp {
     update_check_sender: Sender<bool>,
     update_check_receiver: Receiver<bool>,
     download_directory: PathBuf,
+    status_sender: tokio::sync::mpsc::Sender<(i32, DownloadStatus)>,
+    status_receiver: tokio::sync::mpsc::Receiver<(i32, DownloadStatus)>,
 }
 
 impl eframe::App for SearchApp {
@@ -505,7 +507,20 @@ impl eframe::App for SearchApp {
                 side_menu_state_start, self.show_side_menu
             );
         }
-    } // 在更新結束時再次檢查側邊選單狀態
+        while let Ok((beatmapset_id, status)) = self.status_receiver.try_recv() {
+            if let Ok(osu_search_results) = self.osu_search_results.try_lock() {
+                if let Some(index) = osu_search_results
+                    .iter()
+                    .position(|b| b.id == beatmapset_id)
+                {
+                    self.osu_download_statuses.insert(index, status);
+                }
+            } else {
+                // 如果無法獲取鎖，記錄錯誤並繼續
+                error!("無法獲取 osu_search_results 的鎖");
+            }
+        }
+    }
 }
 
 impl SearchApp {
@@ -555,6 +570,8 @@ impl SearchApp {
         let spotify_user_avatar_clone = spotify_user_avatar.clone();
 
         let download_directory = load_download_directory().unwrap_or_else(|| PathBuf::from("."));
+
+        let (status_sender, status_receiver) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
             let client_guard = client_for_refresh.lock().await;
@@ -734,6 +751,8 @@ impl SearchApp {
             update_check_sender,
             update_check_receiver,
             download_directory,
+            status_sender,
+            status_receiver,
         };
 
         app.load_default_avatar();
@@ -1828,8 +1847,23 @@ impl SearchApp {
             if download_status == DownloadStatus::Completed {
                 info!("圖譜已下載");
             } else {
-                info!("點擊了下載按鈕，開始下載圖譜");
-                // 這裡可以添加開始下載的邏輯
+                info!("開始下載圖譜 {}", beatmapset.id);
+                let download_directory = self.download_directory.clone();
+                let beatmapset_id = beatmapset.id;
+                let status_sender = self.status_sender.clone();
+
+                self.osu_download_statuses.insert(index, DownloadStatus::Downloading);
+
+                tokio::spawn(async move {
+                    match osu::download_beatmap(beatmapset_id, &download_directory, move |status| {
+                        let _ = status_sender.send((beatmapset_id, status));
+                    })
+                    .await
+                    {
+                        Ok(_) => info!("圖譜 {} 下載成功", beatmapset_id),
+                        Err(e) => error!("圖譜 {} 下載失敗: {:?}", beatmapset_id, e),
+                    }
+                });
             }
         }
 
@@ -1972,24 +2006,47 @@ impl SearchApp {
                 );
             }
             DownloadStatus::Downloading => {
-                // 繪製旋轉的圓圈表示下載中
-                let angle = (ui.input(|i| i.time) as f32 * 5.0) % (2.0 * std::f32::consts::PI);
+                // 繪製旋轉的圓弧表示下載中
+                let angle = (ui.input(|i| i.time) as f32 * 3.0) % (2.0 * std::f32::consts::PI);
+                let start_angle = angle;
                 let end_angle = angle + std::f32::consts::PI * 1.5;
-                ui.painter().circle(
+                
+                // 繪製背景圓圈
+                ui.painter().circle_stroke(
                     center,
                     radius * 0.7,
-                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(2.0, egui::Color32::from_gray(200)),
+                );
+                
+                // 繪製旋轉的圓弧
+                let num_points = 30; // 控制圓弧的平滑度
+                let points: Vec<egui::Pos2> = (0..=num_points)
+                    .map(|i| {
+                        let t = i as f32 / num_points as f32;
+                        let angle = start_angle + t * (end_angle - start_angle);
+                        center + egui::vec2(angle.cos(), angle.sin()) * (radius * 0.7)
+                    })
+                    .collect();
+                ui.painter().add(egui::Shape::line(
+                    points,
+                    egui::Stroke::new(2.0, egui::Color32::BLUE),
+                ));
+                
+                // 繪製箭頭
+                let arrow_top = center + egui::vec2(0.0, -radius * 0.3);
+                let arrow_bottom = center + egui::vec2(0.0, radius * 0.3);
+                ui.painter().line_segment(
+                    [arrow_top, arrow_bottom],
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+                let arrow_left = center + egui::vec2(-radius * 0.2, radius * 0.1);
+                let arrow_right = center + egui::vec2(radius * 0.2, radius * 0.1);
+                ui.painter().line_segment(
+                    [arrow_left, arrow_bottom],
                     egui::Stroke::new(2.0, egui::Color32::WHITE),
                 );
                 ui.painter().line_segment(
-                    [
-                        center,
-                        center
-                            + egui::vec2(
-                                radius * 0.7 * end_angle.cos(),
-                                radius * 0.7 * end_angle.sin(),
-                            ),
-                    ],
+                    [arrow_right, arrow_bottom],
                     egui::Stroke::new(2.0, egui::Color32::WHITE),
                 );
             }

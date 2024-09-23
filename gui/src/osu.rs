@@ -2,6 +2,8 @@
 use std::sync::Arc;
 use std::path::Path;
 use std::fs;
+use std::io::copy;
+use std::fs::File;
 
 // 第三方庫導入
 use anyhow::Result;
@@ -12,10 +14,12 @@ use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::{sync::mpsc::Sender, try_join};
+use tokio::{sync::mpsc::Sender, try_join,task};
+
 
 // 本地模組導入
 use crate::read_config;
+use crate::DownloadStatus;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Covers {
@@ -342,4 +346,52 @@ pub fn is_beatmap_downloaded(download_directory: &Path, beatmapset_id: i32) -> b
         }
     }
     false
+}
+pub async fn download_beatmap(
+    beatmapset_id: i32,
+    download_directory: &Path,
+    update_status: impl Fn(DownloadStatus) + Send + 'static
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let url = format!("https://api.nerinyan.moe/d/{}", beatmapset_id);
+
+    update_status(DownloadStatus::Downloading);
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()?;
+
+    let response = client.get(&url)
+        .header("Accept", "application/x-osu-beatmap-archive")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .header("Origin", "https://osu.ppy.sh")
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let filename = response.headers()
+            .get("content-disposition")
+            .and_then(|cd| cd.to_str().ok())
+            .and_then(|cd| cd.split("filename=\"").nth(1))
+            .and_then(|s| s.strip_suffix("\""))
+            .unwrap_or(&format!("{}.osz", beatmapset_id))
+            .to_string();
+
+        let content = response.bytes().await?;
+
+        // 使用 tokio 的阻塞任務來處理文件 I/O
+        let download_path = download_directory.join(&filename);
+        task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            let mut dest = File::create(&download_path)?;
+            copy(&mut content.as_ref(), &mut dest)?;
+            Ok(())
+        }).await??;
+
+        info!("Beatmap {} downloaded successfully as: {}", beatmapset_id, filename);
+        update_status(DownloadStatus::Completed);
+        Ok(())
+    } else {
+        error!("Failed to download beatmap {}: {}", beatmapset_id, response.status());
+        update_status(DownloadStatus::NotStarted);
+        Err(format!("Failed to download beatmap: {}", response.status()).into())
+    }
 }
