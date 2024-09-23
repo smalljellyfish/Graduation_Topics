@@ -57,8 +57,9 @@ use crate::spotify::{
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{
-    check_and_refresh_token, get_app_data_path, load_download_directory, read_config,
-    read_login_info, save_download_directory, set_log_level, ConfigError,need_select_download_directory
+    check_and_refresh_token, get_app_data_path, load_download_directory,
+    need_select_download_directory, read_config, read_login_info, save_download_directory,
+    set_log_level, ConfigError,
 };
 
 const BASE_SIDE_MENU_WIDTH: f32 = 300.0;
@@ -187,7 +188,8 @@ struct SearchApp {
     need_repaint: Arc<AtomicBool>,
     osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
     receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
-    scroll_to_top: bool,
+    spotify_scroll_to_top: bool,
+    osu_scroll_to_top: bool,
     search_query: String,
     search_results: Arc<tokio::sync::Mutex<Vec<Track>>>,
     selected_beatmapset: Option<usize>,
@@ -692,7 +694,8 @@ impl SearchApp {
             need_repaint,
             osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             receiver: Some(receiver),
-            scroll_to_top: false,
+            spotify_scroll_to_top: false,
+            osu_scroll_to_top: false,
             search_query: String::new(),
             search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             selected_beatmapset: None,
@@ -1303,15 +1306,14 @@ impl SearchApp {
                 return;
             }
         };
-    
+
         let total_results = sorted_results.len();
         let displayed_results = self.displayed_spotify_results.min(total_results);
-    
+
         ui.horizontal(|ui| {
             if window_size.x >= 1000.0 {
                 ui.heading(
-                    egui::RichText::new("Spotify Results")
-                        .size(self.global_font_size * 1.2),
+                    egui::RichText::new("Spotify Results").size(self.global_font_size * 1.2),
                 );
                 ui.add_space(10.0);
             }
@@ -1325,20 +1327,20 @@ impl SearchApp {
                     .size(self.global_font_size),
             );
         });
-    
+
         ui.add_space(10.0);
-    
+
         if !sorted_results.is_empty() {
             for (index, track) in sorted_results.iter().take(displayed_results).enumerate() {
                 self.display_spotify_track(ui, track, index);
             }
-    
+
             ui.add_space(30.0);
-            if displayed_results < total_results {
-                ui.vertical_centered(|ui| {
+            ui.horizontal(|ui| {
+                if displayed_results < total_results {
                     if ui
                         .add_sized(
-                            [200.0, 40.0],
+                            [150.0, 40.0],
                             egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
                         )
                         .clicked()
@@ -1346,10 +1348,23 @@ impl SearchApp {
                         self.displayed_spotify_results =
                             (self.displayed_spotify_results + 10).min(total_results);
                     }
-                });
-            } else {
-                ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
-            }
+                } else {
+                    ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+                }
+
+                ui.add_space(20.0);
+
+                if ui
+                    .add_sized(
+                        [150.0, 40.0],
+                        egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
+                    )
+                    .clicked()
+                {
+                    self.spotify_scroll_to_top = true;
+                    ui.ctx().request_repaint();
+                }
+            });
             ui.add_space(50.0);
         } else {
             ui.label("沒有搜索結果");
@@ -1428,10 +1443,8 @@ impl SearchApp {
         let start_y = response.rect.bottom() - button_size.y - 5.0;
 
         // "以此搜尋" 按鈕
-        let search_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x, start_y),
-            button_size,
-        );
+        let search_button_rect =
+            egui::Rect::from_min_size(egui::pos2(start_x, start_y), button_size);
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
 
@@ -1581,11 +1594,11 @@ impl SearchApp {
     fn display_osu_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
         let mut should_load_more = false;
         let mut new_displayed_results = self.displayed_osu_results;
-    
+
         let total_results;
         let displayed_results;
         let mut beatmapsets_to_display = Vec::new();
-    
+
         {
             if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
                 total_results = osu_search_results_guard.len();
@@ -1600,12 +1613,10 @@ impl SearchApp {
                 displayed_results = 0;
             }
         }
-    
+
         ui.horizontal(|ui| {
             if window_size.x >= 1000.0 {
-                ui.heading(
-                    egui::RichText::new("Osu Results").size(self.global_font_size * 1.2),
-                );
+                ui.heading(egui::RichText::new("Osu Results").size(self.global_font_size * 1.2));
                 ui.add_space(10.0);
             }
             ui.label(
@@ -1618,9 +1629,9 @@ impl SearchApp {
                     .size(self.global_font_size),
             );
         });
-    
+
         ui.add_space(10.0);
-    
+
         if !beatmapsets_to_display.is_empty() {
             if let Some(selected_index) = self.selected_beatmapset {
                 if let Some(selected_beatmapset) = beatmapsets_to_display.get(selected_index) {
@@ -1630,13 +1641,13 @@ impl SearchApp {
                 for (index, beatmapset) in beatmapsets_to_display.iter().enumerate() {
                     self.display_beatmapset(ui, beatmapset, index);
                 }
-    
+
                 ui.add_space(30.0);
-                if displayed_results < total_results {
-                    ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    if displayed_results < total_results {
                         if ui
                             .add_sized(
-                                [200.0, 40.0],
+                                [150.0, 40.0],
                                 egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
                             )
                             .clicked()
@@ -1644,16 +1655,28 @@ impl SearchApp {
                             new_displayed_results = (displayed_results + 10).min(total_results);
                             should_load_more = true;
                         }
-                    });
-                } else {
-                    ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
-                }
+                    } else {
+                        ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
+                    }
+
+                    ui.add_space(20.0);
+
+                    if ui
+                        .add_sized(
+                            [150.0, 40.0],
+                            egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
+                        )
+                        .clicked()
+                    {
+                        self.osu_scroll_to_top = true;
+                    }
+                });
                 ui.add_space(50.0);
             }
         } else {
             ui.label("沒有搜索結果");
         }
-    
+
         if should_load_more {
             self.displayed_osu_results = new_displayed_results;
             self.load_more_osu_covers(displayed_results, new_displayed_results);
@@ -1767,10 +1790,8 @@ impl SearchApp {
         let start_y = response.rect.bottom() - button_size.y - 5.0;
 
         // "以此搜尋" 按鈕
-        let search_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x, start_y),
-            button_size,
-        );
+        let search_button_rect =
+            egui::Rect::from_min_size(egui::pos2(start_x, start_y), button_size);
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Osu);
 
@@ -3627,37 +3648,57 @@ impl SearchApp {
         });
     }
 
-fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-    ui.columns(2, |columns| {
-        columns[0].vertical(|ui| {
-            ui.set_min_width(0.48 * window_size.x);
-            ui.set_max_width(0.48 * window_size.x);
-            egui::ScrollArea::vertical()
-                .id_source("spotify_scroll")  // 添加唯一標識符
-                .show(ui, |ui| {
+    fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
+        ui.columns(2, |columns| {
+            columns[0].vertical(|ui| {
+                ui.set_min_width(0.48 * window_size.x);
+                ui.set_max_width(0.48 * window_size.x);
+                let mut spotify_scroll = egui::ScrollArea::vertical().id_source("spotify_scroll");
+
+                if self.spotify_scroll_to_top {
+                    spotify_scroll = spotify_scroll.scroll_offset(egui::vec2(0.0, 0.0));
+                    self.spotify_scroll_to_top = false;
+                    ui.ctx().request_repaint();
+                }
+
+                spotify_scroll.show(ui, |ui| {
                     self.display_spotify_results(ui, window_size);
                 });
-        });
-        columns[1].vertical(|ui| {
-            ui.set_min_width(0.48 * window_size.x);
-            ui.set_max_width(0.48 * window_size.x);
-            egui::ScrollArea::vertical()
-                .id_source("osu_scroll")  // 添加唯一標識符
-                .show(ui, |ui| {
+            });
+
+            columns[1].vertical(|ui| {
+                ui.set_min_width(0.48 * window_size.x);
+                ui.set_max_width(0.48 * window_size.x);
+                let mut osu_scroll = egui::ScrollArea::vertical().id_source("osu_scroll");
+
+                if self.osu_scroll_to_top {
+                    osu_scroll = osu_scroll.scroll_offset(egui::vec2(0.0, 0.0));
+                    self.osu_scroll_to_top = false;
+                    ui.ctx().request_repaint();
+                }
+
+                osu_scroll.show(ui, |ui| {
                     self.display_osu_results(ui, window_size);
                 });
+            });
         });
-    });
-}
+    }
 
     fn render_small_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        let scroll_area = egui::ScrollArea::vertical().id_source("small_window_scroll");
+    
+        scroll_area.show(ui, |ui| {
             // Spotify 結果
             egui::CollapsingHeader::new(
                 egui::RichText::new("Spotify 結果").size(self.global_font_size * 1.1),
             )
             .default_open(true)
             .show(ui, |ui| {
+                if self.spotify_scroll_to_top {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                    self.spotify_scroll_to_top = false;
+                    ui.ctx().request_repaint();
+                }
                 self.display_spotify_results(ui, window_size);
             });
     
@@ -3670,6 +3711,11 @@ fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::V
             )
             .default_open(true)
             .show(ui, |ui| {
+                if self.osu_scroll_to_top {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                    self.osu_scroll_to_top = false;
+                    ui.ctx().request_repaint();
+                }
                 self.display_osu_results(ui, window_size);
             });
         });
