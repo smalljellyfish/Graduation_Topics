@@ -350,13 +350,14 @@ pub fn is_beatmap_downloaded(download_directory: &Path, beatmapset_id: i32) -> b
 pub async fn download_beatmap(
     beatmapset_id: i32,
     download_directory: &Path,
-    update_status: impl Fn(DownloadStatus) + Send + 'static
+    mut update_status: impl FnMut(DownloadStatus) + Send + 'static
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://api.nerinyan.moe/d/{}", beatmapset_id);
 
+    // 開始下載前，將狀態更新為 Downloading
     update_status(DownloadStatus::Downloading);
 
-    let client = reqwest::Client::builder()
+    let client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?;
 
@@ -393,5 +394,48 @@ pub async fn download_beatmap(
         error!("Failed to download beatmap {}: {}", beatmapset_id, response.status());
         update_status(DownloadStatus::NotStarted);
         Err(format!("Failed to download beatmap: {}", response.status()).into())
+    }
+}
+pub fn delete_beatmap(download_directory: &Path, beatmapset_id: i32) -> std::io::Result<()> {
+    let mut deleted = false;
+
+    // 尋找並刪除含有 beatmapset_id 的 .osz 文件
+    let osz_pattern = format!("*{}*", beatmapset_id);
+    for entry in fs::read_dir(download_directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension() == Some(std::ffi::OsStr::new("osz")) {
+            if let Some(file_name) = path.file_name() {
+                let file_name_str = file_name.to_string_lossy();
+                if file_name_str.contains(&beatmapset_id.to_string()) || 
+                   file_name_str.to_lowercase().contains(&osz_pattern.to_lowercase()) {
+                    fs::remove_file(&path)?;
+                    info!("已刪除 .osz 文件: {:?}", path);
+                    deleted = true;
+                }
+            }
+        }
+    }
+
+    // 尋找並刪除包含 beatmapset_id 的資料夾
+    for entry in fs::read_dir(download_directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(dir_name) = path.file_name() {
+                if dir_name.to_string_lossy().contains(&beatmapset_id.to_string()) {
+                    fs::remove_dir_all(&path)?;
+                    info!("已刪除資料夾: {:?}", path);
+                    deleted = true;
+                }
+            }
+        }
+    }
+
+    if deleted {
+        Ok(())
+    } else {
+        error!("未找到與 beatmapset_id {} 相關的文件或資料夾", beatmapset_id);
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "未找到相關文件或資料夾"))
     }
 }

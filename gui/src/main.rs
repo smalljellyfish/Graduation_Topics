@@ -10,7 +10,7 @@ use std::default::Default;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
@@ -39,16 +39,17 @@ use tokio::{
     self,
     net::TcpListener,
     sync::{
+        mpsc,
         mpsc::{Receiver, Sender},
-        Mutex as TokioMutex, RwLock,
+        Mutex as TokioMutex, RwLock, Semaphore,
     },
     task::JoinHandle,
 };
 
 // 本地模組導入
 use crate::osu::{
-    get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token, load_osu_covers,
-    parse_osu_url, print_beatmap_info_gui, Beatmapset,
+    delete_beatmap, get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token,
+    load_osu_covers, parse_osu_url, print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
@@ -98,6 +99,7 @@ enum ButtonType {
 #[derive(Clone, Copy, PartialEq)]
 pub enum DownloadStatus {
     NotStarted,
+    Waiting,
     Downloading,
     Completed,
 }
@@ -230,6 +232,10 @@ struct SearchApp {
     download_directory: PathBuf,
     status_sender: tokio::sync::mpsc::Sender<(i32, DownloadStatus)>,
     status_receiver: tokio::sync::mpsc::Receiver<(i32, DownloadStatus)>,
+    download_queue_sender: mpsc::Sender<i32>,
+    download_queue_receiver: Arc<Mutex<Option<mpsc::Receiver<i32>>>>,
+    download_semaphore: Arc<Semaphore>,
+    current_downloads: Arc<AtomicUsize>,
 }
 
 impl eframe::App for SearchApp {
@@ -507,18 +513,34 @@ impl eframe::App for SearchApp {
                 side_menu_state_start, self.show_side_menu
             );
         }
+        let mut status_updates = Vec::new();
         while let Ok((beatmapset_id, status)) = self.status_receiver.try_recv() {
-            if let Ok(osu_search_results) = self.osu_search_results.try_lock() {
-                if let Some(index) = osu_search_results
-                    .iter()
-                    .position(|b| b.id == beatmapset_id)
-                {
+            status_updates.push((beatmapset_id, status));
+        }
+
+        if let Ok(guard) = self.osu_search_results.try_lock() {
+            for &(beatmapset_id, status) in &status_updates {
+                if let Some(index) = guard.iter().position(|b| b.id == beatmapset_id) {
                     self.osu_download_statuses.insert(index, status);
+                    if status == DownloadStatus::Completed {
+                        if let Some((waiting_index, waiting_beatmapset)) = self.osu_download_statuses
+                            .iter()
+                            .find(|(_, &status)| status == DownloadStatus::Waiting)
+                            .map(|(index, _)| (*index, guard[*index].id))
+                        {
+                            self.osu_download_statuses.insert(waiting_index, DownloadStatus::Downloading);
+                            if let Err(e) = self.download_queue_sender.try_send(waiting_beatmapset) {
+                                error!("無法將等待中的圖譜加入下載隊列: {:?}", e);
+                                self.osu_download_statuses.insert(waiting_index, DownloadStatus::Waiting);
+                            }
+                        }
+                    }
                 }
-            } else {
-                // 如果無法獲取鎖，記錄錯誤並繼續
-                error!("無法獲取 osu_search_results 的鎖");
             }
+        }
+
+        if !status_updates.is_empty() {
+            ctx.request_repaint();
         }
     }
 }
@@ -572,6 +594,7 @@ impl SearchApp {
         let download_directory = load_download_directory().unwrap_or_else(|| PathBuf::from("."));
 
         let (status_sender, status_receiver) = tokio::sync::mpsc::channel(100);
+        let (download_queue_sender, download_queue_receiver) = mpsc::channel(100);
 
         tokio::spawn(async move {
             let client_guard = client_for_refresh.lock().await;
@@ -753,9 +776,14 @@ impl SearchApp {
             download_directory,
             status_sender,
             status_receiver,
+            download_queue_sender,
+            download_queue_receiver: Arc::new(Mutex::new(Some(download_queue_receiver))),
+            download_semaphore: Arc::new(Semaphore::new(3)), // 允許3個同時下載
+            current_downloads: Arc::new(AtomicUsize::new(0)),
         };
 
         app.load_default_avatar();
+        app.start_download_processor();
 
         Ok(app)
     }
@@ -1842,33 +1870,46 @@ impl SearchApp {
 
         let download_button_response =
             self.draw_download_button(ui, index, download_button_rect, download_status);
-
         if download_button_response.clicked() {
-            if download_status == DownloadStatus::Completed {
-                info!("圖譜已下載");
-            } else {
-                info!("開始下載圖譜 {}", beatmapset.id);
-                let download_directory = self.download_directory.clone();
-                let beatmapset_id = beatmapset.id;
-                let status_sender = self.status_sender.clone();
-
-                self.osu_download_statuses.insert(index, DownloadStatus::Downloading);
-
-                tokio::spawn(async move {
-                    match osu::download_beatmap(beatmapset_id, &download_directory, move |status| {
-                        let _ = status_sender.send((beatmapset_id, status));
-                    })
-                    .await
-                    {
-                        Ok(_) => info!("圖譜 {} 下載成功", beatmapset_id),
-                        Err(e) => error!("圖譜 {} 下載失敗: {:?}", beatmapset_id, e),
+            match download_status {
+                DownloadStatus::Completed => {
+                    info!("嘗試刪除圖譜 {}", beatmapset.id);
+                    match delete_beatmap(&self.download_directory, beatmapset.id) {
+                        Ok(_) => {
+                            info!("成功刪除圖譜 {}", beatmapset.id);
+                            self.osu_download_statuses
+                                .insert(index, DownloadStatus::NotStarted);
+                        }
+                        Err(e) => {
+                            error!("無法刪除圖譜 {}: {:?}", beatmapset.id, e);
+                        }
                     }
-                });
+                }
+                DownloadStatus::NotStarted => {
+                    info!("將圖譜 {} 加入下載隊列", beatmapset.id);
+                    let current_downloads = self.current_downloads.load(Ordering::SeqCst);
+                    if current_downloads < 3 {
+                        self.osu_download_statuses
+                            .insert(index, DownloadStatus::Downloading);
+                    } else {
+                        self.osu_download_statuses
+                            .insert(index, DownloadStatus::Waiting);
+                    }
+                    if let Err(e) = self.download_queue_sender.try_send(beatmapset.id) {
+                        error!("無法將圖譜加入下載隊列: {:?}", e);
+                        self.osu_download_statuses
+                            .insert(index, DownloadStatus::NotStarted);
+                    }
+                }
+                DownloadStatus::Downloading | DownloadStatus::Waiting => {
+                    info!("圖譜正在下載或等待中");
+                }
             }
         }
 
         download_button_response.on_hover_text(match download_status {
             DownloadStatus::NotStarted => "下載",
+            DownloadStatus::Waiting => "等待中",
             DownloadStatus::Downloading => "下載中",
             DownloadStatus::Completed => "已下載",
         });
@@ -1892,6 +1933,86 @@ impl SearchApp {
 
         ui.add_space(5.0);
         ui.separator();
+    }
+
+    fn start_download_processor(&self) {
+        let download_queue_receiver = self.download_queue_receiver.clone();
+        let download_directory = self.download_directory.clone();
+        let status_sender = self.status_sender.clone();
+        let semaphore = self.download_semaphore.clone();
+        let current_downloads = self.current_downloads.clone();
+
+        tokio::spawn(async move {
+            let mut receiver = match download_queue_receiver.lock().unwrap().take() {
+                Some(r) => r,
+                None => {
+                    error!("下載隊列接收器已被關閉");
+                    return;
+                }
+            };
+
+            while let Some(beatmapset_id) = receiver.recv().await {
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("無法獲取下載許可: {:?}", e);
+                        continue;
+                    }
+                };
+
+                let download_directory = download_directory.clone();
+                let status_sender = status_sender.clone();
+                let current_downloads = current_downloads.clone();
+
+                current_downloads.fetch_add(1, Ordering::SeqCst);
+                if let Err(e) = status_sender.send((beatmapset_id, DownloadStatus::Downloading)).await {
+                    error!("無法發送下載狀態: {:?}", e);
+                }
+
+                tokio::spawn(async move {
+                    let status_sender_clone = status_sender.clone();
+                    let download_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(300), // 5分鐘超時
+                        osu::download_beatmap(beatmapset_id, &download_directory, {
+                            let status_sender = status_sender.clone();
+                            move |status| {
+                                let beatmapset_id = beatmapset_id;
+                                let status_sender = status_sender.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = status_sender.send((beatmapset_id, status)).await {
+                                        error!("無法發送下載狀態更新: {:?}", e);
+                                    }
+                                });
+                            }
+                        })
+                    ).await;
+
+                    match download_result {
+                        Ok(Ok(_)) => {
+                            info!("圖譜 {} 下載成功", beatmapset_id);
+                            if let Err(e) = status_sender_clone.send((beatmapset_id, DownloadStatus::Completed)).await {
+                                error!("無法發送下載完成狀態: {:?}", e);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            error!("圖譜 {} 下載失敗: {:?}", beatmapset_id, e);
+                            if let Err(e) = status_sender_clone.send((beatmapset_id, DownloadStatus::NotStarted)).await {
+                                error!("無法發送下載失敗狀態: {:?}", e);
+                            }
+                        }
+                        Err(_) => {
+                            error!("圖譜 {} 下載超時", beatmapset_id);
+                            if let Err(e) = status_sender_clone.send((beatmapset_id, DownloadStatus::NotStarted)).await {
+                                error!("無法發送下載超時狀態: {:?}", e);
+                            }
+                        }
+                    }
+
+                    current_downloads.fetch_sub(1, Ordering::SeqCst);
+                    drop(permit);
+                });
+            }
+        });
     }
 
     //顯示osu譜面集詳情
@@ -1946,7 +2067,7 @@ impl SearchApp {
         status: DownloadStatus,
     ) -> egui::Response {
         let animation_progress = self.osu_download_button_states.entry(index).or_insert(0.0);
-        let response = ui.allocate_rect(rect, egui::Sense::click());
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
         if response.hovered() {
             *animation_progress =
@@ -1967,12 +2088,15 @@ impl SearchApp {
                 200 + ((55) as f32 * *animation_progress) as u8,
                 255,
             ),
-            DownloadStatus::Downloading => egui::Color32::from_rgba_unmultiplied(
-                255, 165, 0, 255, // 橙色
-            ),
-            DownloadStatus::Completed => egui::Color32::from_rgba_unmultiplied(
-                0, 255, 0, 255, // 綠色
-            ),
+            DownloadStatus::Waiting => egui::Color32::from_rgba_unmultiplied(255, 255, 0, 255),
+            DownloadStatus::Downloading => egui::Color32::from_rgba_unmultiplied(255, 165, 0, 255),
+            DownloadStatus::Completed => {
+                if response.hovered() {
+                    egui::Color32::from_rgba_unmultiplied(255, 0, 0, 255) // 紅色
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(0, 255, 0, 255) // 綠色
+                }
+            }
         };
         ui.painter()
             .circle(center, radius, bg_color, egui::Stroke::NONE);
@@ -1984,7 +2108,6 @@ impl SearchApp {
             0 + ((255) as f32 * *animation_progress) as u8,
             255,
         );
-
         match status {
             DownloadStatus::NotStarted => {
                 // 繪製下載圖標 (箭頭指向下方)
@@ -2005,19 +2128,35 @@ impl SearchApp {
                     egui::Stroke::new(2.0, icon_color),
                 );
             }
+            DownloadStatus::Waiting => {
+                // 繪製等待圖標 (例如，一個沙漏或時鐘圖標)
+                let clock_radius = radius * 0.6;
+                ui.painter().circle_stroke(
+                    center,
+                    clock_radius,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+                let hand_angle = (ui.input(|i| i.time) as f32 * 2.0) % (2.0 * std::f32::consts::PI);
+                let hand_end =
+                    center + egui::vec2(hand_angle.cos(), hand_angle.sin()) * clock_radius * 0.8;
+                ui.painter().line_segment(
+                    [center, hand_end],
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+            }
             DownloadStatus::Downloading => {
                 // 繪製旋轉的圓弧表示下載中
                 let angle = (ui.input(|i| i.time) as f32 * 3.0) % (2.0 * std::f32::consts::PI);
                 let start_angle = angle;
                 let end_angle = angle + std::f32::consts::PI * 1.5;
-                
+
                 // 繪製背景圓圈
                 ui.painter().circle_stroke(
                     center,
                     radius * 0.7,
                     egui::Stroke::new(2.0, egui::Color32::from_gray(200)),
                 );
-                
+
                 // 繪製旋轉的圓弧
                 let num_points = 30; // 控制圓弧的平滑度
                 let points: Vec<egui::Pos2> = (0..=num_points)
@@ -2031,7 +2170,7 @@ impl SearchApp {
                     points,
                     egui::Stroke::new(2.0, egui::Color32::BLUE),
                 ));
-                
+
                 // 繪製箭頭
                 let arrow_top = center + egui::vec2(0.0, -radius * 0.3);
                 let arrow_bottom = center + egui::vec2(0.0, radius * 0.3);
@@ -2051,18 +2190,37 @@ impl SearchApp {
                 );
             }
             DownloadStatus::Completed => {
-                // 繪製勾勾表示下載完成
-                let check_left = center + egui::vec2(-radius * 0.3, 0.0);
-                let check_middle = center + egui::vec2(-radius * 0.1, radius * 0.2);
-                let check_right = center + egui::vec2(radius * 0.3, -radius * 0.2);
-                ui.painter().line_segment(
-                    [check_left, check_middle],
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
-                ui.painter().line_segment(
-                    [check_middle, check_right],
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
+                if response.hovered() {
+                    // 繪製紅色 X
+                    let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+                    ui.painter().line_segment(
+                        [
+                            center + egui::vec2(-radius * 0.5, -radius * 0.5),
+                            center + egui::vec2(radius * 0.5, radius * 0.5),
+                        ],
+                        stroke,
+                    );
+                    ui.painter().line_segment(
+                        [
+                            center + egui::vec2(-radius * 0.5, radius * 0.5),
+                            center + egui::vec2(radius * 0.5, -radius * 0.5),
+                        ],
+                        stroke,
+                    );
+                } else {
+                    // 繪製綠色勾勾
+                    let check_left = center + egui::vec2(-radius * 0.3, 0.0);
+                    let check_middle = center + egui::vec2(-radius * 0.1, radius * 0.2);
+                    let check_right = center + egui::vec2(radius * 0.3, -radius * 0.2);
+                    ui.painter().line_segment(
+                        [check_left, check_middle],
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+                    ui.painter().line_segment(
+                        [check_middle, check_right],
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+                }
             }
         }
 
