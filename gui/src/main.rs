@@ -45,6 +45,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
+use parking_lot::Mutex as ParkingLotMutex;
 
 // 本地模組導入
 use crate::osu::{
@@ -112,7 +113,7 @@ struct PlaylistCache {
 
 // 定義 AuthManager 結構，儲存授權狀態和錯誤記錄
 pub struct AuthManager {
-    status: Mutex<HashMap<AuthPlatform, AuthStatus>>,
+    status: ParkingLotMutex<HashMap<AuthPlatform, AuthStatus>>,
     error_logged: AtomicBool,
 }
 
@@ -121,114 +122,134 @@ impl AuthManager {
         let mut status = HashMap::new();
         status.insert(AuthPlatform::Spotify, AuthStatus::NotStarted);
         Self {
-            status: Mutex::new(status),
+            status: ParkingLotMutex::new(status),
             error_logged: AtomicBool::new(false),
         }
     }
 
     pub fn reset(&self, platform: &AuthPlatform) {
-        let mut status = self.status.lock().unwrap();
-        status.insert(platform.clone(), AuthStatus::NotStarted);
+        self.status.lock().insert(platform.clone(), AuthStatus::NotStarted);
         self.error_logged.store(false, Ordering::Relaxed);
     }
 
     pub fn update_status(&self, platform: &AuthPlatform, new_status: AuthStatus) {
-        let mut status = self.status.lock().unwrap();
-        let old_status = status
-            .get(platform)
-            .cloned()
-            .unwrap_or(AuthStatus::NotStarted);
-        status.insert(platform.clone(), new_status.clone());
+        let mut status = self.status.lock();
+        let old_status = status.get(platform).cloned().unwrap_or(AuthStatus::NotStarted);
+        status.entry(platform.clone()).or_insert(new_status.clone());
 
         if let AuthStatus::Failed(ref error) = new_status {
-            if !matches!(old_status, AuthStatus::Failed(_))
-                && !self.error_logged.load(Ordering::Relaxed)
-            {
+            if !matches!(old_status, AuthStatus::Failed(_)) {
                 error!("{:?} 授權失敗: {}", platform, error);
-                self.error_logged.store(true, Ordering::Relaxed);
             }
         }
     }
 
     pub fn get_status(&self, platform: &AuthPlatform) -> AuthStatus {
-        self.status
-            .lock()
-            .unwrap()
-            .get(platform)
-            .cloned()
-            .unwrap_or(AuthStatus::NotStarted)
+        self.status.lock().get(platform).cloned().unwrap_or(AuthStatus::NotStarted)
+    }
+
+    pub fn get_all_statuses(&self) -> HashMap<AuthPlatform, AuthStatus> {
+        self.status.lock().clone()
     }
 }
 
 // 定義 SpotifySearchApp結構，儲存程式狀態和數據
 struct SearchApp {
+    // 認證相關
     access_token: Arc<tokio::sync::Mutex<String>>,
-    auth_error: Option<String>,
     auth_in_progress: Arc<AtomicBool>,
     auth_manager: Arc<AuthManager>,
     auth_start_time: Option<Instant>,
-    avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
-    client: Arc<tokio::sync::Mutex<Client>>,
-    config_errors: Arc<Mutex<Vec<String>>>,
-    cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
-    playlist_cover_textures: Arc<Mutex<HashMap<String, Option<TextureHandle>>>>,
-    ctx: egui::Context,
-    currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
-    should_detect_now_playing: Arc<AtomicBool>,
-    debug_mode: bool,
-    default_avatar_texture: Option<egui::TextureHandle>,
-    displayed_osu_results: usize,
-    displayed_spotify_results: usize,
-    err_msg: Arc<tokio::sync::Mutex<String>>,
-    error_message: Arc<tokio::sync::Mutex<String>>,
-    global_font_size: f32,
-    initialized: bool,
-    is_searching: Arc<AtomicBool>,
-    last_update: Arc<Mutex<Option<Instant>>>,
-    listener: Arc<TokioMutex<Option<TcpListener>>>,
-    need_reload_avatar: Arc<AtomicBool>,
-    need_repaint: Arc<AtomicBool>,
-    osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
-    receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
-    spotify_scroll_to_top: bool,
-    osu_scroll_to_top: bool,
-    search_query: String,
-    search_results: Arc<tokio::sync::Mutex<Vec<Track>>>,
-    selected_beatmapset: Option<usize>,
-    sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
-    show_auth_progress: bool,
-    show_side_menu: bool,
-    side_menu_width: Option<f32>,
     spotify_authorized: Arc<AtomicBool>,
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
-    spotify_icon: Option<egui::TextureHandle>,
+    
+    // 使用者資訊
     spotify_user_avatar: Arc<Mutex<Option<egui::TextureHandle>>>,
     spotify_user_avatar_url: Arc<Mutex<Option<String>>>,
     spotify_user_name: Arc<Mutex<Option<String>>>,
+    
+    // 搜索相關
+    search_query: String,
+    is_searching: Arc<AtomicBool>,
+    search_results: Arc<tokio::sync::Mutex<Vec<Track>>>,
+    osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
+    displayed_spotify_results: usize,
+    displayed_osu_results: usize,
+    
+    // 播放列表和曲目
     spotify_user_playlists: Arc<Mutex<Vec<SimplifiedPlaylist>>>,
     spotify_playlist_tracks: Arc<Mutex<Vec<FullTrack>>>,
     spotify_liked_tracks: Arc<Mutex<Vec<FullTrack>>>,
     selected_playlist: Option<SimplifiedPlaylist>,
+    currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
+    
+    // UI 狀態
+    show_auth_progress: bool,
+    show_side_menu: bool,
+    side_menu_width: Option<f32>,
     show_spotify_now_playing: bool,
     show_playlists: bool,
     show_liked_tracks: bool,
+    spotify_scroll_to_top: bool,
+    osu_scroll_to_top: bool,
+    global_font_size: f32,
+    
+    // 紋理和圖像
+    avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
+    cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
+    playlist_cover_textures: Arc<Mutex<HashMap<String, Option<TextureHandle>>>>,
+    default_avatar_texture: Option<egui::TextureHandle>,
+    spotify_icon: Option<egui::TextureHandle>,
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
-    texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>>,
-    spotify_track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
     preloaded_icons: HashMap<String, egui::TextureHandle>,
+    
+    // 網絡和客戶端
+    client: Arc<tokio::sync::Mutex<Client>>,
+    listener: Arc<TokioMutex<Option<TcpListener>>>,
+    
+    // 錯誤處理
+    err_msg: Arc<tokio::sync::Mutex<String>>,
+    error_message: Arc<tokio::sync::Mutex<String>>,
+    config_errors: Arc<Mutex<Vec<String>>>,
+    
+    // 狀態管理
+    initialized: bool,
+    need_reload_avatar: Arc<AtomicBool>,
+    need_repaint: Arc<AtomicBool>,
+    last_update: Arc<Mutex<Option<Instant>>>,
+    
+    // 異步通信
+    receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
+    sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
+    
+    // UI 元素狀態
     spotify_search_button_states: HashMap<usize, f32>,
     spotify_open_button_states: HashMap<usize, f32>,
     osu_search_button_states: HashMap<usize, f32>,
     osu_open_button_states: HashMap<usize, f32>,
     liked_button_states: HashMap<usize, f32>,
     osu_download_button_states: HashMap<usize, f32>,
-    osu_download_statuses: HashMap<usize, DownloadStatus>,
     side_menu_animation: HashMap<egui::Id, f32>,
+    
+    // 其他功能
+    debug_mode: bool,
+    ctx: egui::Context,
+    selected_beatmapset: Option<usize>,
+    should_detect_now_playing: Arc<AtomicBool>,
+    spotify_track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
+    osu_download_statuses: HashMap<usize, DownloadStatus>,
+    
+    // 快取
     liked_songs_cache: Arc<Mutex<Option<PlaylistCache>>>,
     cache_ttl: Duration,
+    texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>>,
+    
+    // 更新檢查
     update_check_result: Arc<Mutex<Option<bool>>>,
     update_check_sender: Sender<bool>,
     update_check_receiver: Receiver<bool>,
+    
+    // 下載相關
     download_directory: PathBuf,
     status_sender: tokio::sync::mpsc::Sender<(i32, DownloadStatus)>,
     status_receiver: tokio::sync::mpsc::Receiver<(i32, DownloadStatus)>,
@@ -240,205 +261,286 @@ struct SearchApp {
 
 impl eframe::App for SearchApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // 初始化程式,和設置字體及獲取access token
         if !self.initialized {
-            let client = self.client.clone();
-            let osu_urls = vec![];
-            let sender_clone = self.sender.clone();
-            let ctx_clone = ctx.clone();
-            let debug_mode = self.debug_mode;
-
-            tokio::spawn(async move {
-                if let Err(e) =
-                    load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender_clone).await
-                {
-                    error!("初始化時載入 osu 封面發生錯誤: {:?}", e);
-                    if debug_mode {
-                        ctx_clone.request_repaint();
-                        egui::Window::new("Error").show(&ctx_clone, |ui| {
-                            ui.label(format!("載入 osu 封面錯誤: {:?}", e));
-                        });
-                    }
-                }
-            });
-
-            let mut receiver = self.receiver.take().expect("Receiver already taken");
-            let cover_textures = self.cover_textures.clone();
-            let need_repaint_clone = self.need_repaint.clone();
-
-            tokio::spawn(async move {
-                while let Some((id, texture, dimensions)) = receiver.recv().await {
-                    let mut textures = cover_textures.write().await;
-                    textures.insert(id, Some((texture, dimensions)));
-                    need_repaint_clone.store(true, Ordering::SeqCst);
-                }
-            });
-
-            self.initialized = true;
-
-            let access_token = self.access_token.clone();
-            let error_message = self.error_message.clone();
-            let client_clone = client.clone();
-            let debug_mode = self.debug_mode;
-            let is_searching = self.is_searching.clone();
-            let need_repaint = self.need_repaint.clone();
-
-            tokio::spawn(async move {
-                let client_guard = client_clone.lock().await;
-                match get_access_token(&*client_guard, debug_mode).await {
-                    Ok(token) => {
-                        let mut access_token_guard = access_token.lock().await;
-                        *access_token_guard = token;
-                    }
-                    Err(e) => {
-                        let mut error = error_message.lock().await;
-                        *error = "Spotify 錯誤：無法獲取 token".to_string();
-                        error!("獲取 Spotify token 錯誤: {:?}", e);
-                        is_searching.store(false, Ordering::SeqCst);
-                        need_repaint.store(true, Ordering::SeqCst);
-                    }
-                }
-            });
-
-            let ctx_clone = ctx.clone();
-            let err_msg_clone = self.err_msg.clone();
-            tokio::spawn(async move {
-                let err_msg = err_msg_clone.lock().await;
-                if !err_msg.is_empty() {
-                    ctx_clone.request_repaint();
-                    egui::Window::new("Error").show(&ctx_clone, |ui| {
-                        ui.label(&err_msg.to_string());
-                    });
-                }
-            });
+            self.initialize(ctx);
         }
 
-        if self.spotify_user_avatar.lock().unwrap().is_none()
+        self.handle_avatar_loading(ctx);
+        self.check_auth_status();
+        self.handle_config_errors(ctx);
+        self.update_ui(ctx);
+        self.handle_debug_mode();
+        self.update_current_playing(ctx);
+        self.handle_download_status_updates();
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.clean_up_resources();
+    }
+}
+
+impl SearchApp {
+    fn initialize(&mut self, ctx: &egui::Context) {
+        self.spawn_osu_cover_loader(ctx);
+        self.spawn_texture_receiver();
+        self.spawn_access_token_fetcher();
+        self.spawn_error_message_handler(ctx);
+        self.initialized = true;
+    }
+
+    fn spawn_osu_cover_loader(&self, ctx: &egui::Context) {
+        let sender = self.sender.clone();
+        let ctx = ctx.clone();
+        let debug_mode = self.debug_mode;
+
+        tokio::spawn(async move {
+            if let Err(e) = load_osu_covers(vec![], ctx.clone(), sender).await {
+                Self::handle_osu_cover_load_error(e, debug_mode, &ctx);
+            }
+        });
+    }
+
+    fn handle_osu_cover_load_error(e: impl std::fmt::Debug, debug_mode: bool, ctx: &egui::Context) {
+        error!("初始化時載入 osu 封面發生錯誤: {:?}", e);
+        if debug_mode {
+            ctx.request_repaint();
+            egui::Window::new("錯誤").show(ctx, |ui| {
+                ui.label(format!("載入 osu 封面錯誤: {:?}", e));
+            });
+        }
+    }
+
+    fn spawn_texture_receiver(&mut self) {
+        let receiver = self.receiver.take().expect("Receiver already taken");
+        let cover_textures = Arc::downgrade(&self.cover_textures);
+        let need_repaint = Arc::downgrade(&self.need_repaint);
+
+        tokio::spawn(async move {
+            Self::process_texture_updates(receiver, cover_textures, need_repaint).await;
+        });
+    }
+
+    async fn process_texture_updates(
+        mut receiver: tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>,
+        cover_textures: std::sync::Weak<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
+        need_repaint: std::sync::Weak<AtomicBool>,
+    ) {
+        while let Some((id, texture, dimensions)) = receiver.recv().await {
+            if let (Some(cover_textures), Some(need_repaint)) = (cover_textures.upgrade(), need_repaint.upgrade()) {
+                let mut textures = cover_textures.write().await;
+                textures.insert(id, Some((texture, dimensions)));
+                
+                // 實現緩存淘汰策略
+                if textures.len() > 1000 { // 設置最大容量限制
+                    let oldest_id = *textures.keys().next().unwrap();
+                    textures.remove(&oldest_id);
+                }
+                
+                need_repaint.store(true, Ordering::SeqCst);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn spawn_access_token_fetcher(&self) {
+        let access_token = Arc::downgrade(&self.access_token);
+        let error_message = Arc::downgrade(&self.error_message);
+        let client = Arc::downgrade(&self.client);
+        let debug_mode = self.debug_mode;
+        let is_searching = Arc::downgrade(&self.is_searching);
+        let need_repaint = Arc::downgrade(&self.need_repaint);
+
+        tokio::spawn(async move {
+            if let (Some(access_token), Some(error_message), Some(client), Some(is_searching), Some(need_repaint)) = 
+                (access_token.upgrade(), error_message.upgrade(), client.upgrade(), is_searching.upgrade(), need_repaint.upgrade()) {
+                Self::fetch_access_token(
+                    access_token,
+                    error_message,
+                    client,
+                    debug_mode,
+                    is_searching,
+                    need_repaint
+                ).await;
+            }
+        });
+    }
+
+    async fn fetch_access_token(
+        access_token: Arc<tokio::sync::Mutex<String>>,
+        error_message: Arc<tokio::sync::Mutex<String>>,
+        client: Arc<tokio::sync::Mutex<Client>>,
+        debug_mode: bool,
+        is_searching: Arc<AtomicBool>,
+        need_repaint: Arc<AtomicBool>,
+    ) {
+        let client_guard = client.lock().await;
+        match get_access_token(&*client_guard, debug_mode).await {
+            Ok(token) => {
+                let mut token_guard = access_token.lock().await;
+                *token_guard = token;
+            }
+            Err(e) => Self::handle_access_token_error(e, error_message, is_searching, need_repaint),
+        }
+    }
+
+    fn handle_access_token_error(
+        e: impl std::fmt::Debug,
+        error_message: Arc<tokio::sync::Mutex<String>>,
+        is_searching: Arc<AtomicBool>,
+        need_repaint: Arc<AtomicBool>,
+    ) {
+        let mut error = error_message.blocking_lock();
+        *error = "Spotify 錯誤：無法獲取 token".to_string();
+        error!("獲取 Spotify token 錯誤: {:?}", e);
+        is_searching.store(false, Ordering::SeqCst);
+        need_repaint.store(true, Ordering::SeqCst);
+    }
+
+    fn spawn_error_message_handler(&self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        let err_msg = Arc::downgrade(&self.err_msg);
+        tokio::spawn(async move {
+            if let Some(err_msg) = err_msg.upgrade() {
+                Self::handle_error_messages(ctx, err_msg).await;
+            }
+        });
+    }
+
+    async fn handle_error_messages(ctx: egui::Context, err_msg: Arc<tokio::sync::Mutex<String>>) {
+        let err_msg = err_msg.lock().await;
+        if !err_msg.is_empty() {
+            ctx.request_repaint();
+            egui::Window::new("錯誤").show(&ctx, |ui| {
+                ui.label(&err_msg.to_string());
+            });
+        }
+    }
+
+    fn handle_avatar_loading(&mut self, ctx: &egui::Context) {
+        if self.need_reload_avatar() {
+            self.start_load_spotify_avatar(ctx);
+        }
+    }
+
+    fn need_reload_avatar(&self) -> bool {
+        self.spotify_user_avatar.lock().unwrap().is_none()
             && self.spotify_user_avatar_url.lock().unwrap().is_some()
             && self.need_reload_avatar.load(Ordering::SeqCst)
-        {
-            info!("觸發加載 Spotify 用戶頭像");
-            let url = self
-                .spotify_user_avatar_url
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap();
-            let ctx_clone = ctx.clone();
-            let need_reload_avatar = self.need_reload_avatar.clone();
-            let spotify_user_avatar = self.spotify_user_avatar.clone();
+    }
 
-            // 如果已經有正在進行的加載任務，先取消它
-            if let Some(handle) = self.avatar_load_handle.take() {
-                handle.abort();
-            }
+    fn start_load_spotify_avatar(&mut self, ctx: &egui::Context) {
+        info!("觸發加載 Spotify 用戶頭像");
+        let url = self.spotify_user_avatar_url.lock().unwrap().clone().unwrap();
+        let ctx = ctx.clone();
+        let need_reload_avatar = Arc::downgrade(&self.need_reload_avatar);
+        let spotify_user_avatar = Arc::downgrade(&self.spotify_user_avatar);
 
-            // 啟動新的加載任務
-            self.avatar_load_handle = Some(tokio::spawn(async move {
-                match SearchApp::load_spotify_user_avatar(&url, &ctx_clone).await {
-                    Ok(texture) => {
-                        info!("Spotify 用戶頭像加載成功");
-                        *spotify_user_avatar.lock().unwrap() = Some(texture);
-                        need_reload_avatar.store(false, Ordering::SeqCst);
-                        ctx_clone.request_repaint();
-                    }
-                    Err(e) => {
-                        error!("加載 Spotify 用戶頭像失敗: {:?}", e);
-                    }
-                }
-            }));
+        if let Some(handle) = self.avatar_load_handle.take() {
+            handle.abort();
         }
 
-        if self.need_reload_avatar.load(Ordering::SeqCst) {
-            let url = self.spotify_user_avatar_url.lock().unwrap().clone();
-            if let Some(url) = url {
-                let ctx = ctx.clone();
-                let spotify_user_avatar = self.spotify_user_avatar.clone();
-                let need_reload_avatar = self.need_reload_avatar.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = Self::load_spotify_avatar(
-                        &ctx,
-                        &url,
-                        spotify_user_avatar,
-                        need_reload_avatar,
-                    )
-                    .await
-                    {
-                        error!("加載 Spotify 頭像失敷: {:?}", e);
-                    }
-                });
+        self.avatar_load_handle = Some(tokio::spawn(async move {
+            if let (Some(need_reload_avatar), Some(spotify_user_avatar)) = (need_reload_avatar.upgrade(), spotify_user_avatar.upgrade()) {
+                Self::load_and_handle_avatar(url, ctx, need_reload_avatar, spotify_user_avatar).await;
             }
+        }));
+    }
+
+    async fn load_and_handle_avatar(
+        url: String,
+        ctx: egui::Context,
+        need_reload_avatar: Arc<AtomicBool>,
+        spotify_user_avatar: Arc<Mutex<Option<TextureHandle>>>,
+    ) {
+        match Self::load_spotify_user_avatar(&url, &ctx).await {
+            Ok(texture) => Self::handle_avatar_load_success(texture, spotify_user_avatar, need_reload_avatar, &ctx),
+            Err(e) => error!("加載 Spotify 用戶頭像失敗: {:?}", e),
         }
-        // 檢查授權狀態並更新 auth_in_progress
+    }
+
+    fn handle_avatar_load_success(
+        texture: TextureHandle,
+        spotify_user_avatar: Arc<Mutex<Option<TextureHandle>>>,
+        need_reload_avatar: Arc<AtomicBool>,
+        ctx: &egui::Context,
+    ) {
+        info!("Spotify 用戶頭像加載成功");
+        *spotify_user_avatar.lock().unwrap() = Some(texture);
+        need_reload_avatar.store(false, Ordering::SeqCst);
+        ctx.request_repaint();
+    }
+
+    fn check_auth_status(&mut self) {
         if !self.auth_in_progress.load(Ordering::SeqCst) {
-            match self.auth_manager.get_status(&AuthPlatform::Spotify) {
-                AuthStatus::Completed | AuthStatus::Failed(_) => {
-                    self.show_auth_progress = false;
-                    self.auth_in_progress.store(false, Ordering::SeqCst);
-                }
-                _ => {}
+            if let AuthStatus::Completed | AuthStatus::Failed(_) = self.auth_manager.get_status(&AuthPlatform::Spotify) {
+                self.show_auth_progress = false;
+                self.auth_in_progress.store(false, Ordering::SeqCst);
             }
         }
+    }
 
+    fn handle_config_errors(&mut self, ctx: &egui::Context) {
         let mut should_close_error = false;
 
-        if let Ok(errors) = self.config_errors.lock() {
+        if let Ok(errors) = self.config_errors.try_lock() {
             if !errors.is_empty() {
-                egui::Window::new("")
-                    .collapsible(false)
-                    .resizable(false)
-                    .default_size(egui::vec2(1200.0, 600.0))
-                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                    .show(ctx, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(20.0);
-                            ui.heading(egui::RichText::new("配置檢查錯誤：").size(32.0));
-                            ui.add_space(20.0);
-
-                            for error_msg in errors.iter() {
-                                for error_line in error_msg.split('\n') {
-                                    egui::Frame::none()
-                                        .fill(egui::Color32::from_rgb(255, 200, 200))
-                                        .show(ui, |ui| {
-                                            ui.add_space(10.0);
-                                            ui.label(
-                                                egui::RichText::new(error_line)
-                                                    .size(24.0)
-                                                    .color(egui::Color32::RED),
-                                            );
-                                            ui.add_space(10.0);
-                                        });
-                                    ui.add_space(5.0);
-                                }
-                            }
-
-                            ui.add_space(20.0);
-                            if ui
-                                .add_sized(
-                                    [200.0, 60.0],
-                                    egui::Button::new(egui::RichText::new("確定").size(40.0)),
-                                )
-                                .clicked()
-                            {
-                                should_close_error = true;
-                            }
-                        });
-                    });
+                self.show_config_error_window(ctx, &errors, &mut should_close_error);
             }
         }
 
-        // 在閉包外部處理錯誤視窗的關閉
         if should_close_error {
-            if let Ok(mut errors) = self.config_errors.lock() {
+            if let Ok(mut errors) = self.config_errors.try_lock() {
                 errors.clear();
             }
         }
-        if self
-            .need_repaint
-            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+    }
+
+    fn show_config_error_window(&self, ctx: &egui::Context, errors: &[String], should_close_error: &mut bool) {
+        egui::Window::new("")
+            .collapsible(false)
+            .resizable(false)
+            .default_size(egui::vec2(1200.0, 600.0))
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.heading(egui::RichText::new("配置檢查錯誤：").size(32.0));
+                    ui.add_space(20.0);
+
+                    for error_msg in errors {
+                        for error_line in error_msg.split('\n') {
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(255, 200, 200))
+                                .show(ui, |ui| {
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new(error_line)
+                                            .size(24.0)
+                                            .color(egui::Color32::RED),
+                                    );
+                                    ui.add_space(10.0);
+                                });
+                            ui.add_space(5.0);
+                        }
+                    }
+
+                    ui.add_space(20.0);
+                    if ui
+                        .add_sized(
+                            [200.0, 60.0],
+                            egui::Button::new(egui::RichText::new("確定").size(40.0)),
+                        )
+                        .clicked()
+                    {
+                        *should_close_error = true;
+                    }
+                });
+            });
+    }
+
+    fn update_ui(&mut self, ctx: &egui::Context) {
+        if self.need_repaint.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             ctx.request_repaint();
         }
 
@@ -447,101 +549,149 @@ impl eframe::App for SearchApp {
         });
 
         self.render_side_menu(ctx);
-
         self.render_central_panel(ctx);
+    }
 
+    fn handle_debug_mode(&mut self) {
         if self.search_query.trim().to_lowercase() == "debug" {
-            self.debug_mode = !self.debug_mode; // 切換調試模式
-            set_log_level(self.debug_mode); // 更新日誌級別
-            self.search_query.clear(); // 清空搜索框
+            self.debug_mode = !self.debug_mode;
+            set_log_level(self.debug_mode);
+            self.search_query.clear();
             info!("Debug mode: {}", self.debug_mode);
         }
+    }
 
-        if self.should_update_current_playing()
-            && self.should_detect_now_playing.load(Ordering::SeqCst)
-        {
-            let spotify_client = self.spotify_client.clone();
-            let currently_playing = self.currently_playing.clone();
+    fn update_current_playing(&self, ctx: &egui::Context) {
+        if self.should_update_current_playing() && self.should_detect_now_playing.load(Ordering::SeqCst) {
+            let spotify_client = Arc::downgrade(&self.spotify_client);
+            let currently_playing = Arc::downgrade(&self.currently_playing);
             let debug_mode = self.debug_mode;
             let ctx = ctx.clone();
-            let spotify_authorized = self.spotify_authorized.clone();
-            let should_detect_now_playing = self.should_detect_now_playing.clone();
+            let spotify_authorized = Arc::downgrade(&self.spotify_authorized);
+            let should_detect_now_playing = Arc::downgrade(&self.should_detect_now_playing);
 
             tokio::spawn(async move {
-                match update_currently_playing_wrapper(
-                    spotify_client.clone(),
-                    currently_playing.clone(),
-                    debug_mode,
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("更新當前播放失敗: {:?}", e);
-                        if e.to_string().contains("Token 無效")
-                            || e.to_string().contains("需要重新授權")
-                        {
-                            info!("Token 無效或過期，需要重新授權");
-                            spotify_authorized.store(false, Ordering::SeqCst);
-                            should_detect_now_playing.store(false, Ordering::SeqCst);
-                        }
-                    }
+                if let (Some(spotify_client), Some(currently_playing), Some(spotify_authorized), Some(should_detect_now_playing)) = 
+                    (spotify_client.upgrade(), currently_playing.upgrade(), spotify_authorized.upgrade(), should_detect_now_playing.upgrade()) {
+                    Self::update_and_handle_current_playing(
+                        spotify_client,
+                        currently_playing,
+                        debug_mode,
+                        ctx,
+                        spotify_authorized,
+                        should_detect_now_playing,
+                    ).await;
                 }
-
-                ctx.request_repaint_after(std::time::Duration::from_secs(1));
             });
         }
-        let status = self.auth_manager.get_status(&AuthPlatform::Spotify);
-        match status {
-            AuthStatus::Failed(ref reason) => {
-                if self.auth_error.is_none() {
-                    self.auth_error = Some(reason.clone());
-                }
-            }
-            AuthStatus::Completed => {
-                if self.show_auth_progress {
-                    self.show_auth_progress = false;
-                    info!("授權成功");
-                }
-            }
-            _ => {}
-        }
-        let side_menu_state_start = self.show_side_menu;
-        if self.show_side_menu != side_menu_state_start {
-            info!(
-                "Side menu state changed from {} to {}",
-                side_menu_state_start, self.show_side_menu
-            );
-        }
-        let mut status_updates = Vec::new();
-        while let Ok((beatmapset_id, status)) = self.status_receiver.try_recv() {
-            status_updates.push((beatmapset_id, status));
+    }
+
+    async fn update_and_handle_current_playing(
+        spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
+        currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
+        debug_mode: bool,
+        ctx: egui::Context,
+        spotify_authorized: Arc<AtomicBool>,
+        should_detect_now_playing: Arc<AtomicBool>,
+    ) {
+        match update_currently_playing_wrapper(spotify_client, currently_playing, debug_mode).await {
+            Ok(_) => {}
+            Err(e) => Self::handle_current_playing_update_error(e, spotify_authorized, should_detect_now_playing),
         }
 
-        if let Ok(guard) = self.osu_search_results.try_lock() {
-            for &(beatmapset_id, status) in &status_updates {
-                if let Some(index) = guard.iter().position(|b| b.id == beatmapset_id) {
-                    self.osu_download_statuses.insert(index, status);
-                    if status == DownloadStatus::Completed {
-                        if let Some((waiting_index, waiting_beatmapset)) = self.osu_download_statuses
-                            .iter()
-                            .find(|(_, &status)| status == DownloadStatus::Waiting)
-                            .map(|(index, _)| (*index, guard[*index].id))
-                        {
-                            self.osu_download_statuses.insert(waiting_index, DownloadStatus::Downloading);
-                            if let Err(e) = self.download_queue_sender.try_send(waiting_beatmapset) {
-                                error!("無法將等待中的圖譜加入下載隊列: {:?}", e);
-                                self.osu_download_statuses.insert(waiting_index, DownloadStatus::Waiting);
-                            }
-                        }
-                    }
-                }
-            }
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+
+    fn handle_current_playing_update_error(
+        e: impl std::fmt::Debug,
+        spotify_authorized: Arc<AtomicBool>,
+        should_detect_now_playing: Arc<AtomicBool>,
+    ) {
+        error!("更新當前播放失敗: {:?}", e);
+        let error_str = format!("{:?}", e);
+        if error_str.contains("Token 無效") || error_str.contains("需要重新授權") {
+            info!("Token 無效或過期，需要重新授權");
+            spotify_authorized.store(false, Ordering::SeqCst);
+            should_detect_now_playing.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn handle_download_status_updates(&mut self) {
+        let status_updates = self.collect_status_updates();
+        let completed_downloads = self.process_status_updates(&status_updates);
+
+        for completed_beatmapset in completed_downloads {
+            self.handle_completed_download(&[completed_beatmapset]);
         }
 
         if !status_updates.is_empty() {
-            ctx.request_repaint();
+            self.ctx.request_repaint();
         }
+    }
+
+    fn collect_status_updates(&mut self) -> Vec<(i32, DownloadStatus)> {
+        let mut status_updates = Vec::new();
+        while let Ok(update) = self.status_receiver.try_recv() {
+            status_updates.push(update);
+        }
+        status_updates
+    }
+
+    fn process_status_updates(&mut self, status_updates: &[(i32, DownloadStatus)]) -> Vec<Beatmapset> {
+        let mut completed_downloads = Vec::new();
+        if let Ok(mut guard) = self.osu_search_results.try_lock() {
+            for &(beatmapset_id, status) in status_updates {
+                if let Some(index) = guard.iter().position(|b| b.id == beatmapset_id) {
+                    self.osu_download_statuses.insert(index, status);
+                    if status == DownloadStatus::Completed {
+                        completed_downloads.push(guard[index].clone());
+                        // 移除已完成的下載
+                        guard.remove(index);
+                        self.osu_download_statuses.remove(&index);
+                    }
+                }
+            }
+        }
+        completed_downloads
+    }
+
+    fn handle_completed_download(&mut self, guard: &[Beatmapset]) {
+        if let Some((waiting_index, waiting_beatmapset)) = self.find_waiting_download(guard) {
+            self.start_waiting_download(waiting_index, waiting_beatmapset);
+        }
+    }
+
+    fn find_waiting_download(&self, guard: &[Beatmapset]) -> Option<(usize, i32)> {
+        self.osu_download_statuses
+            .iter()
+            .find(|(_, &status)| status == DownloadStatus::Waiting)
+            .map(|(index, _)| (*index, guard[*index].id))
+    }
+
+    fn start_waiting_download(&mut self, waiting_index: usize, waiting_beatmapset: i32) {
+        self.osu_download_statuses.insert(waiting_index, DownloadStatus::Downloading);
+        if let Err(e) = self.download_queue_sender.try_send(waiting_beatmapset) {
+            error!("無法將等待中的圖譜加入下載隊列: {:?}", e);
+            self.osu_download_statuses.insert(waiting_index, DownloadStatus::Waiting);
+        }
+    }
+
+    // 新增清理方法
+    fn clean_up_resources(&mut self) {
+        // 清理搜尋結果
+        if let Ok(mut guard) = self.osu_search_results.try_lock() {
+            guard.clear();
+        }
+
+        // 清理下載狀態
+        self.osu_download_statuses.clear();
+
+        // 清理紋理快取
+        tokio::task::block_in_place(|| {
+            let mut textures = futures::executor::block_on(self.cover_textures.write());
+            textures.clear();
+        });
+
     }
 }
 
@@ -707,7 +857,6 @@ impl SearchApp {
 
         let mut app = Self {
             access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
-            auth_error: None,
             auth_in_progress: Arc::new(AtomicBool::new(false)),
             auth_manager: Arc::new(AuthManager::new()),
             auth_start_time: None,
