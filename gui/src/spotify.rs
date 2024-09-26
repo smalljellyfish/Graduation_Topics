@@ -11,7 +11,8 @@ use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
 
 // 第三方庫導入
 use anyhow::{anyhow, Error, Result};
@@ -93,6 +94,13 @@ pub enum AuthStatus {
     TokenObtained,
     Completed,
     Failed(String),
+}
+
+// 定義 PlaylistCache 結構，用於緩存播放列表曲目
+#[derive(Serialize, Deserialize)]
+pub struct PlaylistCache {
+    tracks: Vec<FullTrack>,
+    last_updated: SystemTime,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

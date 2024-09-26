@@ -52,6 +52,9 @@ chrono = "0.4.38"
 # Windows API 接口（如果需要的話）
 winapi = "0.3.9"
 
+# 系統
+sysinfo = "0.31.4"
+
 # 檢測系統深色/淺色模式
 dark-light = "1.1.1"
 
@@ -69,6 +72,9 @@ futures-util = "0.3.30"
 
 dirs = "5.0.0"
 rfd = "0.15.0"
+
+# 多線程同步
+parking_lot = "0.12.3"
 
 [lib]
 name = "lib"
