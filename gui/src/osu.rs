@@ -451,7 +451,7 @@ pub fn delete_beatmap(download_directory: &Path, beatmapset_id: i32) -> std::io:
         Err(std::io::Error::new(std::io::ErrorKind::NotFound, "未找到相關文件或資料夾"))
     }
 }
-pub async fn preview_beatmap(beatmapset_id: i32, stream_handle: &OutputStreamHandle) -> Result<Sink, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn preview_beatmap(beatmapset_id: i32, stream_handle: &OutputStreamHandle, volume: f32) -> Result<Sink, Box<dyn std::error::Error + Send + Sync>> {
     // 首先建立 reqwest Client
     let client = Client::new();
     
@@ -515,6 +515,7 @@ pub async fn preview_beatmap(beatmapset_id: i32, stream_handle: &OutputStreamHan
     let sink = Sink::try_new(stream_handle)?;
     let cursor = Cursor::new(audio_bytes);
     let source = Decoder::new(cursor)?;
+    sink.set_volume(volume);
     sink.append(source);
     
     Ok(sink)

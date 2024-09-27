@@ -27,6 +27,7 @@ use egui::{
 use log::{debug, error, info, LevelFilter};
 use parking_lot::Mutex as ParkingLotMutex;
 use reqwest::Client;
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 use rspotify::{
     clients::{BaseClient, OAuthClient},
     model::{FullTrack, PlaylistId, SimplifiedPlaylist, TrackId},
@@ -46,7 +47,6 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use rodio::{Sink, OutputStream, OutputStreamHandle};
 
 // 本地模組導入
 use crate::osu::{
@@ -209,7 +209,6 @@ struct SearchApp {
     global_font_size: f32,
     search_bar_expanded: bool,
 
-
     // 紋理和圖像
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
     cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
@@ -247,6 +246,7 @@ struct SearchApp {
     osu_download_button_states: HashMap<usize, f32>,
     side_menu_animation: HashMap<egui::Id, f32>,
     osu_play_button_states: HashMap<usize, f32>,
+    global_volume: f32,
 
     // 其他功能
     debug_mode: bool,
@@ -1022,6 +1022,7 @@ impl SearchApp {
             osu_scroll_to_top: false,
             global_font_size: 16.0,
             search_bar_expanded: false,
+            global_volume: 0.3,
 
             // 紋理和圖像
             avatar_load_handle: None,
@@ -2265,7 +2266,7 @@ impl SearchApp {
         let play_button_rect = egui::Rect::from_min_size(egui::pos2(start_x, start_y), button_size);
         let play_status = if let Ok(previews) = self.current_previews.try_lock() {
             if let Some(sink) = previews.get(&beatmapset.id) {
-                if sink.is_paused() {
+                if sink.is_paused() || sink.empty() {
                     PlayStatus::Stopped
                 } else {
                     PlayStatus::Playing
@@ -2274,35 +2275,55 @@ impl SearchApp {
                 PlayStatus::Stopped
             }
         } else {
-            PlayStatus::Stopped  // 如果無法獲得鎖，假設為停止狀態
+            PlayStatus::Stopped // 如果無法獲得鎖，假設為停止狀態
         };
-        let play_button_response = self.draw_osu_play_button(ui, index, play_button_rect, play_status);
-        
+        let play_button_response =
+            self.draw_osu_play_button(ui, index, play_button_rect, play_status);
+
         if play_button_response.clicked() {
             let beatmapset_id = beatmapset.id;
             let current_previews = self.current_previews.clone();
             let stream_handle = self.audio_output.as_ref().map(|(_, handle)| handle.clone());
-        
+            let volume = self.global_volume;
+
             tokio::spawn(async move {
                 if let Some(stream_handle) = stream_handle {
                     let mut previews = current_previews.lock().await;
                     if let Some(sink) = previews.get_mut(&beatmapset_id) {
-                        if sink.is_paused() {
+                        if sink.is_paused() || sink.empty() {
                             info!("恢復播放 beatmapset ID: {}", beatmapset_id);
+                            sink.set_volume(volume);
                             sink.play();
                         } else {
-                            info!("停止播放 beatmapset ID: {}", beatmapset_id);
-                            sink.stop();
-                            previews.remove(&beatmapset_id);
+                            info!("暫停播放 beatmapset ID: {}", beatmapset_id);
+                            sink.pause();
                         }
                     } else {
                         info!("開始預覽播放 beatmapset ID: {}", beatmapset_id);
-                        match preview_beatmap(beatmapset_id, &stream_handle).await {
+                        match preview_beatmap(beatmapset_id, &stream_handle, volume).await {
                             Ok(new_sink) => {
                                 info!("新的 Sink 已創建，開始播放");
                                 new_sink.play();
                                 previews.insert(beatmapset_id, new_sink);
-                            },
+                                
+                                // 監聽播放完成事件
+                                let current_previews_clone = current_previews.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        let mut previews = current_previews_clone.lock().await;
+                                        if let Some(sink) = previews.get_mut(&beatmapset_id) {
+                                            if sink.empty() {
+                                                info!("播放完成，移除 Sink");
+                                                previews.remove(&beatmapset_id);
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
                             Err(e) => error!("預覽播放失敗: {:?}", e),
                         }
                     }
@@ -2311,7 +2332,7 @@ impl SearchApp {
                 }
             });
         }
-        
+
         play_button_response.on_hover_text("預覽播放");
 
         // "以此搜尋" 按鈕
@@ -2612,16 +2633,22 @@ impl SearchApp {
                 let bar_width = radius * 0.3;
                 let bar_height = radius * 1.2;
                 ui.painter().rect_filled(
-                    egui::Rect::from_center_size(center + egui::vec2(-bar_width, 0.0), egui::vec2(bar_width, bar_height)),
+                    egui::Rect::from_center_size(
+                        center + egui::vec2(-bar_width, 0.0),
+                        egui::vec2(bar_width, bar_height),
+                    ),
                     0.0,
                     icon_color,
                 );
                 ui.painter().rect_filled(
-                    egui::Rect::from_center_size(center + egui::vec2(bar_width, 0.0), egui::vec2(bar_width, bar_height)),
+                    egui::Rect::from_center_size(
+                        center + egui::vec2(bar_width, 0.0),
+                        egui::vec2(bar_width, bar_height),
+                    ),
                     0.0,
                     icon_color,
                 );
-            },
+            }
             PlayStatus::Stopped => {
                 // 繪製播放圖標 (三角形)
                 let triangle_size = radius * 0.7;
@@ -2635,7 +2662,7 @@ impl SearchApp {
                     icon_color,
                     egui::Stroke::NONE,
                 ));
-            },
+            }
         }
 
         response
@@ -3061,6 +3088,7 @@ impl SearchApp {
         ));
     }
     //渲染頂部面板
+    //渲染頂部面板
     fn render_top_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -3129,25 +3157,25 @@ impl SearchApp {
                                 self.render_logged_in_user(ui);
 
                                 // 渲染正在播放按鈕
-                                let button =
+                                let now_playing_button = ui.add(
                                     egui::Button::new(egui::RichText::new("🎵").size(16.0))
                                         .min_size(egui::vec2(32.0, 32.0))
-                                        .frame(false);
-                                let response = ui.add(button);
-                                if response.clicked() {
+                                        .frame(false),
+                                );
+                                if now_playing_button.clicked() {
                                     ui.memory_mut(|mem| {
                                         mem.toggle_popup(egui::Id::new("now_playing_popup"))
                                     });
                                     self.should_detect_now_playing.store(true, Ordering::SeqCst);
                                 }
-                                if response.hovered() {
+                                if now_playing_button.hovered() {
                                     ui.painter().rect_stroke(
-                                        response.rect,
+                                        now_playing_button.rect,
                                         egui::Rounding::same(4.0),
                                         egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
                                     );
                                 }
-                                self.render_now_playing_popup(ui, &response);
+                                self.render_now_playing_popup(ui, &now_playing_button);
                             } else {
                                 self.render_guest_user(ui);
                             }
@@ -3317,6 +3345,21 @@ impl SearchApp {
                     if ui.button("+").clicked() {
                         let new_scale = (ui.ctx().pixels_per_point() + 0.1).min(3.0);
                         ui.ctx().set_pixels_per_point(new_scale);
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // 音量控制
+                ui.horizontal(|ui| {
+                    ui.label("音量:");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.global_volume, 0.01..=1.0)
+                        )
+                        .changed()
+                    {
+                        self.update_all_sinks_volume();
                     }
                 });
 
@@ -4614,6 +4657,18 @@ impl SearchApp {
                 .text_styles
                 .insert(egui::TextStyle::Body, new_text_style);
         }
+    }
+
+    fn update_all_sinks_volume(&self) {
+        let volume = self.global_volume;
+        let current_previews = self.current_previews.clone();
+
+        tokio::spawn(async move {
+            let previews = current_previews.lock().await;
+            for (_, sink) in previews.iter() {
+                sink.set_volume(volume);
+            }
+        });
     }
 
     fn display_error_message(&self, ui: &mut egui::Ui) {
