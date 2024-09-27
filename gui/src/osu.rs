@@ -2,8 +2,10 @@
 use std::sync::Arc;
 use std::path::Path;
 use std::fs;
-use std::io::copy;
+use std::io::{copy,Cursor};
 use std::fs::File;
+
+
 
 // 第三方庫導入
 use anyhow::Result;
@@ -15,6 +17,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{sync::mpsc::Sender, try_join,task};
+use tokio::sync::Mutex as TokioMutex;
+use rodio::{Decoder, Sink, OutputStreamHandle};
 
 
 // 本地模組導入
@@ -40,6 +44,7 @@ pub struct Beatmapset {
     pub title: String,
     pub creator: String,
     pub covers: Covers,
+    pub preview_url: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct TokenResponse {
@@ -78,6 +83,13 @@ pub enum OsuError {
     #[error("其他錯誤: {0}")]
     Other(String),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlayStatus {
+    Playing,
+    Stopped,
+}
+
 
 pub async fn get_beatmapsets(
     client: &Client,
@@ -438,4 +450,72 @@ pub fn delete_beatmap(download_directory: &Path, beatmapset_id: i32) -> std::io:
         error!("未找到與 beatmapset_id {} 相關的文件或資料夾", beatmapset_id);
         Err(std::io::Error::new(std::io::ErrorKind::NotFound, "未找到相關文件或資料夾"))
     }
+}
+pub async fn preview_beatmap(beatmapset_id: i32, stream_handle: &OutputStreamHandle) -> Result<Sink, Box<dyn std::error::Error + Send + Sync>> {
+    // 首先建立 reqwest Client
+    let client = Client::new();
+    
+    // 獲取 osu! API 的訪問令牌
+    let access_token = get_osu_token(&client, false).await?;
+
+    let url = format!("https://osu.ppy.sh/api/v2/beatmapsets/{}", beatmapset_id);
+    
+    // 發送請求獲取譜面集信息，包含授權
+    let response = client.get(&url)
+        .bearer_auth(&access_token)
+        .send()
+        .await?;
+
+    // 檢查響應狀態
+    if !response.status().is_success() {
+        return Err(format!("API 請求失敗: {}", response.status()).into());
+    }
+
+    let response_text = response.text().await?;
+
+    let beatmapset: Beatmapset = serde_json::from_str(&response_text)?;
+    
+    // 獲取預覽 URL
+    let preview_url = beatmapset.preview_url
+        .as_deref()
+        .ok_or("未找到預覽 URL")?;
+    
+    // 構建完整的預覽 URL
+    let full_preview_url = if preview_url.starts_with("http") {
+        preview_url.to_string()
+    } else {
+        format!("https:{}", preview_url)
+    };
+    
+    info!("正在預覽 beatmapset ID: {}, URL: {}", beatmapset_id, full_preview_url);
+    
+    // 創建緩存目錄
+    let cache_dir = dirs::home_dir()
+        .ok_or("無法獲取用戶主目錄")?
+        .join("AppData")
+        .join("Local")
+        .join("SongSearch");
+    fs::create_dir_all(&cache_dir)?;
+    
+    // 生成緩存文件名
+    let cache_file = cache_dir.join(format!("preview_{}.mp3", beatmapset_id));
+    
+    let audio_bytes = if cache_file.exists() {
+        info!("使用緩存的音頻文件: {:?}", cache_file);
+        fs::read(&cache_file)?
+    } else {
+        info!("下載音頻文件: {}", full_preview_url);
+        let audio_bytes = client.get(&full_preview_url).send().await?.bytes().await?;
+        fs::write(&cache_file, &audio_bytes)?;
+        info!("音頻文件已緩存: {:?}", cache_file);
+        audio_bytes.to_vec()
+    };
+    info!("音頻數據大小: {} 字節", audio_bytes.len());
+    
+    let sink = Sink::try_new(stream_handle)?;
+    let cursor = Cursor::new(audio_bytes);
+    let source = Decoder::new(cursor)?;
+    sink.append(source);
+    
+    Ok(sink)
 }

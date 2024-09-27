@@ -25,6 +25,7 @@ use egui::{
 };
 
 use log::{debug, error, info, LevelFilter};
+use parking_lot::Mutex as ParkingLotMutex;
 use reqwest::Client;
 use rspotify::{
     clients::{BaseClient, OAuthClient},
@@ -45,12 +46,13 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use parking_lot::Mutex as ParkingLotMutex;
+use rodio::{Sink, OutputStream, OutputStreamHandle};
 
 // 本地模組導入
 use crate::osu::{
     delete_beatmap, get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token,
-    load_osu_covers, parse_osu_url, print_beatmap_info_gui, Beatmapset,
+    load_osu_covers, parse_osu_url, preview_beatmap, print_beatmap_info_gui, Beatmapset,
+    PlayStatus,
 };
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
@@ -131,13 +133,18 @@ impl AuthManager {
     }
 
     pub fn reset(&self, platform: &AuthPlatform) {
-        self.status.lock().insert(platform.clone(), AuthStatus::NotStarted);
+        self.status
+            .lock()
+            .insert(platform.clone(), AuthStatus::NotStarted);
         self.error_logged.store(false, Ordering::Relaxed);
     }
 
     pub fn update_status(&self, platform: &AuthPlatform, new_status: AuthStatus) {
         let mut status = self.status.lock();
-        let old_status = status.get(platform).cloned().unwrap_or(AuthStatus::NotStarted);
+        let old_status = status
+            .get(platform)
+            .cloned()
+            .unwrap_or(AuthStatus::NotStarted);
         status.entry(platform.clone()).or_insert(new_status.clone());
 
         if let AuthStatus::Failed(ref error) = new_status {
@@ -148,7 +155,11 @@ impl AuthManager {
     }
 
     pub fn get_status(&self, platform: &AuthPlatform) -> AuthStatus {
-        self.status.lock().get(platform).cloned().unwrap_or(AuthStatus::NotStarted)
+        self.status
+            .lock()
+            .get(platform)
+            .cloned()
+            .unwrap_or(AuthStatus::NotStarted)
     }
 
     pub fn get_all_statuses(&self) -> HashMap<AuthPlatform, AuthStatus> {
@@ -165,12 +176,12 @@ struct SearchApp {
     auth_start_time: Option<Instant>,
     spotify_authorized: Arc<AtomicBool>,
     spotify_client: Arc<Mutex<Option<AuthCodeSpotify>>>,
-    
+
     // 使用者資訊
     spotify_user_avatar: Arc<Mutex<Option<egui::TextureHandle>>>,
     spotify_user_avatar_url: Arc<Mutex<Option<String>>>,
     spotify_user_name: Arc<Mutex<Option<String>>>,
-    
+
     // 搜索相關
     search_query: String,
     is_searching: Arc<AtomicBool>,
@@ -178,14 +189,14 @@ struct SearchApp {
     osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
     displayed_spotify_results: usize,
     displayed_osu_results: usize,
-    
+
     // 播放列表和曲目
     spotify_user_playlists: Arc<Mutex<Vec<SimplifiedPlaylist>>>,
     spotify_playlist_tracks: Arc<Mutex<Vec<FullTrack>>>,
     spotify_liked_tracks: Arc<Mutex<Vec<FullTrack>>>,
     selected_playlist: Option<SimplifiedPlaylist>,
     currently_playing: Arc<Mutex<Option<CurrentlyPlaying>>>,
-    
+
     // UI 狀態
     show_auth_progress: bool,
     show_side_menu: bool,
@@ -197,7 +208,8 @@ struct SearchApp {
     osu_scroll_to_top: bool,
     global_font_size: f32,
     search_bar_expanded: bool,
-    
+
+
     // 紋理和圖像
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
     cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
@@ -206,26 +218,26 @@ struct SearchApp {
     spotify_icon: Option<egui::TextureHandle>,
     texture_cache: Arc<RwLock<HashMap<String, Arc<TextureHandle>>>>,
     preloaded_icons: HashMap<String, egui::TextureHandle>,
-    
+
     // 網絡和客戶端
     client: Arc<tokio::sync::Mutex<Client>>,
     listener: Arc<TokioMutex<Option<TcpListener>>>,
-    
+
     // 錯誤處理
     err_msg: Arc<tokio::sync::Mutex<String>>,
     error_message: Arc<tokio::sync::Mutex<String>>,
     config_errors: Arc<Mutex<Vec<String>>>,
-    
+
     // 狀態管理
     initialized: bool,
     need_reload_avatar: Arc<AtomicBool>,
     need_repaint: Arc<AtomicBool>,
     last_update: Arc<Mutex<Option<Instant>>>,
-    
+
     // 異步通信
     receiver: Option<tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>>,
     sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
-    
+
     // UI 元素狀態
     spotify_search_button_states: HashMap<usize, f32>,
     spotify_open_button_states: HashMap<usize, f32>,
@@ -234,7 +246,8 @@ struct SearchApp {
     liked_button_states: HashMap<usize, f32>,
     osu_download_button_states: HashMap<usize, f32>,
     side_menu_animation: HashMap<egui::Id, f32>,
-    
+    osu_play_button_states: HashMap<usize, f32>,
+
     // 其他功能
     debug_mode: bool,
     ctx: egui::Context,
@@ -242,17 +255,17 @@ struct SearchApp {
     should_detect_now_playing: Arc<AtomicBool>,
     spotify_track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
     osu_download_statuses: HashMap<usize, DownloadStatus>,
-    
+
     // 快取
     liked_songs_cache: Arc<Mutex<Option<PlaylistCache>>>,
     cache_ttl: Duration,
     texture_load_queue: Arc<Mutex<BinaryHeap<Reverse<(usize, String)>>>>,
-    
+
     // 更新檢查
     update_check_result: Arc<Mutex<Option<bool>>>,
     update_check_sender: Sender<bool>,
     update_check_receiver: Receiver<bool>,
-    
+
     // 下載相關
     download_directory: PathBuf,
     status_sender: tokio::sync::mpsc::Sender<(i32, DownloadStatus)>,
@@ -261,6 +274,10 @@ struct SearchApp {
     download_queue_receiver: Arc<Mutex<Option<mpsc::Receiver<i32>>>>,
     download_semaphore: Arc<Semaphore>,
     current_downloads: Arc<AtomicUsize>,
+
+    // 預覽播放
+    audio_output: Option<(OutputStream, OutputStreamHandle)>,
+    current_previews: Arc<TokioMutex<HashMap<i32, Sink>>>,
 }
 
 impl eframe::App for SearchApp {
@@ -326,20 +343,25 @@ impl SearchApp {
 
     async fn process_texture_updates(
         mut receiver: tokio::sync::mpsc::Receiver<(usize, Arc<TextureHandle>, (f32, f32))>,
-        cover_textures: std::sync::Weak<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
+        cover_textures: std::sync::Weak<
+            RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>,
+        >,
         need_repaint: std::sync::Weak<AtomicBool>,
     ) {
         while let Some((id, texture, dimensions)) = receiver.recv().await {
-            if let (Some(cover_textures), Some(need_repaint)) = (cover_textures.upgrade(), need_repaint.upgrade()) {
+            if let (Some(cover_textures), Some(need_repaint)) =
+                (cover_textures.upgrade(), need_repaint.upgrade())
+            {
                 let mut textures = cover_textures.write().await;
                 textures.insert(id, Some((texture, dimensions)));
-                
+
                 // 實現緩存淘汰策略
-                if textures.len() > 1000 { // 設置最大容量限制
+                if textures.len() > 1000 {
+                    // 設置最大容量限制
                     let oldest_id = *textures.keys().next().unwrap();
                     textures.remove(&oldest_id);
                 }
-                
+
                 need_repaint.store(true, Ordering::SeqCst);
             } else {
                 break;
@@ -356,16 +378,28 @@ impl SearchApp {
         let need_repaint = Arc::downgrade(&self.need_repaint);
 
         tokio::spawn(async move {
-            if let (Some(access_token), Some(error_message), Some(client), Some(is_searching), Some(need_repaint)) = 
-                (access_token.upgrade(), error_message.upgrade(), client.upgrade(), is_searching.upgrade(), need_repaint.upgrade()) {
+            if let (
+                Some(access_token),
+                Some(error_message),
+                Some(client),
+                Some(is_searching),
+                Some(need_repaint),
+            ) = (
+                access_token.upgrade(),
+                error_message.upgrade(),
+                client.upgrade(),
+                is_searching.upgrade(),
+                need_repaint.upgrade(),
+            ) {
                 Self::fetch_access_token(
                     access_token,
                     error_message,
                     client,
                     debug_mode,
                     is_searching,
-                    need_repaint
-                ).await;
+                    need_repaint,
+                )
+                .await;
             }
         });
     }
@@ -435,7 +469,12 @@ impl SearchApp {
 
     fn start_load_spotify_avatar(&mut self, ctx: &egui::Context) {
         info!("觸發加載 Spotify 用戶頭像");
-        let url = self.spotify_user_avatar_url.lock().unwrap().clone().unwrap();
+        let url = self
+            .spotify_user_avatar_url
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
         let ctx = ctx.clone();
         let need_reload_avatar = Arc::downgrade(&self.need_reload_avatar);
         let spotify_user_avatar = Arc::downgrade(&self.spotify_user_avatar);
@@ -445,8 +484,11 @@ impl SearchApp {
         }
 
         self.avatar_load_handle = Some(tokio::spawn(async move {
-            if let (Some(need_reload_avatar), Some(spotify_user_avatar)) = (need_reload_avatar.upgrade(), spotify_user_avatar.upgrade()) {
-                Self::load_and_handle_avatar(url, ctx, need_reload_avatar, spotify_user_avatar).await;
+            if let (Some(need_reload_avatar), Some(spotify_user_avatar)) =
+                (need_reload_avatar.upgrade(), spotify_user_avatar.upgrade())
+            {
+                Self::load_and_handle_avatar(url, ctx, need_reload_avatar, spotify_user_avatar)
+                    .await;
             }
         }));
     }
@@ -458,7 +500,12 @@ impl SearchApp {
         spotify_user_avatar: Arc<Mutex<Option<TextureHandle>>>,
     ) {
         match Self::load_spotify_user_avatar(&url, &ctx).await {
-            Ok(texture) => Self::handle_avatar_load_success(texture, spotify_user_avatar, need_reload_avatar, &ctx),
+            Ok(texture) => Self::handle_avatar_load_success(
+                texture,
+                spotify_user_avatar,
+                need_reload_avatar,
+                &ctx,
+            ),
             Err(e) => error!("加載 Spotify 用戶頭像失敗: {:?}", e),
         }
     }
@@ -477,7 +524,9 @@ impl SearchApp {
 
     fn check_auth_status(&mut self) {
         if !self.auth_in_progress.load(Ordering::SeqCst) {
-            if let AuthStatus::Completed | AuthStatus::Failed(_) = self.auth_manager.get_status(&AuthPlatform::Spotify) {
+            if let AuthStatus::Completed | AuthStatus::Failed(_) =
+                self.auth_manager.get_status(&AuthPlatform::Spotify)
+            {
                 self.show_auth_progress = false;
                 self.auth_in_progress.store(false, Ordering::SeqCst);
             }
@@ -500,7 +549,12 @@ impl SearchApp {
         }
     }
 
-    fn show_config_error_window(&self, ctx: &egui::Context, errors: &[String], should_close_error: &mut bool) {
+    fn show_config_error_window(
+        &self,
+        ctx: &egui::Context,
+        errors: &[String],
+        should_close_error: &mut bool,
+    ) {
         egui::Window::new("")
             .collapsible(false)
             .resizable(false)
@@ -544,7 +598,11 @@ impl SearchApp {
     }
 
     fn update_ui(&mut self, ctx: &egui::Context) {
-        if self.need_repaint.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        if self
+            .need_repaint
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             ctx.request_repaint();
         }
 
@@ -566,7 +624,9 @@ impl SearchApp {
     }
 
     fn update_current_playing(&self, ctx: &egui::Context) {
-        if self.should_update_current_playing() && self.should_detect_now_playing.load(Ordering::SeqCst) {
+        if self.should_update_current_playing()
+            && self.should_detect_now_playing.load(Ordering::SeqCst)
+        {
             let spotify_client = Arc::downgrade(&self.spotify_client);
             let currently_playing = Arc::downgrade(&self.currently_playing);
             let debug_mode = self.debug_mode;
@@ -575,8 +635,17 @@ impl SearchApp {
             let should_detect_now_playing = Arc::downgrade(&self.should_detect_now_playing);
 
             tokio::spawn(async move {
-                if let (Some(spotify_client), Some(currently_playing), Some(spotify_authorized), Some(should_detect_now_playing)) = 
-                    (spotify_client.upgrade(), currently_playing.upgrade(), spotify_authorized.upgrade(), should_detect_now_playing.upgrade()) {
+                if let (
+                    Some(spotify_client),
+                    Some(currently_playing),
+                    Some(spotify_authorized),
+                    Some(should_detect_now_playing),
+                ) = (
+                    spotify_client.upgrade(),
+                    currently_playing.upgrade(),
+                    spotify_authorized.upgrade(),
+                    should_detect_now_playing.upgrade(),
+                ) {
                     Self::update_and_handle_current_playing(
                         spotify_client,
                         currently_playing,
@@ -584,7 +653,8 @@ impl SearchApp {
                         ctx,
                         spotify_authorized,
                         should_detect_now_playing,
-                    ).await;
+                    )
+                    .await;
                 }
             });
         }
@@ -598,9 +668,14 @@ impl SearchApp {
         spotify_authorized: Arc<AtomicBool>,
         should_detect_now_playing: Arc<AtomicBool>,
     ) {
-        match update_currently_playing_wrapper(spotify_client, currently_playing, debug_mode).await {
+        match update_currently_playing_wrapper(spotify_client, currently_playing, debug_mode).await
+        {
             Ok(_) => {}
-            Err(e) => Self::handle_current_playing_update_error(e, spotify_authorized, should_detect_now_playing),
+            Err(e) => Self::handle_current_playing_update_error(
+                e,
+                spotify_authorized,
+                should_detect_now_playing,
+            ),
         }
 
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -641,7 +716,10 @@ impl SearchApp {
         status_updates
     }
 
-    fn process_status_updates(&mut self, status_updates: &[(i32, DownloadStatus)]) -> Vec<Beatmapset> {
+    fn process_status_updates(
+        &mut self,
+        status_updates: &[(i32, DownloadStatus)],
+    ) -> Vec<Beatmapset> {
         let mut completed_downloads = Vec::new();
         if let Ok(mut guard) = self.osu_search_results.try_lock() {
             for &(beatmapset_id, status) in status_updates {
@@ -673,10 +751,12 @@ impl SearchApp {
     }
 
     fn start_waiting_download(&mut self, waiting_index: usize, waiting_beatmapset: i32) {
-        self.osu_download_statuses.insert(waiting_index, DownloadStatus::Downloading);
+        self.osu_download_statuses
+            .insert(waiting_index, DownloadStatus::Downloading);
         if let Err(e) = self.download_queue_sender.try_send(waiting_beatmapset) {
             error!("無法將等待中的圖譜加入下載隊列: {:?}", e);
-            self.osu_download_statuses.insert(waiting_index, DownloadStatus::Waiting);
+            self.osu_download_statuses
+                .insert(waiting_index, DownloadStatus::Waiting);
         }
     }
 
@@ -695,7 +775,6 @@ impl SearchApp {
             let mut textures = futures::executor::block_on(self.cover_textures.write());
             textures.clear();
         });
-
     }
 }
 
@@ -727,7 +806,6 @@ impl SearchApp {
 // 4. 除錯模式（可在任何時候啟用）
 //    - 記錄詳細資訊
 //    - 顯示額外的除錯資訊
-
 
 impl SearchApp {
     fn new(
@@ -779,6 +857,8 @@ impl SearchApp {
         let (status_sender, status_receiver) = tokio::sync::mpsc::channel(100);
         let (download_queue_sender, download_queue_receiver) = mpsc::channel(100);
 
+        let audio_output = OutputStream::try_default().ok();
+
         tokio::spawn(async move {
             let client_guard = client_for_refresh.lock().await;
             match check_and_refresh_token(&client_guard, &config).await {
@@ -820,7 +900,7 @@ impl SearchApp {
                             let spotify_user_avatar_rwlock = Arc::new(RwLock::new(None));
                             let ctx_clone3 = ctx_clone2.clone();
                             let need_reload_avatar_clone2 = need_reload_avatar_clone.clone();
-                            
+
                             // 使用 tokio::task::spawn_blocking 來處理非 Send 的 future
                             tokio::task::spawn_blocking(move || {
                                 tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -881,14 +961,16 @@ impl SearchApp {
 
                 if let Some(Reverse((_, url))) = item {
                     if !texture_cache_clone.read().await.contains_key(&url) {
-                        match Self::load_texture_async(&ctx_clone, &url, Duration::from_secs(30)).await {
+                        match Self::load_texture_async(&ctx_clone, &url, Duration::from_secs(30))
+                            .await
+                        {
                             Ok(texture) => {
                                 texture_cache_clone
                                     .write()
                                     .await
                                     .insert(url.clone(), Arc::new(texture));
                                 need_repaint_clone.store(true, Ordering::SeqCst);
-                            },
+                            }
                             Err(e) => {
                                 error!("載入紋理失敗: {:?}", e);
                             }
@@ -908,12 +990,12 @@ impl SearchApp {
             auth_start_time: None,
             spotify_authorized,
             spotify_client,
-            
+
             // 使用者資訊
             spotify_user_avatar,
             spotify_user_avatar_url,
             spotify_user_name,
-            
+
             // 搜索相關
             search_query: String::new(),
             is_searching: Arc::new(AtomicBool::new(false)),
@@ -921,14 +1003,14 @@ impl SearchApp {
             osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             displayed_spotify_results: 10,
             displayed_osu_results: 10,
-            
+
             // 播放列表和曲目
             spotify_user_playlists: Arc::new(Mutex::new(Vec::new())),
             spotify_playlist_tracks: Arc::new(Mutex::new(Vec::new())),
             spotify_liked_tracks: Arc::new(Mutex::new(Vec::new())),
             selected_playlist: None,
             currently_playing: Arc::new(Mutex::new(None)),
-            
+
             // UI 狀態
             show_auth_progress: false,
             show_side_menu: false,
@@ -940,7 +1022,7 @@ impl SearchApp {
             osu_scroll_to_top: false,
             global_font_size: 16.0,
             search_bar_expanded: false,
-            
+
             // 紋理和圖像
             avatar_load_handle: None,
             cover_textures,
@@ -949,26 +1031,26 @@ impl SearchApp {
             spotify_icon,
             texture_cache,
             preloaded_icons,
-            
+
             // 網絡和客戶端
             client,
             listener: Arc::new(TokioMutex::new(None)),
-            
+
             // 錯誤處理
             err_msg: Arc::new(tokio::sync::Mutex::new(String::new())),
             error_message: Arc::new(tokio::sync::Mutex::new(String::new())),
             config_errors,
-            
+
             // 狀態管理
             initialized: false,
             need_reload_avatar,
             need_repaint,
             last_update: Arc::new(Mutex::new(None)),
-            
+
             // 異步通信
             receiver: Some(receiver),
             sender,
-            
+
             // UI 元素狀態
             spotify_search_button_states: HashMap::new(),
             spotify_open_button_states: HashMap::new(),
@@ -977,7 +1059,8 @@ impl SearchApp {
             liked_button_states: HashMap::new(),
             osu_download_button_states: HashMap::new(),
             side_menu_animation: HashMap::new(),
-            
+            osu_play_button_states: HashMap::new(),
+
             // 其他功能
             debug_mode,
             ctx,
@@ -985,17 +1068,17 @@ impl SearchApp {
             should_detect_now_playing: Arc::new(AtomicBool::new(false)),
             spotify_track_liked_status: Arc::new(Mutex::new(HashMap::new())),
             osu_download_statuses: HashMap::new(),
-            
+
             // 快取
             liked_songs_cache: Arc::new(Mutex::new(None)),
             cache_ttl: Duration::from_secs(300), // 5 分鐘的緩存有效期
             texture_load_queue,
-            
+
             // 更新檢查
             update_check_result: Arc::new(Mutex::new(None)),
             update_check_sender,
             update_check_receiver,
-            
+
             // 下載相關
             download_directory,
             status_sender,
@@ -1004,6 +1087,10 @@ impl SearchApp {
             download_queue_receiver: Arc::new(Mutex::new(Some(download_queue_receiver))),
             download_semaphore: Arc::new(Semaphore::new(3)), // 允許3個同時下載
             current_downloads: Arc::new(AtomicUsize::new(0)),
+
+            // 音頻播放
+            audio_output,
+            current_previews: Arc::new(TokioMutex::new(HashMap::new())),
         };
 
         app.load_default_avatar();
@@ -1183,7 +1270,11 @@ impl SearchApp {
         });
     }
 
-    async fn load_texture_async(ctx: &egui::Context, url: &str, timeout: Duration) -> Result<TextureHandle, anyhow::Error> {
+    async fn load_texture_async(
+        ctx: &egui::Context,
+        url: &str,
+        timeout: Duration,
+    ) -> Result<TextureHandle, anyhow::Error> {
         let client = reqwest::Client::new();
         let bytes = tokio::time::timeout(timeout, client.get(url).send())
             .await??
@@ -1195,13 +1286,13 @@ impl SearchApp {
         let image_buffer = image.to_rgba8();
         let pixels = image_buffer.as_flat_samples();
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-        
+
         let texture_options = egui::TextureOptions {
             magnification: egui::TextureFilter::Linear,
             minification: egui::TextureFilter::Linear,
             wrap_mode: TextureWrapMode::default(),
         };
-        
+
         Ok(ctx.load_texture(url, color_image, texture_options))
     }
 
@@ -1578,31 +1669,29 @@ impl SearchApp {
             result
         })
     }
-    
+
     //顯示Spotify搜索結果
     fn display_spotify_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        
-            // 獲取排序後的搜索結果
-            let sorted_results = self.get_sorted_spotify_results();
-            let total_results = sorted_results.len();
-            // 計算實際顯示的結果數量
-            let displayed_results = self.displayed_spotify_results.min(total_results);
+        // 獲取排序後的搜索結果
+        let sorted_results = self.get_sorted_spotify_results();
+        let total_results = sorted_results.len();
+        // 計算實際顯示的結果數量
+        let displayed_results = self.displayed_spotify_results.min(total_results);
 
-            // 顯示 Spotify 搜索結果的標題和統計信息
-            self.display_spotify_header(ui, window_size, total_results, displayed_results);
+        // 顯示 Spotify 搜索結果的標題和統計信息
+        self.display_spotify_header(ui, window_size, total_results, displayed_results);
 
-            if !sorted_results.is_empty() {
-                // 遍歷並顯示每個搜索結果
-                for (index, track) in sorted_results.iter().take(displayed_results).enumerate() {
-                    self.display_spotify_track(ui, track, index);
-                }
-                // 顯示底部的控制元素（如"顯示更多"按鈕）
-                self.display_spotify_footer(ui, displayed_results, total_results);
-            } else {
-                // 如果沒有搜索結果，顯示提示信息
-                ui.label("沒有搜索結果");
+        if !sorted_results.is_empty() {
+            // 遍歷並顯示每個搜索結果
+            for (index, track) in sorted_results.iter().take(displayed_results).enumerate() {
+                self.display_spotify_track(ui, track, index);
             }
-        ;
+            // 顯示底部的控制元素（如"顯示更多"按鈕）
+            self.display_spotify_footer(ui, displayed_results, total_results);
+        } else {
+            // 如果沒有搜索結果，顯示提示信息
+            ui.label("沒有搜索結果");
+        };
     }
 
     fn get_sorted_spotify_results(&self) -> Vec<Track> {
@@ -1616,31 +1705,63 @@ impl SearchApp {
             .unwrap_or_default()
     }
 
-    fn display_spotify_header(&self, ui: &mut egui::Ui, window_size: egui::Vec2, total_results: usize, displayed_results: usize) {
+    fn display_spotify_header(
+        &self,
+        ui: &mut egui::Ui,
+        window_size: egui::Vec2,
+        total_results: usize,
+        displayed_results: usize,
+    ) {
         ui.horizontal(|ui| {
             if window_size.x >= 1000.0 {
-                ui.heading(egui::RichText::new("Spotify Results").size(self.global_font_size * 1.2));
+                ui.heading(
+                    egui::RichText::new("Spotify Results").size(self.global_font_size * 1.2),
+                );
                 ui.add_space(10.0);
             }
-            ui.label(egui::RichText::new(format!("總結果數: {}", total_results)).size(self.global_font_size));
+            ui.label(
+                egui::RichText::new(format!("總結果數: {}", total_results))
+                    .size(self.global_font_size),
+            );
             ui.add_space(10.0);
-            ui.label(egui::RichText::new(format!("當前顯示結果數: {}", displayed_results)).size(self.global_font_size));
+            ui.label(
+                egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
+                    .size(self.global_font_size),
+            );
         });
         ui.add_space(10.0);
     }
 
-    fn display_spotify_footer(&mut self, ui: &mut egui::Ui, displayed_results: usize, total_results: usize) {
+    fn display_spotify_footer(
+        &mut self,
+        ui: &mut egui::Ui,
+        displayed_results: usize,
+        total_results: usize,
+    ) {
         ui.add_space(30.0);
         ui.horizontal(|ui| {
             if displayed_results < total_results {
-                if ui.add_sized([150.0, 40.0], egui::Button::new(egui::RichText::new("顯示更多").size(18.0))).clicked() {
-                    self.displayed_spotify_results = (self.displayed_spotify_results + 10).min(total_results);
+                if ui
+                    .add_sized(
+                        [150.0, 40.0],
+                        egui::Button::new(egui::RichText::new("顯示更多").size(18.0)),
+                    )
+                    .clicked()
+                {
+                    self.displayed_spotify_results =
+                        (self.displayed_spotify_results + 10).min(total_results);
                 }
             } else {
                 ui.label(egui::RichText::new("已顯示所有結果").size(18.0));
             }
             ui.add_space(20.0);
-            if ui.add_sized([150.0, 40.0], egui::Button::new(egui::RichText::new("回到頂部").size(18.0))).clicked() {
+            if ui
+                .add_sized(
+                    [150.0, 40.0],
+                    egui::Button::new(egui::RichText::new("回到頂部").size(18.0)),
+                )
+                .clicked()
+            {
                 self.spotify_scroll_to_top = true;
                 ui.ctx().request_repaint();
             }
@@ -1649,7 +1770,11 @@ impl SearchApp {
     }
 
     fn display_spotify_track(&mut self, ui: &mut egui::Ui, track: &Track, index: usize) {
-        let response = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(ui.available_width(), 100.0)));
+        let response = ui.add(
+            egui::Button::new("")
+                .frame(false)
+                .min_size(egui::vec2(ui.available_width(), 100.0)),
+        );
 
         ui.allocate_ui_at_rect(response.rect, |ui| {
             ui.horizontal(|ui| {
@@ -1671,7 +1796,10 @@ impl SearchApp {
         if let Some(cover_url) = track.album.images.first().map(|img| &img.url) {
             if let Ok(cache) = self.texture_cache.try_read() {
                 if let Some(texture) = cache.get(cover_url) {
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(texture.id(), egui::Vec2::new(100.0, 100.0))));
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                        texture.id(),
+                        egui::Vec2::new(100.0, 100.0),
+                    )));
                 } else {
                     self.queue_texture_load(track.index, cover_url);
                     ui.add_sized([100.0, 100.0], egui::Spinner::new().size(32.0));
@@ -1692,13 +1820,36 @@ impl SearchApp {
 
     fn display_track_info(&self, ui: &mut egui::Ui, track: &Track) {
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new(&track.name).font(egui::FontId::proportional(self.global_font_size * 1.0)).strong());
-            ui.label(egui::RichText::new(&track.artists.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")).font(egui::FontId::proportional(self.global_font_size * 0.9)));
-            ui.label(egui::RichText::new(&track.album.name).font(egui::FontId::proportional(self.global_font_size * 0.8)));
+            ui.label(
+                egui::RichText::new(&track.name)
+                    .font(egui::FontId::proportional(self.global_font_size * 1.0))
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    &track
+                        .artists
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+                .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+            );
+            ui.label(
+                egui::RichText::new(&track.album.name)
+                    .font(egui::FontId::proportional(self.global_font_size * 0.8)),
+            );
         });
     }
 
-    fn display_track_buttons(&mut self, ui: &mut egui::Ui, track: &Track, index: usize, response: &egui::Response) {
+    fn display_track_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        track: &Track,
+        index: usize,
+        response: &egui::Response,
+    ) {
         let button_size = egui::vec2(30.0, 30.0);
         let spacing = 5.0;
         let total_width = 3.0 * button_size.x + 2.0 * spacing;
@@ -1706,27 +1857,72 @@ impl SearchApp {
         let start_y = response.rect.bottom() - button_size.y - 5.0;
 
         self.display_search_button(ui, track, index, start_x, start_y, button_size);
-        self.display_open_button(ui, track, index, start_x + button_size.x + spacing, start_y, button_size);
-        self.display_like_button(ui, track, index, start_x + 2.0 * (button_size.x + spacing), start_y, button_size);
+        self.display_open_button(
+            ui,
+            track,
+            index,
+            start_x + button_size.x + spacing,
+            start_y,
+            button_size,
+        );
+        self.display_like_button(
+            ui,
+            track,
+            index,
+            start_x + 2.0 * (button_size.x + spacing),
+            start_y,
+            button_size,
+        );
     }
 
-    fn display_search_button(&mut self, ui: &mut egui::Ui, track: &Track, index: usize, x: f32, y: f32, size: egui::Vec2) {
+    fn display_search_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        track: &Track,
+        index: usize,
+        x: f32,
+        y: f32,
+        size: egui::Vec2,
+    ) {
         let search_button_rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
-        let search_button_response = self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
+        let search_button_response =
+            self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
 
         if search_button_response.clicked() {
-            self.search_query = track.external_urls.get("spotify")
+            self.search_query = track
+                .external_urls
+                .get("spotify")
                 .cloned()
-                .unwrap_or_else(|| format!("{} {}", track.name, track.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(" ")));
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} {}",
+                        track.name,
+                        track
+                            .artists
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                });
             self.perform_search(ui.ctx().clone());
         }
 
         search_button_response.on_hover_text("以此搜尋");
     }
 
-    fn display_open_button(&mut self, ui: &mut egui::Ui, track: &Track, index: usize, x: f32, y: f32, size: egui::Vec2) {
+    fn display_open_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        track: &Track,
+        index: usize,
+        x: f32,
+        y: f32,
+        size: egui::Vec2,
+    ) {
         let open_button_rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
-        let open_button_response = self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
+        let open_button_response =
+            self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
 
         if open_button_response.clicked() {
             if let Some(url) = track.external_urls.get("spotify") {
@@ -1739,13 +1935,28 @@ impl SearchApp {
         open_button_response.on_hover_text("打開");
     }
 
-    fn display_like_button(&mut self, ui: &mut egui::Ui, track: &Track, index: usize, x: f32, y: f32, size: egui::Vec2) {
-        if self.spotify_authorized.load(Ordering::SeqCst) && self.spotify_client.lock().unwrap().is_some() {
-            let track_id = track.external_urls.get("spotify").and_then(|url| url.split('/').last()).unwrap_or("");
+    fn display_like_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        track: &Track,
+        index: usize,
+        x: f32,
+        y: f32,
+        size: egui::Vec2,
+    ) {
+        if self.spotify_authorized.load(Ordering::SeqCst)
+            && self.spotify_client.lock().unwrap().is_some()
+        {
+            let track_id = track
+                .external_urls
+                .get("spotify")
+                .and_then(|url| url.split('/').last())
+                .unwrap_or("");
             let is_liked = track.is_liked.unwrap_or(false);
 
             let like_button_rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
-            let like_button_response = self.draw_liked_button(ui, index, like_button_rect, is_liked);
+            let like_button_response =
+                self.draw_liked_button(ui, index, like_button_rect, is_liked);
 
             if like_button_response.clicked() {
                 self.toggle_track_like_status(track_id, is_liked, index, ui.ctx().clone());
@@ -1755,7 +1966,13 @@ impl SearchApp {
         }
     }
 
-    fn toggle_track_like_status(&self, track_id: &str, is_liked: bool, index: usize, ctx: egui::Context) {
+    fn toggle_track_like_status(
+        &self,
+        track_id: &str,
+        is_liked: bool,
+        index: usize,
+        ctx: egui::Context,
+    ) {
         let track_id = track_id.to_string();
         let spotify_client = self.spotify_client.clone();
         let search_results = self.search_results.clone();
@@ -1794,15 +2011,21 @@ impl SearchApp {
     fn create_track_context_menu(&self, ui: &mut egui::Ui, track: &Track) {
         self.create_context_menu(ui, |add_button| {
             if let Some(url) = track.external_urls.get("spotify") {
-                add_button("複製連結", Box::new(move || {
-                    let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
-                    ctx.set_contents(url.clone()).unwrap();
-                }));
-                add_button("開啟", Box::new(move || {
-                    if let Err(e) = open_spotify_url(&url) {
-                        log::error!("無法開啟 URL: {}", e);
-                    }
-                }));
+                add_button(
+                    "複製連結",
+                    Box::new(move || {
+                        let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
+                        ctx.set_contents(url.clone()).unwrap();
+                    }),
+                );
+                add_button(
+                    "開啟",
+                    Box::new(move || {
+                        if let Err(e) = open_spotify_url(&url) {
+                            log::error!("無法開啟 URL: {}", e);
+                        }
+                    }),
+                );
             }
         });
     }
@@ -1829,7 +2052,8 @@ impl SearchApp {
                 }
             } else {
                 // 遍歷並顯示每個搜索結果
-                for (index, beatmapset) in sorted_results.iter().take(displayed_results).enumerate() {
+                for (index, beatmapset) in sorted_results.iter().take(displayed_results).enumerate()
+                {
                     self.display_beatmapset(ui, beatmapset, index);
                 }
                 // 顯示底部的控制元素（如"顯示更多"按鈕）
@@ -1842,7 +2066,13 @@ impl SearchApp {
     }
 
     //顯示osu搜索結果的標題和統計信息
-    fn display_osu_header(&self, ui: &mut egui::Ui, window_size: egui::Vec2, total_results: usize, displayed_results: usize) {
+    fn display_osu_header(
+        &self,
+        ui: &mut egui::Ui,
+        window_size: egui::Vec2,
+        total_results: usize,
+        displayed_results: usize,
+    ) {
         ui.horizontal(|ui| {
             if window_size.x >= 1000.0 {
                 ui.heading(egui::RichText::new("Osu Results").size(self.global_font_size * 1.2));
@@ -1863,7 +2093,12 @@ impl SearchApp {
     }
 
     //顯示osu搜索結果的底部控制元素
-    fn display_osu_footer(&mut self, ui: &mut egui::Ui, displayed_results: usize, total_results: usize) {
+    fn display_osu_footer(
+        &mut self,
+        ui: &mut egui::Ui,
+        displayed_results: usize,
+        total_results: usize,
+    ) {
         ui.add_space(30.0);
         ui.horizontal(|ui| {
             if displayed_results < total_results {
@@ -2011,18 +2246,79 @@ impl SearchApp {
     }
 
     //顯示osu譜面集按鈕
-    fn display_beatmapset_buttons(&mut self, ui: &mut egui::Ui, beatmapset: &Beatmapset, index: usize, rect: egui::Rect) {
+    fn display_beatmapset_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        beatmapset: &Beatmapset,
+        index: usize,
+        rect: egui::Rect,
+    ) {
         let button_size = egui::vec2(30.0, 30.0);
         let spacing = 5.0;
-        let total_width = 3.0 * button_size.x + 2.0 * spacing;
+        let total_width = 4.0 * button_size.x + 3.0 * spacing;
 
         // 計算按鈕的起始位置
         let start_x = rect.right() - total_width - 5.0;
         let start_y = rect.bottom() - button_size.y - 5.0;
 
+        // "播放" 按鈕
+        let play_button_rect = egui::Rect::from_min_size(egui::pos2(start_x, start_y), button_size);
+        let play_status = if let Ok(previews) = self.current_previews.try_lock() {
+            if let Some(sink) = previews.get(&beatmapset.id) {
+                if sink.is_paused() {
+                    PlayStatus::Stopped
+                } else {
+                    PlayStatus::Playing
+                }
+            } else {
+                PlayStatus::Stopped
+            }
+        } else {
+            PlayStatus::Stopped  // 如果無法獲得鎖，假設為停止狀態
+        };
+        let play_button_response = self.draw_osu_play_button(ui, index, play_button_rect, play_status);
+        
+        if play_button_response.clicked() {
+            let beatmapset_id = beatmapset.id;
+            let current_previews = self.current_previews.clone();
+            let stream_handle = self.audio_output.as_ref().map(|(_, handle)| handle.clone());
+        
+            tokio::spawn(async move {
+                if let Some(stream_handle) = stream_handle {
+                    let mut previews = current_previews.lock().await;
+                    if let Some(sink) = previews.get_mut(&beatmapset_id) {
+                        if sink.is_paused() {
+                            info!("恢復播放 beatmapset ID: {}", beatmapset_id);
+                            sink.play();
+                        } else {
+                            info!("停止播放 beatmapset ID: {}", beatmapset_id);
+                            sink.stop();
+                            previews.remove(&beatmapset_id);
+                        }
+                    } else {
+                        info!("開始預覽播放 beatmapset ID: {}", beatmapset_id);
+                        match preview_beatmap(beatmapset_id, &stream_handle).await {
+                            Ok(new_sink) => {
+                                info!("新的 Sink 已創建，開始播放");
+                                new_sink.play();
+                                previews.insert(beatmapset_id, new_sink);
+                            },
+                            Err(e) => error!("預覽播放失敗: {:?}", e),
+                        }
+                    }
+                } else {
+                    error!("無法獲取音頻輸出流句柄");
+                }
+            });
+        }
+        
+        play_button_response.on_hover_text("預覽播放");
+
         // "以此搜尋" 按鈕
-        let search_button_rect =
-            egui::Rect::from_min_size(egui::pos2(start_x, start_y), button_size);
+        let search_button_rect = egui::Rect::from_min_size(
+            egui::pos2(start_x + button_size.x + spacing, start_y),
+            button_size,
+        );
         let search_button_response =
             self.draw_search_button(ui, index, search_button_rect, ButtonType::Osu);
 
@@ -2037,7 +2333,7 @@ impl SearchApp {
 
         // "下載" 按鈕
         let download_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x + button_size.x + spacing, start_y),
+            egui::pos2(start_x + 2.0 * (button_size.x + spacing), start_y),
             button_size,
         );
 
@@ -2055,7 +2351,11 @@ impl SearchApp {
         let download_button_response =
             self.draw_download_button(ui, index, download_button_rect, download_status);
         if download_button_response.clicked() {
-            self.handle_download_button_click(index, beatmapset.id.try_into().unwrap(), download_status);
+            self.handle_download_button_click(
+                index,
+                beatmapset.id.try_into().unwrap(),
+                download_status,
+            );
         }
 
         download_button_response.on_hover_text(match download_status {
@@ -2067,7 +2367,7 @@ impl SearchApp {
 
         // "打開" 按鈕
         let open_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x + 2.0 * (button_size.x + spacing), start_y),
+            egui::pos2(start_x + 3.0 * (button_size.x + spacing), start_y),
             button_size,
         );
         let open_button_response =
@@ -2084,7 +2384,12 @@ impl SearchApp {
     }
 
     //處理下載按鈕點擊
-    fn handle_download_button_click(&mut self, index: usize, beatmapset_id: i32, download_status: DownloadStatus) {
+    fn handle_download_button_click(
+        &mut self,
+        index: usize,
+        beatmapset_id: i32,
+        download_status: DownloadStatus,
+    ) {
         match download_status {
             DownloadStatus::Completed => {
                 info!("嘗試刪除圖譜 {}", beatmapset_id);
@@ -2151,7 +2456,10 @@ impl SearchApp {
                 let current_downloads = current_downloads.clone();
 
                 current_downloads.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = status_sender.send((beatmapset_id, DownloadStatus::Downloading)).await {
+                if let Err(e) = status_sender
+                    .send((beatmapset_id, DownloadStatus::Downloading))
+                    .await
+                {
                     error!("無法發送下載狀態: {:?}", e);
                 }
 
@@ -2165,30 +2473,42 @@ impl SearchApp {
                                 let beatmapset_id = beatmapset_id;
                                 let status_sender = status_sender.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = status_sender.send((beatmapset_id, status)).await {
+                                    if let Err(e) =
+                                        status_sender.send((beatmapset_id, status)).await
+                                    {
                                         error!("無法發送下載狀態更新: {:?}", e);
                                     }
                                 });
                             }
-                        })
-                    ).await;
+                        }),
+                    )
+                    .await;
 
                     match download_result {
                         Ok(Ok(_)) => {
                             info!("圖譜 {} 下載成功", beatmapset_id);
-                            if let Err(e) = status_sender_clone.send((beatmapset_id, DownloadStatus::Completed)).await {
+                            if let Err(e) = status_sender_clone
+                                .send((beatmapset_id, DownloadStatus::Completed))
+                                .await
+                            {
                                 error!("無法發送下載完成狀態: {:?}", e);
                             }
                         }
                         Ok(Err(e)) => {
                             error!("圖譜 {} 下載失敗: {:?}", beatmapset_id, e);
-                            if let Err(e) = status_sender_clone.send((beatmapset_id, DownloadStatus::NotStarted)).await {
+                            if let Err(e) = status_sender_clone
+                                .send((beatmapset_id, DownloadStatus::NotStarted))
+                                .await
+                            {
                                 error!("無法發送下載失敗狀態: {:?}", e);
                             }
                         }
                         Err(_) => {
                             error!("圖譜 {} 下載超時", beatmapset_id);
-                            if let Err(e) = status_sender_clone.send((beatmapset_id, DownloadStatus::NotStarted)).await {
+                            if let Err(e) = status_sender_clone
+                                .send((beatmapset_id, DownloadStatus::NotStarted))
+                                .await
+                            {
                                 error!("無法發送下載超時狀態: {:?}", e);
                             }
                         }
@@ -2243,6 +2563,82 @@ impl SearchApp {
         if let Ok(mut textures) = self.cover_textures.try_write() {
             textures.clear();
         }
+    }
+    //繪製播放按鈕
+    fn draw_osu_play_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        rect: egui::Rect,
+        status: PlayStatus,
+    ) -> egui::Response {
+        let animation_progress = self.osu_play_button_states.entry(index).or_insert(0.0);
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+
+        if response.hovered() {
+            *animation_progress =
+                (*animation_progress + ui.input(|i| i.unstable_dt) * ANIMATION_SPEED).min(1.0);
+        } else {
+            *animation_progress =
+                (*animation_progress - ui.input(|i| i.unstable_dt) * ANIMATION_SPEED).max(0.0);
+        }
+
+        let center = rect.center();
+        let radius = rect.height() / 2.0;
+
+        // 繪製圓形背景
+        let bg_color = match status {
+            PlayStatus::Playing => egui::Color32::from_rgba_unmultiplied(0, 255, 0, 255),
+            PlayStatus::Stopped => egui::Color32::from_rgba_unmultiplied(
+                200 + ((55.0 * *animation_progress) as u8),
+                200 + ((55.0 * *animation_progress) as u8),
+                200 + ((55.0 * *animation_progress) as u8),
+                255,
+            ),
+        };
+        ui.painter()
+            .circle(center, radius, bg_color, egui::Stroke::NONE);
+
+        // 繪製播放/暫停圖標
+        let icon_color = egui::Color32::from_rgba_unmultiplied(
+            0 + ((255) as f32 * *animation_progress) as u8,
+            0 + ((255) as f32 * *animation_progress) as u8,
+            0 + ((255) as f32 * *animation_progress) as u8,
+            255,
+        );
+        match status {
+            PlayStatus::Playing => {
+                // 繪製暫停圖標 (兩個豎線)
+                let bar_width = radius * 0.3;
+                let bar_height = radius * 1.2;
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(center + egui::vec2(-bar_width, 0.0), egui::vec2(bar_width, bar_height)),
+                    0.0,
+                    icon_color,
+                );
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(center + egui::vec2(bar_width, 0.0), egui::vec2(bar_width, bar_height)),
+                    0.0,
+                    icon_color,
+                );
+            },
+            PlayStatus::Stopped => {
+                // 繪製播放圖標 (三角形)
+                let triangle_size = radius * 0.7;
+                let triangle_points = [
+                    center + egui::vec2(-triangle_size * 0.5, -triangle_size * 0.866),
+                    center + egui::vec2(-triangle_size * 0.5, triangle_size * 0.866),
+                    center + egui::vec2(triangle_size, 0.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    triangle_points.to_vec(),
+                    icon_color,
+                    egui::Stroke::NONE,
+                ));
+            },
+        }
+
+        response
     }
     //繪製下載按鈕
     fn draw_download_button(
@@ -2669,25 +3065,44 @@ impl SearchApp {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // 渲染側邊選單按鈕
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(BUTTON_SIZE, BUTTON_SIZE), egui::Sense::click());
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(BUTTON_SIZE, BUTTON_SIZE),
+                    egui::Sense::click(),
+                );
                 if ui.is_rect_visible(rect) {
                     let visuals = ui.style().interact(&response);
                     let animation_progress = self.side_menu_animation.entry(ui.id()).or_insert(0.0);
                     *animation_progress = if response.hovered() {
-                        (*animation_progress + ui.input(|i| i.unstable_dt) * ANIMATION_SPEED).min(1.0)
+                        (*animation_progress + ui.input(|i| i.unstable_dt) * ANIMATION_SPEED)
+                            .min(1.0)
                     } else {
-                        (*animation_progress - ui.input(|i| i.unstable_dt) * ANIMATION_SPEED).max(0.0)
+                        (*animation_progress - ui.input(|i| i.unstable_dt) * ANIMATION_SPEED)
+                            .max(0.0)
                     };
-                    let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * *animation_progress) as u8);
-                    ui.painter().rect_filled(rect.expand(*animation_progress * 4.0), visuals.rounding, color);
+                    let color = egui::Color32::from_rgba_unmultiplied(
+                        255,
+                        255,
+                        255,
+                        (255.0 * *animation_progress) as u8,
+                    );
+                    ui.painter().rect_filled(
+                        rect.expand(*animation_progress * 4.0),
+                        visuals.rounding,
+                        color,
+                    );
                     let font_id = egui::FontId::proportional(24.0);
-                    let galley = ui.painter().layout_no_wrap("☰".to_string(), font_id, visuals.text_color());
+                    let galley =
+                        ui.painter()
+                            .layout_no_wrap("☰".to_string(), font_id, visuals.text_color());
                     let text_pos = rect.center() - galley.size() / 2.0;
                     ui.painter().galley(text_pos, galley, visuals.text_color());
                 }
                 if response.clicked() {
                     self.show_side_menu = !self.show_side_menu;
-                    info!("Side menu button clicked. New state: {}", self.show_side_menu);
+                    info!(
+                        "Side menu button clicked. New state: {}",
+                        self.show_side_menu
+                    );
                 }
 
                 ui.add_space(10.0);
@@ -2706,33 +3121,39 @@ impl SearchApp {
                     });
                 }
 
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true), |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.spotify_authorized.load(Ordering::SeqCst) {
-                            self.render_logged_in_user(ui);
-                            
-                            // 渲染正在播放按鈕
-                            let button = egui::Button::new(egui::RichText::new("🎵").size(16.0))
-                                .min_size(egui::vec2(32.0, 32.0))
-                                .frame(false);
-                            let response = ui.add(button);
-                            if response.clicked() {
-                                ui.memory_mut(|mem| mem.toggle_popup(egui::Id::new("now_playing_popup")));
-                                self.should_detect_now_playing.store(true, Ordering::SeqCst);
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
+                    |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.spotify_authorized.load(Ordering::SeqCst) {
+                                self.render_logged_in_user(ui);
+
+                                // 渲染正在播放按鈕
+                                let button =
+                                    egui::Button::new(egui::RichText::new("🎵").size(16.0))
+                                        .min_size(egui::vec2(32.0, 32.0))
+                                        .frame(false);
+                                let response = ui.add(button);
+                                if response.clicked() {
+                                    ui.memory_mut(|mem| {
+                                        mem.toggle_popup(egui::Id::new("now_playing_popup"))
+                                    });
+                                    self.should_detect_now_playing.store(true, Ordering::SeqCst);
+                                }
+                                if response.hovered() {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        egui::Rounding::same(4.0),
+                                        egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
+                                    );
+                                }
+                                self.render_now_playing_popup(ui, &response);
+                            } else {
+                                self.render_guest_user(ui);
                             }
-                            if response.hovered() {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    egui::Rounding::same(4.0),
-                                    egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
-                                );
-                            }
-                            self.render_now_playing_popup(ui, &response);
-                        } else {
-                            self.render_guest_user(ui);
-                        }
-                    });
-                });
+                        });
+                    },
+                );
             });
         });
     }
@@ -3103,7 +3524,9 @@ impl SearchApp {
                         let url = cover_url.clone();
                         let textures_clone = self.playlist_cover_textures.clone();
                         tokio::spawn(async move {
-                            if let Ok(texture) = Self::load_texture_async(&ctx, &url, Duration::from_secs(30)).await {
+                            if let Ok(texture) =
+                                Self::load_texture_async(&ctx, &url, Duration::from_secs(30)).await
+                            {
                                 let mut textures = textures_clone.lock().unwrap();
                                 textures.insert(url, Some(texture));
                                 ctx.request_repaint();
@@ -4119,20 +4542,22 @@ impl SearchApp {
 
     fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let available_width = ui.available_width();
-        let text_edit_width = available_width - 80.0; // 為兩個按鈕預留更多空間
+        let button_width = 30.0;
+        let spacing = 5.0;
+        let text_edit_width = available_width - 2.0 * button_width - 2.0 * spacing;
         let text_edit_height = 32.0;
-    
+
         let search_bar_id = egui::Id::new("search_bar");
-    
+
         let frame = egui::Frame::none()
             .fill(ui.visuals().extreme_bg_color)
             .inner_margin(egui::Margin::same(4.0))
             .rounding(egui::Rounding::same(2.0));
-    
+
         frame.show(ui, |ui| {
-            ui.style_mut().spacing.item_spacing.x = 5.0;
-    
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true), |ui| {
+            ui.style_mut().spacing.item_spacing.x = spacing;
+
+            ui.horizontal(|ui| {
                 let text_edit = egui::TextEdit::singleline(&mut self.search_query)
                     .id(search_bar_id)
                     .font(egui::FontId::proportional(16.0))
@@ -4140,32 +4565,34 @@ impl SearchApp {
                     .desired_width(text_edit_width)
                     .vertical_align(egui::Align::Center)
                     .cursor_at_end(false);
-        
-                let response = ui.add_sized(
-                    egui::vec2(text_edit_width, text_edit_height),
-                    text_edit,
-                );
-        
+
+                let response =
+                    ui.add_sized(egui::vec2(text_edit_width, text_edit_height), text_edit);
+
                 if response.changed() {
                     ctx.request_repaint();
                 }
-        
+
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.perform_search(ctx.clone());
                 }
-        
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !self.search_query.is_empty() {
-                        if ui.add_sized([30.0, text_edit_height], egui::Button::new("✖")).clicked() {
-                            self.search_query.clear();
-                            ui.memory_mut(|mem| mem.request_focus(search_bar_id));
-                        }
+
+                if !self.search_query.is_empty() {
+                    if ui
+                        .add_sized([button_width, text_edit_height], egui::Button::new("✖"))
+                        .clicked()
+                    {
+                        self.search_query.clear();
+                        ui.memory_mut(|mem| mem.request_focus(search_bar_id));
                     }
-                    
-                    if ui.add_sized([30.0, text_edit_height], egui::Button::new("🔍")).clicked() {
-                        self.perform_search(ctx.clone());
-                    }
-                });
+                }
+
+                if ui
+                    .add_sized([button_width, text_edit_height], egui::Button::new("🔍"))
+                    .clicked()
+                {
+                    self.perform_search(ctx.clone());
+                }
             });
         });
     }
@@ -4205,20 +4632,36 @@ impl SearchApp {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if need_reload_avatar.load(Ordering::SeqCst) {
             info!("開始加載 Spotify 用戶頭像: {}", url);
-            match Self::load_spotify_user_avatar(url, ctx).await {
-                Ok(texture) => {
-                    info!("Spotify 用戶頭像加載成功");
-                    let mut avatar = spotify_user_avatar.write().await;
-                    *avatar = Some(texture);
-                    need_reload_avatar.store(false, Ordering::SeqCst);
-                    ctx.request_repaint_after(std::time::Duration::from_secs(1));
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("加載 Spotify 用戶頭像失敗: {:?}", e);
-                    Err(e)
+            let mut retry_count = 0;
+            const MAX_RETRIES: u8 = 2;
+
+            while retry_count < MAX_RETRIES {
+                match Self::load_spotify_user_avatar(url, ctx).await {
+                    Ok(texture) => {
+                        info!("Spotify 用戶頭像加載成功");
+                        let mut avatar = spotify_user_avatar.write().await;
+                        *avatar = Some(texture);
+                        need_reload_avatar.store(false, Ordering::SeqCst);
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        error!(
+                            "加載 Spotify 用戶頭像失敗 (嘗試 {}/{}): {:?}",
+                            retry_count + 1,
+                            MAX_RETRIES,
+                            e
+                        );
+                        retry_count += 1;
+                        if retry_count < MAX_RETRIES {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
                 }
             }
+            error!("加載 Spotify 用戶頭像失敗，已達到最大重試次數");
+            need_reload_avatar.store(false, Ordering::SeqCst);
+            Err("加載頭像失敗次數過多".into())
         } else {
             Ok(())
         }
@@ -4231,22 +4674,27 @@ impl SearchApp {
         info!("開始從 URL 加載 Spotify 用戶頭像: {}", url);
         let client = reqwest::Client::new();
         let response = client.get(url).send().await.map_err(|e| {
-            error!("獲取頭像數據失敗: {:?}", e);
+            match e.status() {
+                Some(status) if status.is_client_error() => error!("客戶端錯誤: {}", e),
+                Some(status) if status.is_server_error() => error!("服務器錯誤: {}", e),
+                _ => error!("網絡錯誤: {}", e),
+            }
             e
         })?;
         info!("成功獲取頭像數據");
+
         let bytes = response.bytes().await.map_err(|e| {
-            error!("讀取頭像字節數據失敗: {:?}", e);
+            error!("讀取頭像字節數據失敗: {}", e);
             e
         })?;
         info!("成功讀取頭像字節數據");
-        
-        let image = tokio::task::spawn_blocking(move || {
-            image::load_from_memory(&bytes)
-        }).await?.map_err(|e| {
-            error!("解析圖像數據失敗: {:?}", e);
-            e
-        })?;
+
+        let image = tokio::task::spawn_blocking(move || image::load_from_memory(&bytes))
+            .await?
+            .map_err(|e| {
+                error!("解析圖像數據失敗: {}", e);
+                e
+            })?;
 
         let size = [image.width() as _, image.height() as _];
         let image_buffer = image.to_rgba8();
