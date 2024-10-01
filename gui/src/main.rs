@@ -93,7 +93,7 @@ pub enum AppError {
 #[derive(Eq, PartialEq, Hash, Debug, Clone)]
 pub enum AuthPlatform {
     Spotify,
-    // 未來可以添加其他平台
+    Osu,
 }
 // 定義 ButtonType 列舉，用於標識不同的按鈕類型
 #[derive(Clone, Copy)]
@@ -861,7 +861,7 @@ impl SearchApp {
 
         tokio::spawn(async move {
             let client_guard = client_for_refresh.lock().await;
-            match check_and_refresh_token(&client_guard, &config).await {
+            match check_and_refresh_token(&client_guard, &config, "spotify").await {
                 Ok(login_info) => {
                     let new_spotify = AuthCodeSpotify::new(
                         Credentials::new(&config.spotify.client_id, &config.spotify.client_secret),
@@ -4232,8 +4232,8 @@ impl SearchApp {
             ui.set_min_width(200.0);
 
             let user_name = match read_login_info() {
-                Ok(Some(login_info)) => login_info.user_name,
-                _ => None,
+                Ok(login_infos) => login_infos.get("spotify").and_then(|info| info.user_name.clone()),
+                Err(_) => None,
             };
 
             // Spotify 授權部分

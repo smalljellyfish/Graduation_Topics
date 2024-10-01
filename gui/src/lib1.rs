@@ -1,9 +1,11 @@
 // 標準庫導入
 use std::fs::File;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
+use std::process::Command;
 use std::sync::Mutex;
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 // 第三方庫導入
 use anyhow::Result;
@@ -35,14 +37,14 @@ pub struct Config {
     pub spotify: ServiceConfig,
     pub osu: ServiceConfig,
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LoginInfo {
+    pub platform: String,  // 新增字段，用於識別平台（如 "spotify" 或 "osu"）
     pub access_token: String,
     pub refresh_token: String,
     pub expiry_time: DateTime<Utc>,
     pub avatar_url: Option<String>,
-    pub user_name: Option<String>,  // 新增的字段
+    pub user_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -209,7 +211,7 @@ pub fn get_app_data_path() -> PathBuf {
     path
 }
 
-pub fn save_login_info(login_info: &LoginInfo) -> Result<(), ConfigError> {
+pub fn save_login_info(login_info: &HashMap<String, LoginInfo>) -> Result<(), ConfigError> {
     let app_data_path = get_app_data_path();
     fs::create_dir_all(&app_data_path)
         .map_err(|e| ConfigError::Other(format!("無法創建應用數據目錄: {}", e)))?;
@@ -222,16 +224,16 @@ pub fn save_login_info(login_info: &LoginInfo) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::FileOpenError(format!("無法保存登入信息: {}", e)))
 }
 
-pub fn read_login_info() -> Result<Option<LoginInfo>, ConfigError> {
+pub fn read_login_info() -> Result<HashMap<String, LoginInfo>, ConfigError> {
     let file_path = get_app_data_path().join("login_info.json");
     
     match fs::read_to_string(file_path) {
         Ok(contents) => {
-            let login_info: LoginInfo = serde_json::from_str(&contents)
+            let login_info: HashMap<String, LoginInfo> = serde_json::from_str(&contents)
                 .map_err(|e| ConfigError::JsonParseError(format!("無法解析登入信息: {}", e)))?;
-            Ok(Some(login_info))
+            Ok(login_info)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(e) => Err(ConfigError::FileReadError(format!("無法讀取登入信息: {}", e))),
     }
 }
@@ -240,28 +242,32 @@ pub fn is_token_valid(login_info: &LoginInfo) -> bool {
     Utc::now() < login_info.expiry_time
 }
 
-pub async fn check_and_refresh_token(client: &Client, config: &Config) -> Result<LoginInfo, ConfigError> {
-    match read_login_info()? {
+pub async fn check_and_refresh_token(client: &Client, config: &Config, platform: &str) -> Result<LoginInfo, ConfigError> {
+    let mut login_infos = read_login_info()?;
+    
+    match login_infos.get(platform) {
         Some(login_info) => {
-            if is_token_valid(&login_info) {
-                Ok(login_info)
+            if is_token_valid(login_info) {
+                Ok(login_info.clone())
             } else {
                 // 令牌已過期,嘗試刷新
                 let new_token = refresh_spotify_token(client, &config.spotify, &login_info.refresh_token).await?;
                 
                 let new_login_info = LoginInfo {
+                    platform: platform.to_string(),
                     access_token: new_token.access_token,
-                    refresh_token: new_token.refresh_token.unwrap_or(login_info.refresh_token),
+                    refresh_token: new_token.refresh_token.unwrap_or_else(|| login_info.refresh_token.clone()),
                     expiry_time: Utc::now() + chrono::Duration::seconds(new_token.expires_in as i64),
-                    avatar_url: login_info.avatar_url, // 保留原有的頭像 URL
-                    user_name: login_info.user_name, // 添加 user_name 字段
+                    avatar_url: login_info.avatar_url.clone(),
+                    user_name: login_info.user_name.clone(),
                 };
                 
-                save_login_info(&new_login_info)?;
+                login_infos.insert(platform.to_string(), new_login_info.clone());
+                save_login_info(&login_infos)?;
                 Ok(new_login_info)
             }
         }
-        None => Err(ConfigError::Other("沒有保存的登入信息".to_string())),
+        None => Err(ConfigError::Other(format!("沒有保存的{}登入信息", platform))),
     }
 }
 
@@ -333,4 +339,33 @@ pub fn save_download_directory(download_directory: &PathBuf) -> Result<(), std::
 // 新增一個函數來檢查是否需要選擇下載目錄
 pub fn need_select_download_directory() -> bool {
     load_download_directory().is_none()
+}
+
+// 打開默認瀏覽器
+pub fn open_url_default_browser(url: &str) -> io::Result<()> {
+    if cfg!(target_os = "windows") {
+        // 使用 PowerShell 來打開 URL
+        Command::new("powershell")
+            .arg("-Command")
+            .arg(format!("Start-Process '{}'", url))
+            .spawn()
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+            })?;
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).spawn().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+        })?;
+    } else if cfg!(target_os = "linux") {
+        Command::new("xdg-open").arg(url).spawn().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
+        })?;
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Unsupported operating system",
+        ));
+    }
+
+    Ok(())
 }

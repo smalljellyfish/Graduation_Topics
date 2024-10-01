@@ -7,7 +7,6 @@ use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::os::windows::ffi::OsStrExt;
 use std::pin::Pin;
-use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,7 +46,7 @@ use winapi::{
 
 // 本地模組導入
 use crate::{read_config, AuthManager, AuthPlatform};
-use lib::{LoginInfo, save_login_info};
+use lib::{LoginInfo, save_login_info, open_url_default_browser};
 
 // 常量定義
 const SPOTIFY_API_BASE_URL: &str = "https://api.spotify.com/v1";
@@ -559,33 +558,7 @@ pub fn open_spotify_url(url: &str) -> io::Result<()> {
         }
     }
 }
-pub fn open_url_default_browser(url: &str) -> io::Result<()> {
-    if cfg!(target_os = "windows") {
-        // 使用 PowerShell 來打開 URL
-        Command::new("powershell")
-            .arg("-Command")
-            .arg(format!("Start-Process '{}'", url))
-            .spawn()
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
-            })?;
-    } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).spawn().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
-        })?;
-    } else if cfg!(target_os = "linux") {
-        Command::new("xdg-open").arg(url).spawn().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("Failed to open URL: {}", e))
-        })?;
-    } else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Unsupported operating system",
-        ));
-    }
 
-    Ok(())
-}
 fn is_spotify_protocol_associated() -> io::Result<bool> {
     let sub_key_os_string = OsString::from("spotify");
     let sub_key_vec: Vec<u16> = sub_key_os_string
@@ -773,7 +746,9 @@ pub fn authorize_spotify(
                 .await?;
 
                 // 保存登入信息
-                match save_login_info(&login_info) {
+                let mut login_info_map = HashMap::new();
+                login_info_map.insert("spotify".to_string(), login_info);
+                match save_login_info(&login_info_map) {
                     Ok(()) => info!("成功保存 Spotify 登入信息"),
                     Err(e) => error!("無法保存 Spotify 登入信息: {:?}", e),
                 }
@@ -973,6 +948,7 @@ async fn process_authorization_callback(
                     }
 
                     let login_info = LoginInfo {
+                        platform: "spotify".to_string(),
                         access_token: token_data.access_token.clone(),
                         refresh_token: token_data.refresh_token.clone().unwrap_or_default(),
                         expiry_time: Utc::now() + chrono::Duration::seconds(token_data.expires_in.num_seconds()),

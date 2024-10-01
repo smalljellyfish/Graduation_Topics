@@ -1,9 +1,18 @@
-// 標準庫導入
-use std::sync::Arc;
+//標準庫導入
+use std::sync::{Arc,Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::path::Path;
 use std::fs;
 use std::io::{copy,Cursor};
 use std::fs::File;
+use std::pin::Pin;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::io;
+
 
 
 
@@ -15,14 +24,23 @@ use log::{debug, error, info};
 use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
+use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::{sync::mpsc::Sender, try_join,task};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::time::timeout;
 use rodio::{Decoder, Sink, OutputStreamHandle};
+use url::Url;
+use chrono::Utc;
 
 
 // 本地模組導入
-use crate::read_config;
+use crate::spotify::AuthStatus;
+use crate::{read_config, AuthManager, AuthPlatform};
 use crate::DownloadStatus;
+use lib::{open_url_default_browser,save_login_info,LoginInfo};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Covers {
@@ -79,6 +97,16 @@ pub enum OsuError {
     JsonError(#[from] serde_json::Error),
     #[error("配置錯誤: {0}")]
     ConfigError(String),
+    #[error("IO 錯誤: {0}")]
+    IoError(String),
+    #[error("授權錯誤: {0}")]
+    AuthorizationError(String),
+    #[error("URL 解析錯誤: {0}")]
+    UrlParseError(#[from] url::ParseError),
+    #[error("osu! API 錯誤: {0}")]
+    ApiError(String),
+    #[error("reqwest 錯誤: {0}")]
+    ReqwestError(reqwest::Error),
     #[error("其他錯誤: {0}")]
     Other(String),
 }
@@ -87,6 +115,19 @@ pub enum OsuError {
 pub enum PlayStatus {
     Playing,
     Stopped,
+}
+
+#[derive(Deserialize)]
+struct OsuToken {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: i64,
+}
+#[derive(Deserialize)]
+struct User {
+    username: String,
+    avatar_url: Option<String>,
+
 }
 
 
@@ -525,4 +566,342 @@ pub async fn preview_beatmap(beatmapset_id: i32, stream_handle: &OutputStreamHan
     sink.append(source);
     
     Ok(sink)
+}
+pub fn authorize_osu(
+    osu_client: Arc<Mutex<Option<Client>>>,
+    debug_mode: bool,
+    auth_manager: Arc<AuthManager>,
+    listener: Arc<TokioMutex<Option<TcpListener>>>,
+    osu_authorized: Arc<AtomicBool>,
+) -> Pin<Box<dyn Future<Output = Result<(Option<String>, Option<String>), OsuError>> + Send>> {
+    Box::pin(async move {
+        // 重置授權狀態
+        auth_manager.reset(&AuthPlatform::Osu);
+
+        // 讀取和解析 JSON 文件
+        let config_str = fs::read_to_string("config.json")
+            .map_err(|e| OsuError::IoError(format!("無法讀取配置文件: {}", e)))?;
+        let config: Value = serde_json::from_str(&config_str)
+            .map_err(|e| OsuError::ConfigError(format!("無法解析配置文件: {}", e)))?;
+
+        let client_id = config["osu"]["client_id"]
+            .as_str()
+            .ok_or_else(|| OsuError::ConfigError("Missing osu! client ID".to_string()))?;
+        let scope = "public";
+        // 檢查是否已有監聽器，如果沒有則創建新的
+        let bound_port = {
+            let mut listener_guard = listener.lock().await;
+            if listener_guard.is_none() {
+                let (new_listener, port) = create_listener(debug_mode).await?;
+                *listener_guard = Some(new_listener);
+                port
+            } else {
+                listener_guard.as_ref().unwrap().local_addr()
+                    .map_err(|e| OsuError::IoError(format!("無法獲取本地地址: {}", e)))?
+                    .port()
+            }
+        };
+
+        // 更新重定向 URI
+        let redirect_uri = format!("http://localhost:{}/callback", bound_port);
+
+        let auth_url = create_osu_auth_url(client_id, &redirect_uri, scope)?;
+
+        if debug_mode {
+            info!("Authorization URL: {}", auth_url);
+            info!("Redirect URI: {}", redirect_uri);
+        }
+
+        auth_manager.update_status(&AuthPlatform::Osu, AuthStatus::WaitingForBrowser);
+
+        open_url_default_browser(&auth_url).map_err(|e| OsuError::IoError(e.to_string()))?;
+
+        // 設置超時時間，3 分鐘
+        let timeout_duration = Duration::from_secs(180);
+
+        let result = match accept_connection(&listener, timeout_duration).await {
+            Ok(stream) => {
+                let (login_info, avatar_url, user_name) = process_successful_connection(
+                    stream,
+                    &osu_client,
+                    auth_manager.clone(),
+                    &config,
+                    &redirect_uri,
+                    bound_port,
+                    debug_mode,
+                    osu_authorized,
+                )
+                .await?;
+
+                // 保存登入信息
+                let mut login_info_map = HashMap::new();
+                login_info_map.insert("osu".to_string(), login_info);
+                match save_login_info(&login_info_map) {
+                    Ok(()) => info!("成功保存 osu! 登入信息"),
+                    Err(e) => error!("無法保存 osu! 登入信息: {:?}", e),
+                }
+
+                Ok((avatar_url, user_name))
+            }
+            Err(e) => {
+                let error_message = format!("授權過程中斷: {}", e);
+                auth_manager.update_status(
+                    &AuthPlatform::Osu,
+                    AuthStatus::Failed(error_message.clone()),
+                );
+                Err(OsuError::AuthorizationError(error_message))
+            }
+        };
+
+        // 無論成功與否，都關閉監聽器
+        {
+            let mut listener_guard = listener.lock().await;
+            *listener_guard = None;
+        }
+
+        result
+    })
+}
+
+// 輔助函數來創建監聽器
+async fn create_listener(debug_mode: bool) -> Result<(TcpListener, u16), OsuError> {
+    let ports = vec![8080, 8081, 8082, 8083, 8084];
+    for port in ports {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok((listener, port)),
+            Err(e) if debug_mode => {
+                info!("無法綁定到端口 {}: {}", port, e);
+            }
+            _ => {}
+        }
+    }
+    Err(OsuError::IoError("無法找到可用的端口".to_string()))
+}
+
+async fn accept_connection(
+    listener: &Arc<TokioMutex<Option<TcpListener>>>,
+    timeout_duration: Duration,
+) -> Result<TcpStream, OsuError> {
+    let start_time = Instant::now();
+    loop {
+        if start_time.elapsed() >= timeout_duration {
+            return Err(OsuError::AuthorizationError(
+                "osu! 授權超時，請嘗試重新授權".to_string(),
+            ));
+        }
+
+        if let Some(listener) = listener.lock().await.as_ref() {
+            match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+                Ok(Ok((stream, _))) => return Ok(stream),
+                Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Ok(Err(e)) => return Err(OsuError::IoError(format!("接受 osu! 連接失敗: {}", e))),
+                Err(_) => continue, // 超時，繼續循環
+            }
+        } else {
+            return Err(OsuError::AuthorizationError("osu! 監聽器已關閉".to_string()));
+        }
+    }
+}
+
+// 創建 osu! 授權 URL
+fn create_osu_auth_url(
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+) -> Result<String, OsuError> {
+    let mut url = Url::parse("https://osu.ppy.sh/oauth/authorize")
+        .map_err(|e| OsuError::IoError(format!("URL 解析錯誤: {}", e)))?;
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("scope", scope)
+        .append_pair("state", "randomval");
+    Ok(url.to_string())
+}
+
+async fn process_successful_connection(
+    stream: TcpStream,
+    osu_client: &Arc<Mutex<Option<Client>>>,
+    auth_manager: Arc<AuthManager>,
+    config: &Value,
+    redirect_uri: &str,
+    port: u16,
+    debug_mode: bool,
+    osu_authorized: Arc<AtomicBool>,
+) -> Result<(LoginInfo, Option<String>, Option<String>), OsuError> {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .await
+        .map_err(|e| OsuError::IoError(format!("無法讀取請求: {}", e)))?;
+
+    let redirect_url = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| OsuError::AuthorizationError("無效的請求".to_string()))?;
+    let url = format!("http://localhost:{}{}", port, redirect_url);
+
+    // 向瀏覽器發送響應
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>授權成功，請關閉此窗口。</body></html>";
+    reader
+        .into_inner()
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| OsuError::IoError(format!("無法發送響應: {}", e)))?;
+
+    if debug_mode {
+        info!("Received callback URL: {}", url);
+    }
+
+    auth_manager.update_status(&AuthPlatform::Osu, AuthStatus::Processing);
+
+    // 處理授權回調
+    process_authorization_callback(
+        url,
+        osu_client,
+        auth_manager,
+        config,
+        redirect_uri,
+        osu_authorized,
+    )
+    .await
+}
+
+async fn process_authorization_callback(
+    url: String,
+    osu_client: &Arc<Mutex<Option<Client>>>,
+    auth_manager: Arc<AuthManager>,
+    config: &Value,
+    redirect_uri: &str,
+    osu_authorized: Arc<AtomicBool>,
+) -> Result<(LoginInfo, Option<String>, Option<String>), OsuError> {
+    let parsed_url = Url::parse(&url).map_err(OsuError::UrlParseError)?;
+    let code = parsed_url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| {
+            OsuError::AuthorizationError("無法從回調 URL 中解析授權碼".to_string())
+        })?;
+
+    let token_url = "https://osu.ppy.sh/oauth/token";
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", &code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", config["osu"]["client_id"].as_str().unwrap()),
+        ("client_secret", config["osu"]["client_secret"].as_str().unwrap()),
+    ];
+
+    match timeout(
+        Duration::from_secs(30),
+        client.post(token_url).form(&params).send(),
+    )
+    .await
+    {
+        Ok(response_result) => match response_result {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    let token_data: OsuToken = response.json().await?;
+
+                    auth_manager.update_status(&AuthPlatform::Osu, AuthStatus::TokenObtained);
+
+                    let new_osu_client = Client::new();
+
+                    // 獲取用戶信息
+                    let user = get_current_user(&new_osu_client, &token_data.access_token).await?;
+
+                    let user_name = user.username;
+                    let user_avatar_url = user.avatar_url;
+
+                    if let Some(url) = &user_avatar_url {
+                        info!("成功獲取用戶頭像 URL: {}", url);
+                    } else {
+                        error!("用戶沒有頭像 URL");
+                    }
+
+                    let login_info = LoginInfo {
+                        platform: "osu".to_string(),
+                        access_token: token_data.access_token.clone(),
+                        refresh_token: token_data.refresh_token.clone().unwrap_or_default(),
+                        expiry_time: Utc::now() + chrono::Duration::seconds(token_data.expires_in),
+                        avatar_url: user_avatar_url.clone(),
+                        user_name: Some(user_name.clone()),
+                    };
+
+                    let mut client = osu_client.lock().map_err(|e| {
+                        OsuError::IoError(format!("無法獲取 osu! 客戶端鎖: {}", e))
+                    })?;
+                    *client = Some(new_osu_client);
+
+                    auth_manager.update_status(&AuthPlatform::Osu, AuthStatus::Completed);
+                    osu_authorized.store(true, Ordering::SeqCst);
+
+                    info!("osu! 授權成功完成");
+
+                    Ok((login_info, user_avatar_url, Some(user_name)))
+                } else {
+                    let error_body = response.text().await.map_err(OsuError::RequestError)?;
+                    error!(
+                        "獲取訪問令牌失敗. 狀態碼: {}, 錯誤內容: {}",
+                        status, error_body
+                    );
+                    auth_manager.update_status(
+                        &AuthPlatform::Osu,
+                        AuthStatus::Failed(format!(
+                            "獲取訪問令牌失敗: {} - {}",
+                            status, error_body
+                        )),
+                    );
+                    Err(OsuError::ApiError(format!(
+                        "獲取訪問令牌失敗: {} - {}",
+                        status, error_body
+                    )))
+                }
+            }
+            Err(e) => {
+                error!("請求訪問令牌時發生錯誤: {}", e);
+                auth_manager.update_status(
+                    &AuthPlatform::Osu,
+                    AuthStatus::Failed(format!("請求訪問令牌時發生錯誤: {}", e)),
+                );
+                Err(OsuError::RequestError(e))
+            }
+        },
+        Err(_) => {
+            error!("請求訪問令牌超時");
+            auth_manager.update_status(
+                &AuthPlatform::Osu,
+                AuthStatus::Failed("請求訪問令牌超時".to_string()),
+            );
+            Err(OsuError::ApiError("請求訪問令牌超時".to_string()))
+        }
+    }
+}
+async fn get_current_user(client: &Client, access_token: &str) -> Result<User, OsuError> {
+    let user_url = "https://osu.ppy.sh/api/v2/me/osu";
+    let response = client
+        .get(user_url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(OsuError::RequestError)?;
+
+    let status = response.status();
+    if status.is_success() {
+        let user: User = response.json().await.map_err(OsuError::ReqwestError)?;
+        Ok(user)
+    } else {
+        let error_body = response.text().await.map_err(OsuError::RequestError)?;
+        Err(OsuError::ApiError(format!(
+            "獲取用戶信息失敗: {} - {}",
+            status,
+            error_body
+        )))
+    }
 }
