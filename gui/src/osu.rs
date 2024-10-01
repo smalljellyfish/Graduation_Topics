@@ -17,7 +17,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{sync::mpsc::Sender, try_join,task};
-use tokio::sync::Mutex as TokioMutex;
 use rodio::{Decoder, Sink, OutputStreamHandle};
 
 
@@ -275,68 +274,75 @@ pub fn parse_osu_url(url: &str) -> Option<(String, Option<String>)> {
     }
 }
 pub async fn load_osu_covers(
-    urls: Vec<(usize, String)>,
+    beatmapsets: Vec<(usize, Covers)>,
     ctx: egui::Context,
     sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
 ) -> Result<(), OsuError> {
     let client = Client::new();
     let mut errors = Vec::new();
 
-    for (index, url) in urls.into_iter() {
-        debug!("正在載入封面，URL: {}", url);
-        match client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.bytes().await {
-                        Ok(bytes) => match load_from_memory(&bytes) {
-                            Ok(image) => {
-                                debug!("成功從記憶體載入圖片，URL: {}", url);
-                                let color_image = ColorImage::from_rgba_unmultiplied(
-                                    [image.width() as usize, image.height() as usize],
-                                    &image.to_rgba8(),
-                                );
-                                let texture = ctx.load_texture(
-                                    format!("cover_{}", index),
-                                    color_image,
-                                    Default::default(),
-                                );
-                                let texture = Arc::new(texture);
-                                let size = (image.width() as f32, image.height() as f32);
-                                if let Err(e) = sender.send((index, texture, size)).await {
-                                    error!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e);
-                                    errors
-                                        .push(format!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e));
-                                } else {
-                                    debug!("成功發送紋理，URL: {}", url);
+    for (index, covers) in beatmapsets {
+        let urls = [
+            covers.cover,
+            covers.cover_2x,
+            covers.card,
+            covers.card_2x,
+            covers.list,
+            covers.list_2x,
+            covers.slimcover,
+            covers.slimcover_2x,
+        ];
+
+        let mut success = false;
+
+        for url in urls.iter().flatten() {
+            debug!("正在嘗試載入封面，URL: {}", url);
+            match client.get(url).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        match response.bytes().await {
+                            Ok(bytes) => match load_from_memory(&bytes) {
+                                Ok(image) => {
+                                    debug!("成功從記憶體載入圖片，URL: {}", url);
+                                    let color_image = ColorImage::from_rgba_unmultiplied(
+                                        [image.width() as usize, image.height() as usize],
+                                        &image.to_rgba8(),
+                                    );
+                                    let texture = ctx.load_texture(
+                                        format!("cover_{}", index),
+                                        color_image,
+                                        Default::default(),
+                                    );
+                                    let texture = Arc::new(texture);
+                                    let size = (image.width() as f32, image.height() as f32);
+                                    if let Err(e) = sender.send((index, texture, size)).await {
+                                        error!("發送紋理失敗，URL: {}, 錯誤: {:?}", url, e);
+                                    } else {
+                                        debug!("成功發送紋理，URL: {}", url);
+                                        success = true;
+                                        break;  // 成功載入後跳出循環
+                                    }
                                 }
-                            }
+                                Err(e) => {
+                                    error!("從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}", url, e);
+                                }
+                            },
                             Err(e) => {
-                                error!("從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}", url, e);
-                                errors.push(format!(
-                                    "從記憶體載入圖片失敗，URL: {}, 錯誤: {:?}",
-                                    url, e
-                                ));
+                                error!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e);
                             }
-                        },
-                        Err(e) => {
-                            error!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e);
-                            errors
-                                .push(format!("從回應獲取位元組失敗，URL: {}, 錯誤: {:?}", url, e));
                         }
+                    } else {
+                        error!("載入封面失敗，URL: {}, 狀態碼: {}", url, response.status());
                     }
-                } else {
-                    error!("載入封面失敗，URL: {}, 狀態碼: {}", url, response.status());
-                    errors.push(format!(
-                        "載入封面失敗，URL: {}, 狀態碼: {}",
-                        url,
-                        response.status()
-                    ));
+                }
+                Err(e) => {
+                    error!("發送請求失敗，URL: {}, 錯誤: {:?}", url, e);
                 }
             }
-            Err(e) => {
-                error!("發送請求失敗，URL: {}, 錯誤: {:?}", url, e);
-                errors.push(format!("發送請求失敗，URL: {}, 錯誤: {:?}", url, e));
-            }
+        }
+
+        if !success {
+            errors.push(format!("無法載入索引 {} 的任何封面", index));
         }
     }
 

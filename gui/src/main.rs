@@ -1428,16 +1428,14 @@ impl SearchApp {
                     let results = vec![beatmapset];
                     *osu_search_results.lock().await = results.clone();
 
-                    let mut osu_urls = Vec::new();
+                    let mut osu_covers = Vec::new();
                     for (index, beatmapset) in results.iter().enumerate() {
-                        if let Some(cover_url) = &beatmapset.covers.cover {
-                            osu_urls.push((index, cover_url.clone()));
-                        }
+                        osu_covers.push((index, beatmapset.covers.clone()));
                     }
                     *osu_search_results.lock().await = results;
 
                     if let Err(e) =
-                        load_osu_covers(osu_urls, ctx_clone.clone(), sender.clone()).await
+                        load_osu_covers(osu_covers, ctx_clone.clone(), sender.clone()).await
                     {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
@@ -1630,18 +1628,17 @@ impl SearchApp {
                         debug!("Osu 搜索結果詳情: {:?}", results);
                     }
 
-                    let mut osu_urls = Vec::new();
+                    let mut osu_covers = Vec::new();
                     for (index, beatmapset) in results.iter().enumerate().take(10) {
-                        if let Some(cover_url) = &beatmapset.covers.cover {
-                            osu_urls.push((index, cover_url.clone()));
-                        }
+                        osu_covers.push((index, beatmapset.covers.clone()));
                     }
                     *osu_search_results.lock().await = results;
 
-                    info!("初始加載 osu 封面：共 {} 個", osu_urls.len());
+                    info!("初始加載 osu 封面：共 {} 個", osu_covers.len());
 
+                    let osu_covers_len = osu_covers.len();
                     if let Err(e) =
-                        load_osu_covers(osu_urls.clone(), ctx_clone.clone(), sender.clone()).await
+                        load_osu_covers(osu_covers, ctx_clone.clone(), sender.clone()).await
                     {
                         error!("載入 osu 封面時發生錯誤: {:?}", e);
                         if debug_mode {
@@ -1652,7 +1649,7 @@ impl SearchApp {
                             });
                         }
                     } else {
-                        info!("成功初始加載 {} 個 osu 封面", osu_urls.len());
+                        info!("成功初始加載 {} 個 osu 封面", osu_covers_len);
                     }
                 }
 
@@ -1690,8 +1687,8 @@ impl SearchApp {
             // 顯示底部的控制元素（如"顯示更多"按鈕）
             self.display_spotify_footer(ui, displayed_results, total_results);
         } else {
-            // 如果沒有搜索結果，顯示提示信息
-            ui.label("沒有搜索結果");
+            // 如果沒有搜尋結果，顯示提示信息
+            ui.label("沒有搜尋結果");
         };
     }
 
@@ -1729,6 +1726,19 @@ impl SearchApp {
                 egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
                     .size(self.global_font_size),
             );
+            ui.add_space(5.0);
+            
+            // 添加 Spotify 圖標
+            if let Some(spotify_icon) = self.preloaded_icons.get("spotify_icon_black.png") {
+                let logo_size = self.global_font_size.max(21.0);
+                let response = ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    spotify_icon.id(),
+                    egui::Vec2::new(logo_size, logo_size),
+                )));
+                
+                // 添加懸停文字
+                response.on_hover_text("此區內容由Spotify提供");
+            }
         });
         ui.add_space(10.0);
     }
@@ -1933,7 +1943,7 @@ impl SearchApp {
             }
         }
 
-        open_button_response.on_hover_text("打開");
+        open_button_response.on_hover_text("Open Spotify");
     }
 
     fn display_like_button(
@@ -2061,8 +2071,8 @@ impl SearchApp {
                 self.display_osu_footer(ui, displayed_results, total_results);
             }
         } else {
-            // 如果沒有搜索結果，顯示提示信息
-            ui.label("沒有搜索結果");
+            // 如果沒搜尋結果，顯示提示信息
+            ui.label("沒有搜尋結果");
         }
     }
 
@@ -2076,7 +2086,7 @@ impl SearchApp {
     ) {
         ui.horizontal(|ui| {
             if window_size.x >= 1000.0 {
-                ui.heading(egui::RichText::new("Osu Results").size(self.global_font_size * 1.2));
+                ui.heading(egui::RichText::new("osu! Results").size(self.global_font_size * 1.2));
                 ui.add_space(10.0);
             }
             ui.label(
@@ -2088,8 +2098,21 @@ impl SearchApp {
                 egui::RichText::new(format!("當前顯示結果數: {}", displayed_results))
                     .size(self.global_font_size),
             );
+            ui.add_space(5.0);
+            
+            // 添加 osu! 圖標
+            if let Some(osu_icon) = self.preloaded_icons.get("osu!logo.png") {
+                let logo_size = self.global_font_size.max(21.0);
+                let response = ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    osu_icon.id(),
+                    egui::Vec2::new(logo_size, logo_size),
+                )));
+                
+                // 添加懸停文字
+                response.on_hover_text("此區內容由osu!提供");
+            }
         });
-
+    
         ui.add_space(10.0);
     }
 
@@ -2145,20 +2168,18 @@ impl SearchApp {
     //加載更多osu封面
     fn load_more_osu_covers(&self, start: usize, end: usize) {
         if let Ok(osu_search_results_guard) = self.osu_search_results.try_lock() {
-            let mut osu_urls = Vec::new();
+            let mut osu_covers = Vec::new();
             for (index, beatmapset) in osu_search_results_guard
                 .iter()
                 .enumerate()
                 .skip(start)
                 .take(end - start)
             {
-                if let Some(cover_url) = &beatmapset.covers.cover {
-                    osu_urls.push((index, cover_url.clone()));
-                }
+                osu_covers.push((index, beatmapset.covers.clone()));
             }
 
             // 新增：記錄本次加載的封面數量
-            let loaded_covers_count = osu_urls.len();
+            let loaded_covers_count = osu_covers.len();
             info!(
                 "正在加載更多 osu 封面：從 {} 到 {}，共 {} 個",
                 start, end, loaded_covers_count
@@ -2170,7 +2191,7 @@ impl SearchApp {
             let ctx = self.ctx.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = load_osu_covers(osu_urls, ctx.clone(), sender_clone).await {
+                if let Err(e) = load_osu_covers(osu_covers, ctx.clone(), sender_clone).await {
                     error!("載入更多 osu 封面時發生錯誤: {:?}", e);
                     if debug_mode {
                         error!("載入更多 osu 封面錯誤: {:?}", e);
@@ -4569,7 +4590,7 @@ impl SearchApp {
 
             // Osu 結果
             egui::CollapsingHeader::new(
-                egui::RichText::new("Osu 結果").size(self.global_font_size * 1.1),
+                egui::RichText::new("osu! 結果").size(self.global_font_size * 1.1),
             )
             .default_open(true)
             .show(ui, |ui| {
