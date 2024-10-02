@@ -4532,36 +4532,59 @@ impl SearchApp {
     }
 
     fn render_large_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        ui.columns(2, |columns| {
-            columns[0].vertical(|ui| {
-                ui.set_min_width(0.48 * window_size.x);
-                ui.set_max_width(0.48 * window_size.x);
-                let mut spotify_scroll = egui::ScrollArea::vertical().id_source("spotify_scroll");
+        ui.horizontal(|ui| {
+            // Spotify 部分
+            ui.vertical(|ui| {
+                ui.set_min_width(0.5 * window_size.x);
+                ui.set_max_width(0.5 * window_size.x);
+                ui.set_min_height(window_size.y);
+                ui.set_max_height(window_size.y);
 
-                if self.spotify_scroll_to_top {
-                    spotify_scroll = spotify_scroll.scroll_offset(egui::vec2(0.0, 0.0));
-                    self.spotify_scroll_to_top = false;
-                    ui.ctx().request_repaint();
-                }
+                let frame = egui::Frame::none()
+                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_hex("#1ED760").unwrap_or(egui::Color32::GREEN)))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .rounding(egui::Rounding::same(5.0));
 
-                spotify_scroll.show(ui, |ui| {
-                    self.display_spotify_results(ui, window_size);
+                frame.show(ui, |ui| {
+                    let mut spotify_scroll = egui::ScrollArea::vertical().id_source("spotify_scroll");
+
+                    if self.spotify_scroll_to_top {
+                        spotify_scroll = spotify_scroll.scroll_offset(egui::vec2(0.0, 0.0));
+                        self.spotify_scroll_to_top = false;
+                        ui.ctx().request_repaint();
+                    }
+
+                    spotify_scroll.show(ui, |ui| {
+                        self.display_spotify_results(ui, window_size);
+                    });
                 });
             });
 
-            columns[1].vertical(|ui| {
-                ui.set_min_width(0.48 * window_size.x);
-                ui.set_max_width(0.48 * window_size.x);
-                let mut osu_scroll = egui::ScrollArea::vertical().id_source("osu_scroll");
 
-                if self.osu_scroll_to_top {
-                    osu_scroll = osu_scroll.scroll_offset(egui::vec2(0.0, 0.0));
-                    self.osu_scroll_to_top = false;
-                    ui.ctx().request_repaint();
-                }
+            // osu! 部分
+            ui.vertical(|ui| {
+                ui.set_min_width(0.5 * window_size.x);
+                ui.set_max_width(0.5 * window_size.x);
+                ui.set_min_height(window_size.y);
+                ui.set_max_height(window_size.y);
 
-                osu_scroll.show(ui, |ui| {
-                    self.display_osu_results(ui, window_size);
+                let frame = egui::Frame::none()
+                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_hex("#FF66AA").unwrap_or(egui::Color32::LIGHT_RED)))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .rounding(egui::Rounding::same(5.0));
+
+                frame.show(ui, |ui| {
+                    let mut osu_scroll = egui::ScrollArea::vertical().id_source("osu_scroll");
+
+                    if self.osu_scroll_to_top {
+                        osu_scroll = osu_scroll.scroll_offset(egui::vec2(0.0, 0.0));
+                        self.osu_scroll_to_top = false;
+                        ui.ctx().request_repaint();
+                    }
+
+                    osu_scroll.show(ui, |ui| {
+                        self.display_osu_results(ui, window_size);
+                    });
                 });
             });
         });
@@ -4873,7 +4896,7 @@ async fn main() -> Result<(), AppError> {
             ctx.set_visuals(if dark_light::detect() == dark_light::Mode::Dark {
                 egui::Visuals::dark()
             } else {
-                egui::Visuals::light()
+                egui::Visuals::dark()
             });
             ctx.set_pixels_per_point(1.0);
 
