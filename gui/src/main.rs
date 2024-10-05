@@ -252,6 +252,7 @@ struct SearchApp {
     side_menu_animation: HashMap<egui::Id, f32>,
     osu_play_button_states: HashMap<usize, f32>,
     global_volume: f32,
+    expanded_track_index: Option<usize>,
 
     // 其他功能
     debug_mode: bool,
@@ -959,6 +960,11 @@ impl SearchApp {
             "Spotify_Full_Logo_RGB_White.png",
             "Spotify_Full_Logo_RGB_Black.png",
             "osu!logo@2x.png",
+            "search.png",
+            "like.png",
+            "liked.png",
+            "expand_on.png",
+            "expand_off.png",
         ];
         for path in icon_paths {
             if let Some(texture) = Self::load_icon(&ctx, path) {
@@ -1038,6 +1044,8 @@ impl SearchApp {
             global_font_size: 16.0,
             search_bar_expanded: false,
             global_volume: 0.3,
+            expanded_track_index: None,
+
 
             // 紋理和圖像
             avatar_load_handle: None,
@@ -1825,7 +1833,7 @@ impl SearchApp {
             });
         });
 
-        self.display_track_buttons(ui, track, index, &response);
+        self.draw_circular_buttons(ui, track, index, response.rect.center());
 
         response.context_menu(|ui| self.create_track_context_menu(ui, track));
 
@@ -1884,107 +1892,188 @@ impl SearchApp {
         });
     }
 
-    fn display_track_buttons(
+    fn draw_circular_buttons(
         &mut self,
         ui: &mut egui::Ui,
         track: &Track,
         index: usize,
-        response: &egui::Response,
+        center: egui::Pos2,
     ) {
         let button_size = egui::vec2(30.0, 30.0);
-        let spacing = 5.0;
-        let total_width = 3.0 * button_size.x + 2.0 * spacing;
-        let start_x = response.rect.right() - total_width - 5.0;
-        let start_y = response.rect.bottom() - button_size.y - 5.0;
-
-        self.display_search_button(ui, track, index, start_x, start_y, button_size);
-        self.display_open_button(
-            ui,
-            track,
-            index,
-            start_x + button_size.x + spacing,
-            start_y,
-            button_size,
+        let container_width = 180.0;
+        let container_height = 30.0;
+        
+        let container_pos = egui::pos2(
+            ui.min_rect().right() - container_width - 10.0, 
+            center.y - container_height / 2.0 + 30.0  
         );
-        self.display_like_button(
-            ui,
-            track,
-            index,
-            start_x + 2.0 * (button_size.x + spacing),
-            start_y,
-            button_size,
+        
+        // 繪製展開按鈕
+        let expand_button_rect = egui::Rect::from_min_size(
+            container_pos + egui::vec2(container_width - button_size.x, 0.0),
+            button_size
         );
-    }
+        
+        if self.expanded_track_index == Some(index) {
 
-    fn display_search_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        track: &Track,
-        index: usize,
-        x: f32,
-        y: f32,
-        size: egui::Vec2,
-    ) {
-        let search_button_rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
-        let search_button_response =
-            self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-
-        if search_button_response.clicked() {
-            self.search_query = track
-                .external_urls
-                .get("spotify")
-                .cloned()
-                .unwrap_or_else(|| {
-                    format!(
-                        "{} {}",
-                        track.name,
-                        track
-                            .artists
-                            .iter()
-                            .map(|a| a.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                });
-            self.perform_search(ui.ctx().clone());
-        }
-
-        search_button_response.on_hover_text("以此搜尋");
-    }
-
-    fn display_open_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        track: &Track,
-        index: usize,
-        x: f32,
-        y: f32,
-        size: egui::Vec2,
-    ) {
-        let open_button_rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
-        let open_button_response =
-            self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Spotify);
-
-        if open_button_response.clicked() {
-            if let Some(url) = track.external_urls.get("spotify") {
-                if let Err(e) = open_spotify_url(url) {
-                    log::error!("無法開啟 URL: {}", e);
-                }
+        } else {
+            // 如果當前軌道未展開，顯示展開按鈕
+            if ui.put(expand_button_rect, egui::Button::new("▶")).clicked() {
+                self.expanded_track_index = Some(index);
             }
         }
-
-        open_button_response.on_hover_text("Open Spotify");
+        
+        if self.expanded_track_index == Some(index) {
+            // 計算動畫進度
+            let animation_progress = 1.0; // 暫時移除動畫，使用固定值
+            
+            // 計算動畫中的容器寬度
+            let animated_width = container_width * animation_progress;
+            let animated_container_rect = egui::Rect::from_min_size(
+                container_pos,
+                egui::vec2(animated_width, container_height)
+            );
+            
+            // 如果當前軌道被展開，繪製完整的按鈕列表
+            ui.painter().rect(
+                animated_container_rect,
+                egui::Rounding::same(10.0),
+                egui::Color32::from_hex("#FFFFFF").unwrap_or(egui::Color32::WHITE),
+                egui::Stroke::NONE,
+            );
+        
+            let total_buttons = 4; // 減少為4個按鈕
+            let spacing = animated_width / (total_buttons as f32 + 1.0);
+        
+            for i in 0..total_buttons {
+                let button_center = container_pos + egui::vec2(
+                    (i as f32 + 1.0) * spacing,
+                    container_height / 2.0 
+                );
+                let rect = egui::Rect::from_center_size(button_center, button_size);
+                
+                // 只有當按鈕完全顯示時才繪製和處理
+                if rect.right() <= animated_container_rect.right() {
+                    ui.painter().circle(
+                        rect.center(),
+                        button_size.x / 2.0,
+                        egui::Color32::from_hex("#FFFFFF").unwrap_or(egui::Color32::WHITE),
+                        egui::Stroke::NONE,
+                    );
+            
+                    self.draw_button_icon(ui, rect, i, track);
+            
+                    let response = ui.allocate_rect(rect, egui::Sense::click());
+                    if response.clicked() {
+                        self.handle_button_click(i, track, index, ui.ctx().clone());
+                    }
+                    if response.hovered() {
+                        ui.painter().circle(
+                            rect.center(),
+                            button_size.x / 2.0,
+                            egui::Color32::from_white_alpha(200),
+                            egui::Stroke::NONE,
+                        );
+                        let hover_text = match i {
+                            0 => "開啟",
+                            1 => "搜尋",
+                            2 => if track.is_liked.unwrap_or(false) { "取消收藏" } else { "收藏" },
+                            3 => "收起",
+                            _ => "",
+                        };
+                        response.on_hover_text(hover_text);
+                    }
+                }
+            }
+        } else {
+            // 如果未展開，只顯示展開按鈕
+            ui.painter().rect(
+                expand_button_rect,
+                egui::Rounding::same(5.0),
+                egui::Color32::from_hex("#FFFFFF").unwrap_or(egui::Color32::WHITE),
+                egui::Stroke::NONE,
+            );
+            // 繪製展開圖標
+            if let Some(texture) = self.preloaded_icons.get("expand_on.png") {
+                let icon_size = egui::vec2(21.0, 21.0);
+                let icon_rect = egui::Rect::from_center_size(expand_button_rect.center(), icon_size);
+                ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::BLACK);
+            }
+        }
+        
+        // 請求重繪以實現動畫效果
+        ui.ctx().request_repaint();
     }
-
-    fn display_like_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        track: &Track,
-        index: usize,
-        x: f32,
-        y: f32,
-        size: egui::Vec2,
-    ) {
+    
+    fn draw_button_icon(&self, ui: &mut egui::Ui, rect: egui::Rect, index: usize, track: &Track) {
+        let icon_size = egui::vec2(24.0, 24.0);
+        let icon_rect = egui::Rect::from_center_size(rect.center(), icon_size);
+        
+        match index {
+            0 => {
+                if let Some(texture) = self.preloaded_icons.get("search.png") {
+                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::BLACK);
+                }
+            },
+            1 => {
+                if let Some(texture) = self.preloaded_icons.get("spotify_icon_black.png") {
+                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                }
+            },
+            2 => {
+                let icon_key = if track.is_liked.unwrap_or(false) { "liked.png" } else { "like.png" };
+                if let Some(texture) = self.preloaded_icons.get(icon_key) {
+                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                }
+            },
+            3 => {
+                if let Some(texture) = self.preloaded_icons.get("expand_off.png") {
+                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::BLACK);
+                }
+            },
+            _ => {},
+        }
+    }
+    
+    fn handle_button_click(&mut self, index: usize, track: &Track, track_index: usize, ctx: egui::Context) {
+        match index {
+            0 => self.handle_search_click(track),
+            1 => self.handle_open_click(track),
+            2 => self.handle_like_click(track, track_index, ctx),
+            3 => self.expanded_track_index = None, // 收起按鈕的處理邏輯
+            _ => {},
+        }
+    }
+    
+    fn handle_search_click(&mut self, track: &Track) {
+        self.search_query = track
+            .external_urls
+            .get("spotify")
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "{} {}",
+                    track.name,
+                    track
+                        .artists
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            });
+        self.perform_search(self.ctx.clone());
+    }
+    
+    fn handle_open_click(&self, track: &Track) {
+        if let Some(url) = track.external_urls.get("spotify") {
+            if let Err(e) = open_spotify_url(url) {
+                log::error!("無法開啟 URL: {}", e);
+            }
+        }
+    }
+    
+    fn handle_like_click(&mut self, track: &Track, index: usize, ctx: egui::Context) {
         if self.spotify_authorized.load(Ordering::SeqCst)
             && self.spotify_client.lock().unwrap().is_some()
         {
@@ -1994,16 +2083,7 @@ impl SearchApp {
                 .and_then(|url| url.split('/').last())
                 .unwrap_or("");
             let is_liked = track.is_liked.unwrap_or(false);
-
-            let like_button_rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
-            let like_button_response =
-                self.draw_liked_button(ui, index, like_button_rect, is_liked);
-
-            if like_button_response.clicked() {
-                self.toggle_track_like_status(track_id, is_liked, index, ui.ctx().clone());
-            }
-
-            like_button_response.on_hover_text(if is_liked { "取消收藏" } else { "收藏" });
+            self.toggle_track_like_status(track_id, is_liked, index, ctx);
         }
     }
 
@@ -2993,68 +3073,6 @@ impl SearchApp {
             [handle_start, handle_end],
             egui::Stroke::new(2.0, icon_color),
         );
-
-        response
-    }
-
-    fn draw_liked_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        rect: egui::Rect,
-        is_liked: bool,
-    ) -> egui::Response {
-        let animation_progress = self.liked_button_states.entry(index).or_insert(0.0);
-        let response = ui.allocate_rect(rect, egui::Sense::click());
-
-        if response.hovered() {
-            *animation_progress =
-                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
-        } else {
-            *animation_progress =
-                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
-        }
-
-        let center = rect.center();
-        let radius = rect.height() / 2.0;
-
-        // 繪製圓形背景
-        let bg_color = egui::Color32::from_rgba_unmultiplied(
-            200 + ((55) as f32 * *animation_progress) as u8,
-            200 + ((55) as f32 * *animation_progress) as u8,
-            200 + ((55) as f32 * *animation_progress) as u8,
-            255,
-        );
-        ui.painter()
-            .circle(center, radius, bg_color, egui::Stroke::NONE);
-
-        // 繪製愛心圖標
-        let icon_color = if is_liked {
-            egui::Color32::RED
-        } else {
-            egui::Color32::from_rgba_unmultiplied(
-                0 + ((255) as f32 * *animation_progress) as u8,
-                0 + ((255) as f32 * *animation_progress) as u8,
-                0 + ((255) as f32 * *animation_progress) as u8,
-                255,
-            )
-        };
-
-        let heart_size = radius * 1.2;
-        let heart_points = [
-            center + egui::vec2(0.0, -heart_size * 0.4),
-            center + egui::vec2(-heart_size * 0.4, -heart_size * 0.1),
-            center + egui::vec2(-heart_size * 0.4, heart_size * 0.2),
-            center + egui::vec2(0.0, heart_size * 0.5),
-            center + egui::vec2(heart_size * 0.4, heart_size * 0.2),
-            center + egui::vec2(heart_size * 0.4, -heart_size * 0.1),
-        ];
-
-        ui.painter().add(egui::Shape::convex_polygon(
-            heart_points.to_vec(),
-            icon_color,
-            egui::Stroke::new(1.0, icon_color),
-        ));
 
         response
     }
@@ -4556,6 +4574,26 @@ impl SearchApp {
             "osu!logo@2x.png" => {
                 info!("嘗試加載 osu!logo@2x.png");
                 include_bytes!("assets/osu!logo@2x.png")
+            }
+            "search.png" => {
+                info!("嘗試加載 search.png");
+                include_bytes!("assets/search.png")
+            }
+            "like.png" => {
+                info!("嘗試加載 like.png");
+                include_bytes!("assets/like.png")
+            }
+            "liked.png" => {
+                info!("嘗試加載 liked.png");
+                include_bytes!("assets/liked.png")
+            }
+            "expand_on.png" => {
+                info!("嘗試加載 expand_on.png");
+                include_bytes!("assets/expand_on.png")
+            }
+            "expand_off.png" => {
+                info!("嘗試加載 expand_off.png");
+                include_bytes!("assets/expand_off.png")
             }
             _ => {
                 error!("未知的圖標路徑: {}", icon_path);
