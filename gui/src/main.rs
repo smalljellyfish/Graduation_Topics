@@ -55,7 +55,6 @@ use tokio::{
 use crate::osu::{
     delete_beatmap, get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token,
     load_osu_covers, parse_osu_url, preview_beatmap, print_beatmap_info_gui, Beatmapset,
-    PlayStatus,
 };
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
@@ -102,7 +101,6 @@ pub enum AuthPlatform {
 #[derive(Clone, Copy)]
 enum ButtonType {
     Spotify,
-    Osu,
 }
 // 定義 DownloadStatus 列舉，用於標識不同的下載狀態
 #[derive(Clone, Copy, PartialEq)]
@@ -211,6 +209,7 @@ struct SearchApp {
     osu_scroll_to_top: bool,
     global_font_size: f32,
     search_bar_expanded: bool,
+    is_beatmap_playing: bool,
 
     // 紋理和圖像
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
@@ -244,15 +243,12 @@ struct SearchApp {
 
     // UI 元素狀態
     spotify_search_button_states: HashMap<usize, f32>,
-    spotify_open_button_states: HashMap<usize, f32>,
     osu_search_button_states: HashMap<usize, f32>,
-    osu_open_button_states: HashMap<usize, f32>,
-    liked_button_states: HashMap<usize, f32>,
-    osu_download_button_states: HashMap<usize, f32>,
+
     side_menu_animation: HashMap<egui::Id, f32>,
-    osu_play_button_states: HashMap<usize, f32>,
     global_volume: f32,
     expanded_track_index: Option<usize>,
+    expanded_beatmapset_index: Option<usize>,
 
     // 其他功能
     debug_mode: bool,
@@ -965,6 +961,11 @@ impl SearchApp {
             "liked.png",
             "expand_on.png",
             "expand_off.png",
+            "play.png",
+            "pause.png",
+            "download.png",
+            "delete.png",
+            "downloading.png",
         ];
         for path in icon_paths {
             if let Some(texture) = Self::load_icon(&ctx, path) {
@@ -1045,7 +1046,8 @@ impl SearchApp {
             search_bar_expanded: false,
             global_volume: 0.3,
             expanded_track_index: None,
-
+            expanded_beatmapset_index: None,
+            is_beatmap_playing: false,
 
             // 紋理和圖像
             avatar_load_handle: None,
@@ -1079,13 +1081,8 @@ impl SearchApp {
 
             // UI 元素狀態
             spotify_search_button_states: HashMap::new(),
-            spotify_open_button_states: HashMap::new(),
             osu_search_button_states: HashMap::new(),
-            osu_open_button_states: HashMap::new(),
-            liked_button_states: HashMap::new(),
-            osu_download_button_states: HashMap::new(),
             side_menu_animation: HashMap::new(),
-            osu_play_button_states: HashMap::new(),
 
             // 其他功能
             debug_mode,
@@ -1833,7 +1830,7 @@ impl SearchApp {
             });
         });
 
-        self.draw_circular_buttons(ui, track, index, response.rect.center());
+        self.draw_spotify_circular_buttons(ui, track, index, response.rect.center());
 
         response.context_menu(|ui| self.create_track_context_menu(ui, track));
 
@@ -1892,7 +1889,7 @@ impl SearchApp {
         });
     }
 
-    fn draw_circular_buttons(
+    fn draw_spotify_circular_buttons(
         &mut self,
         ui: &mut egui::Ui,
         track: &Track,
@@ -1902,38 +1899,37 @@ impl SearchApp {
         let button_size = egui::vec2(30.0, 30.0);
         let container_width = 180.0;
         let container_height = 30.0;
-        
+
         let container_pos = egui::pos2(
-            ui.min_rect().right() - container_width - 10.0, 
-            center.y - container_height / 2.0 + 30.0  
+            ui.min_rect().right() - container_width - 10.0,
+            center.y - container_height / 2.0 + 30.0,
         );
-        
+
         // 繪製展開按鈕
         let expand_button_rect = egui::Rect::from_min_size(
             container_pos + egui::vec2(container_width - button_size.x, 0.0),
-            button_size
+            button_size,
         );
-        
-        if self.expanded_track_index == Some(index) {
 
+        if self.expanded_track_index == Some(index) {
         } else {
             // 如果當前軌道未展開，顯示展開按鈕
             if ui.put(expand_button_rect, egui::Button::new("▶")).clicked() {
                 self.expanded_track_index = Some(index);
             }
         }
-        
+
         if self.expanded_track_index == Some(index) {
             // 計算動畫進度
             let animation_progress = 1.0; // 暫時移除動畫，使用固定值
-            
+
             // 計算動畫中的容器寬度
             let animated_width = container_width * animation_progress;
             let animated_container_rect = egui::Rect::from_min_size(
                 container_pos,
-                egui::vec2(animated_width, container_height)
+                egui::vec2(animated_width, container_height),
             );
-            
+
             // 如果當前軌道被展開，繪製完整的按鈕列表
             ui.painter().rect(
                 animated_container_rect,
@@ -1941,17 +1937,15 @@ impl SearchApp {
                 egui::Color32::from_hex("#FFFFFF").unwrap_or(egui::Color32::WHITE),
                 egui::Stroke::NONE,
             );
-        
+
             let total_buttons = 4; // 減少為4個按鈕
             let spacing = animated_width / (total_buttons as f32 + 1.0);
-        
+
             for i in 0..total_buttons {
-                let button_center = container_pos + egui::vec2(
-                    (i as f32 + 1.0) * spacing,
-                    container_height / 2.0 
-                );
+                let button_center =
+                    container_pos + egui::vec2((i as f32 + 1.0) * spacing, container_height / 2.0);
                 let rect = egui::Rect::from_center_size(button_center, button_size);
-                
+
                 // 只有當按鈕完全顯示時才繪製和處理
                 if rect.right() <= animated_container_rect.right() {
                     ui.painter().circle(
@@ -1960,9 +1954,9 @@ impl SearchApp {
                         egui::Color32::from_hex("#FFFFFF").unwrap_or(egui::Color32::WHITE),
                         egui::Stroke::NONE,
                     );
-            
+
                     self.draw_button_icon(ui, rect, i, track);
-            
+
                     let response = ui.allocate_rect(rect, egui::Sense::click());
                     if response.clicked() {
                         self.handle_button_click(i, track, index, ui.ctx().clone());
@@ -1977,7 +1971,13 @@ impl SearchApp {
                         let hover_text = match i {
                             0 => "開啟",
                             1 => "搜尋",
-                            2 => if track.is_liked.unwrap_or(false) { "取消收藏" } else { "收藏" },
+                            2 => {
+                                if track.is_liked.unwrap_or(false) {
+                                    "取消收藏"
+                                } else {
+                                    "收藏"
+                                }
+                            }
                             3 => "收起",
                             _ => "",
                         };
@@ -1996,55 +1996,91 @@ impl SearchApp {
             // 繪製展開圖標
             if let Some(texture) = self.preloaded_icons.get("expand_on.png") {
                 let icon_size = egui::vec2(21.0, 21.0);
-                let icon_rect = egui::Rect::from_center_size(expand_button_rect.center(), icon_size);
-                ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::BLACK);
+                let icon_rect =
+                    egui::Rect::from_center_size(expand_button_rect.center(), icon_size);
+                ui.painter().image(
+                    texture.id(),
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::BLACK,
+                );
             }
         }
-        
+
         // 請求重繪以實現動畫效果
         ui.ctx().request_repaint();
     }
-    
+
     fn draw_button_icon(&self, ui: &mut egui::Ui, rect: egui::Rect, index: usize, track: &Track) {
         let icon_size = egui::vec2(24.0, 24.0);
         let icon_rect = egui::Rect::from_center_size(rect.center(), icon_size);
-        
+
         match index {
             0 => {
                 if let Some(texture) = self.preloaded_icons.get("search.png") {
-                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::BLACK);
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::BLACK,
+                    );
                 }
-            },
+            }
             1 => {
                 if let Some(texture) = self.preloaded_icons.get("spotify_icon_black.png") {
-                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 }
-            },
+            }
             2 => {
-                let icon_key = if track.is_liked.unwrap_or(false) { "liked.png" } else { "like.png" };
+                let icon_key = if track.is_liked.unwrap_or(false) {
+                    "liked.png"
+                } else {
+                    "like.png"
+                };
                 if let Some(texture) = self.preloaded_icons.get(icon_key) {
-                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 }
-            },
+            }
             3 => {
                 if let Some(texture) = self.preloaded_icons.get("expand_off.png") {
-                    ui.painter().image(texture.id(), icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::BLACK);
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::BLACK,
+                    );
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
-    
-    fn handle_button_click(&mut self, index: usize, track: &Track, track_index: usize, ctx: egui::Context) {
+
+    fn handle_button_click(
+        &mut self,
+        index: usize,
+        track: &Track,
+        track_index: usize,
+        ctx: egui::Context,
+    ) {
         match index {
             0 => self.handle_search_click(track),
             1 => self.handle_open_click(track),
             2 => self.handle_like_click(track, track_index, ctx),
             3 => self.expanded_track_index = None, // 收起按鈕的處理邏輯
-            _ => {},
+            _ => {}
         }
     }
-    
+
     fn handle_search_click(&mut self, track: &Track) {
         self.search_query = track
             .external_urls
@@ -2064,7 +2100,7 @@ impl SearchApp {
             });
         self.perform_search(self.ctx.clone());
     }
-    
+
     fn handle_open_click(&self, track: &Track) {
         if let Some(url) = track.external_urls.get("spotify") {
             if let Err(e) = open_spotify_url(url) {
@@ -2072,7 +2108,7 @@ impl SearchApp {
             }
         }
     }
-    
+
     fn handle_like_click(&mut self, track: &Track, index: usize, ctx: egui::Context) {
         if self.spotify_authorized.load(Ordering::SeqCst)
             && self.spotify_client.lock().unwrap().is_some()
@@ -2346,7 +2382,13 @@ impl SearchApp {
                                 let aspect_ratio = size.0 / size.1;
                                 let image_size =
                                     egui::Vec2::new(max_height * aspect_ratio, max_height);
-                                ui.image((texture.id(), image_size));
+                                let image_response = ui.add(
+                                    egui::Image::new((texture.id(), image_size))
+                                        .sense(egui::Sense::click()),
+                                );
+                                if image_response.clicked() {
+                                    self.selected_beatmapset = Some(index);
+                                }
                             }
                         }
                     } else {
@@ -2373,157 +2415,307 @@ impl SearchApp {
                 });
             });
         });
-
-        self.display_beatmapset_buttons(ui, beatmapset, index, response.rect);
+        self.draw_osu_circular_buttons(ui, beatmapset, index, response.rect.center());
 
         ui.add_space(5.0);
         ui.separator();
     }
 
     //顯示osu譜面集按鈕
-    fn display_beatmapset_buttons(
+    fn draw_osu_circular_buttons(
         &mut self,
         ui: &mut egui::Ui,
         beatmapset: &Beatmapset,
         index: usize,
-        rect: egui::Rect,
+        center: egui::Pos2,
     ) {
         let button_size = egui::vec2(30.0, 30.0);
-        let spacing = 5.0;
-        let total_width = 4.0 * button_size.x + 3.0 * spacing;
+        let container_width = 180.0;
+        let container_height = 30.0;
 
-        // 計算按鈕的起始位置
-        let start_x = rect.right() - total_width - 5.0;
-        let start_y = rect.bottom() - button_size.y - 5.0;
+        let container_pos = egui::pos2(
+            ui.min_rect().right() - container_width - 10.0,
+            center.y - container_height / 2.0 + 30.0,
+        );
 
-        // "播放" 按鈕
-        let play_button_rect = egui::Rect::from_min_size(egui::pos2(start_x, start_y), button_size);
-        let play_status = if let Ok(previews) = self.current_previews.try_lock() {
-            if let Some(sink) = previews.get(&beatmapset.id) {
-                if sink.is_paused() || sink.empty() {
-                    PlayStatus::Stopped
-                } else {
-                    PlayStatus::Playing
+        // 繪製展開按鈕
+        let expand_button_rect = egui::Rect::from_min_size(
+            container_pos + egui::vec2(container_width - button_size.x, 0.0),
+            button_size,
+        );
+
+        if self.expanded_beatmapset_index == Some(index) {
+        } else {
+            // 如果當前譜面集未展開，顯示展開按鈕
+            if ui.put(expand_button_rect, egui::Button::new("▶")).clicked() {
+                self.expanded_beatmapset_index = Some(index);
+            }
+        }
+
+        if self.expanded_beatmapset_index == Some(index) {
+            // 計算動畫進度
+            let animation_progress = 1.0; // 暫時移除動畫，使用固定值
+
+            // 計算動畫中的容器寬度
+            let animated_width = container_width * animation_progress;
+            let animated_container_rect = egui::Rect::from_min_size(
+                container_pos,
+                egui::vec2(animated_width, container_height),
+            );
+
+            // 如果當前譜面集被展開，繪製完整的按鈕列表
+            ui.painter().rect(
+                animated_container_rect,
+                egui::Rounding::same(10.0),
+                egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                egui::Stroke::NONE,
+            );
+
+            let total_buttons = 4;
+            let spacing = animated_width / (total_buttons as f32 + 1.0);
+
+            for i in 0..total_buttons {
+                let button_center =
+                    container_pos + egui::vec2((i as f32 + 1.0) * spacing, container_height / 2.0);
+                let rect = egui::Rect::from_center_size(button_center, button_size);
+
+                // 只有當按鈕完全顯示時才繪製和處理
+                if rect.right() <= animated_container_rect.right() {
+                    ui.painter().circle(
+                        rect.center(),
+                        button_size.x / 2.0,
+                        egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                        egui::Stroke::NONE,
+                    );
+
+                    self.draw_osu_button_icon(ui, rect, i, beatmapset);
+
+                    let response = ui.allocate_rect(rect, egui::Sense::click());
+                    if response.clicked() {
+                        self.handle_osu_button_click(i, beatmapset,  ui.ctx().clone());
+                    }
+                    if response.hovered() {
+                        ui.painter().circle(
+                            rect.center(),
+                            button_size.x / 2.0,
+                            egui::Color32::from_rgb(255, 204, 221), // 淺粉色
+                            egui::Stroke::NONE,
+                        );
+                        let hover_text = match i {
+                            0 => "播放預覽",
+                            1 => "在osu!中打開",
+                            2 => {
+                                if self.is_beatmap_downloaded(beatmapset.id) {
+                                    "刪除"
+                                } else {
+                                    "下載"
+                                }
+                            }
+                            3 => "收起",
+                            _ => "",
+                        };
+                        response.on_hover_text(hover_text);
+                    }
                 }
-            } else {
-                PlayStatus::Stopped
             }
         } else {
-            PlayStatus::Stopped // 如果無法獲得鎖，假設為停止狀態
-        };
-        let play_button_response =
-            self.draw_osu_play_button(ui, index, play_button_rect, play_status);
+            // 如果未展開，只顯示展開按鈕
+            ui.painter().rect(
+                expand_button_rect,
+                egui::Rounding::same(5.0),
+                egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                egui::Stroke::NONE,
+            );
+            // 繪製展開圖標
+            if let Some(texture) = self.preloaded_icons.get("expand_on.png") {
+                let icon_size = egui::vec2(21.0, 21.0);
+                let icon_rect =
+                    egui::Rect::from_center_size(expand_button_rect.center(), icon_size);
+                ui.painter().image(
+                    texture.id(),
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                );
+            }
+        }
 
-        if play_button_response.clicked() {
+        // 請求重繪以實現動畫效果
+        ui.ctx().request_repaint();
+    }
+
+    fn draw_osu_button_icon(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        index: usize,
+        beatmapset: &Beatmapset,
+    ) {
+        let icon_size = egui::vec2(24.0, 24.0);
+        let icon_rect = egui::Rect::from_center_size(rect.center(), icon_size);
+
+        match index {
+            0 => {
+                let icon_key = if self.is_beatmap_playing {
+                    "pause.png"
+                } else {
+                    "play.png"
+                };
+                if let Some(texture) = self.preloaded_icons.get(icon_key) {
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                    );
+                }
+            }
+            1 => {
+                if let Some(texture) = self.preloaded_icons.get("osu!logo@2x.png") {
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                    );
+                }
+            }
+            2 => {
+                let icon_key = if self.is_beatmap_downloaded(beatmapset.id) {
+                    "delete.png"
+                } else if self.get_download_status(beatmapset.id) == DownloadStatus::Downloading {
+                    "downloading.png"
+                } else {
+                    "download.png"
+                };
+                if let Some(texture) = self.preloaded_icons.get(icon_key) {
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                    );
+                }
+            }
+            3 => {
+                if let Some(texture) = self.preloaded_icons.get("expand_off.png") {
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_osu_button_click(
+        &mut self,
+        index: usize,
+        beatmapset: &Beatmapset,
+        ctx: egui::Context,
+    ) {
+        match index {
+            0 => self.handle_osu_preview_click(beatmapset),
+            1 => self.handle_osu_open_click(beatmapset),
+            2 => self.handle_osu_download_click(beatmapset, ctx),
+            3 => self.expanded_beatmapset_index = None, // 收起按鈕的處理邏輯
+            _ => {}
+        }
+    }
+
+    fn handle_osu_preview_click(&mut self, beatmapset: &Beatmapset) {
+        // 實現預覽播放邏輯
+        if let Some(stream_handle) = self.audio_output.as_ref().map(|(_, handle)| handle.clone()) {
             let beatmapset_id = beatmapset.id;
-            let current_previews = self.current_previews.clone();
-            let stream_handle = self.audio_output.as_ref().map(|(_, handle)| handle.clone());
             let volume = self.global_volume;
+            let current_previews = self.current_previews.clone();
+            let is_playing = self.is_beatmap_playing;
 
             tokio::spawn(async move {
-                if let Some(stream_handle) = stream_handle {
-                    let mut previews = current_previews.lock().await;
-                    if let Some(sink) = previews.get_mut(&beatmapset_id) {
-                        if sink.is_paused() || sink.empty() {
-                            info!("恢復播放 beatmapset ID: {}", beatmapset_id);
-                            sink.set_volume(volume);
-                            sink.play();
-                        } else {
-                            info!("暫停播放 beatmapset ID: {}", beatmapset_id);
-                            sink.pause();
-                        }
-                    } else {
-                        info!("開始預覽播放 beatmapset ID: {}", beatmapset_id);
-                        match preview_beatmap(beatmapset_id, &stream_handle, volume).await {
-                            Ok(new_sink) => {
-                                info!("新的 Sink 已創建，開始播放");
-                                new_sink.play();
-                                previews.insert(beatmapset_id, new_sink);
-
-                                // 監聽播放完成事件
-                                let current_previews_clone = current_previews.clone();
-                                tokio::spawn(async move {
-                                    loop {
-                                        tokio::time::sleep(std::time::Duration::from_millis(100))
-                                            .await;
-                                        let mut previews = current_previews_clone.lock().await;
-                                        if let Some(sink) = previews.get_mut(&beatmapset_id) {
-                                            if sink.empty() {
-                                                info!("播放完成，移除 Sink");
-                                                previews.remove(&beatmapset_id);
-                                                break;
-                                            }
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => error!("預覽播放失敗: {:?}", e),
-                        }
+                if is_playing {
+                    // 如果正在播放，則停止
+                    if let Some(sink) = current_previews.lock().await.get_mut(&beatmapset_id) {
+                        sink.stop();
                     }
                 } else {
-                    error!("無法獲取音頻輸出流句柄");
+                    // 如果沒有播放，則開始播放
+                    match preview_beatmap(beatmapset_id, &stream_handle, volume).await {
+                        Ok(sink) => {
+                            let mut previews = current_previews.lock().await;
+                            if let Some(old_sink) = previews.insert(beatmapset_id, sink) {
+                                old_sink.stop();
+                            }
+                            if let Some(new_sink) = previews.get_mut(&beatmapset_id) {
+                                new_sink.play();
+                            }
+                        }
+                        Err(e) => error!("預覽播放失敗: {:?}", e),
+                    }
                 }
             });
         }
+        // 切換播放狀態
+        self.is_beatmap_playing = !self.is_beatmap_playing;
+    }
 
-        play_button_response.on_hover_text("預覽播放");
-
-        // "以此搜尋" 按鈕
-        let search_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x + button_size.x + spacing, start_y),
-            button_size,
-        );
-        let search_button_response =
-            self.draw_search_button(ui, index, search_button_rect, ButtonType::Osu);
-
-        if search_button_response.clicked() {
-            let osu_url = format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id);
-            self.search_query = osu_url;
-            let ctx = ui.ctx().clone();
-            self.perform_search(ctx);
+    fn handle_osu_open_click(&self, beatmapset: &Beatmapset) {
+        let url = format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id);
+        if let Err(e) = open::that(url) {
+            error!("無法在osu!中打開譜面: {:?}", e);
         }
+    }
 
-        search_button_response.on_hover_text("以此搜尋");
-
-        // "下載" 按鈕
-        let download_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x + 2.0 * (button_size.x + spacing), start_y),
-            button_size,
-        );
-
-        let download_status = self.get_download_status(beatmapset.id);
-        let download_button_response =
-            self.draw_download_button(ui, index, download_button_rect, download_status);
-
-        if download_button_response.clicked() {
-            self.handle_download_button_click(beatmapset.id, download_status);
-        }
-
-        download_button_response.on_hover_text(match download_status {
-            DownloadStatus::NotStarted => "下載",
-            DownloadStatus::Waiting => "等待中",
-            DownloadStatus::Downloading => "下載中",
-            DownloadStatus::Completed => "已下載",
-        });
-
-        // "打開" 按鈕
-        let open_button_rect = egui::Rect::from_min_size(
-            egui::pos2(start_x + 3.0 * (button_size.x + spacing), start_y),
-            button_size,
-        );
-        let open_button_response =
-            self.draw_open_browser_button(ui, index, open_button_rect, ButtonType::Osu);
-
-        if open_button_response.clicked() {
-            if let Err(e) = open::that(format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id))
-            {
-                error!("無法打開瀏覽器: {:?}", e);
+    fn handle_osu_download_click(
+        &mut self,
+        beatmapset: &Beatmapset,
+        ctx: egui::Context,
+    ) {
+        let beatmapset_id = beatmapset.id;
+        if self.is_beatmap_downloaded(beatmapset_id) {
+            // 如果已下載,則刪除
+            match delete_beatmap(&self.download_directory, beatmapset_id) {
+                Ok(_) => {
+                    info!("成功刪除譜面 {}", beatmapset_id);
+                    self.beatmapset_download_statuses
+                        .lock()
+                        .unwrap()
+                        .insert(beatmapset_id, DownloadStatus::NotStarted);
+                }
+                Err(e) => {
+                    error!("無法刪除譜面 {}: {:?}", beatmapset_id, e);
+                }
+            }
+        } else {
+            // 如果未下載,則開始下載
+            info!("將譜面 {} 加入下載隊列", beatmapset_id);
+            let current_downloads = self.current_downloads.load(Ordering::SeqCst);
+            if current_downloads < 3 {
+                self.beatmapset_download_statuses
+                    .lock()
+                    .unwrap()
+                    .insert(beatmapset_id, DownloadStatus::Downloading);
+            } else {
+                self.beatmapset_download_statuses
+                    .lock()
+                    .unwrap()
+                    .insert(beatmapset_id, DownloadStatus::Waiting);
+            }
+            if let Err(e) = self.download_queue_sender.try_send(beatmapset_id) {
+                error!("無法將譜面加入下載隊列: {:?}", e);
+                self.beatmapset_download_statuses
+                    .lock()
+                    .unwrap()
+                    .insert(beatmapset_id, DownloadStatus::NotStarted);
             }
         }
+        ctx.request_repaint();
+    }
 
-        open_button_response.on_hover_text("在瀏覽器中打開");
+    fn is_beatmap_downloaded(&self, beatmapset_id: i32) -> bool {
+        osu::is_beatmap_downloaded(&self.download_directory, beatmapset_id)
     }
 
     fn get_download_status(&self, beatmapset_id: i32) -> DownloadStatus {
@@ -2538,55 +2730,70 @@ impl SearchApp {
                 .unwrap_or(DownloadStatus::NotStarted)
         }
     }
-
-    //處理下載按鈕點擊
-    fn handle_download_button_click(
+    //繪製搜索按鈕
+    fn draw_search_button(
         &mut self,
-        beatmapset_id: i32,
-        download_status: DownloadStatus,
-    ) {
-        match download_status {
-            DownloadStatus::Completed => {
-                info!("嘗試刪除圖譜 {}", beatmapset_id);
-                match delete_beatmap(&self.download_directory, beatmapset_id) {
-                    Ok(_) => {
-                        info!("成功刪除圖譜 {}", beatmapset_id);
-                        self.beatmapset_download_statuses
-                            .lock()
-                            .unwrap()
-                            .insert(beatmapset_id, DownloadStatus::NotStarted);
-                    }
-                    Err(e) => {
-                        error!("無法刪除圖譜 {}: {:?}", beatmapset_id, e);
-                    }
-                }
-            }
-            DownloadStatus::NotStarted => {
-                info!("將圖譜 {} 加入下載隊列", beatmapset_id);
-                let current_downloads = self.current_downloads.load(Ordering::SeqCst);
-                if current_downloads < 3 {
-                    self.beatmapset_download_statuses
-                        .lock()
-                        .unwrap()
-                        .insert(beatmapset_id, DownloadStatus::Downloading);
-                } else {
-                    self.beatmapset_download_statuses
-                        .lock()
-                        .unwrap()
-                        .insert(beatmapset_id, DownloadStatus::Waiting);
-                }
-                if let Err(e) = self.download_queue_sender.try_send(beatmapset_id) {
-                    error!("無法將圖譜加入下載隊列: {:?}", e);
-                    self.beatmapset_download_statuses
-                        .lock()
-                        .unwrap()
-                        .insert(beatmapset_id, DownloadStatus::NotStarted);
-                }
-            }
-            DownloadStatus::Downloading | DownloadStatus::Waiting => {
-                info!("圖譜正在下載或等待中");
-            }
+        ui: &mut egui::Ui,
+        index: usize,
+        rect: egui::Rect,
+        button_type: ButtonType,
+    ) -> egui::Response {
+        let animation_progress = match button_type {
+            ButtonType::Spotify => self
+                .spotify_search_button_states
+                .entry(index)
+                .or_insert(0.0),
+
+        };
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+
+        if response.hovered() {
+            *animation_progress =
+                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
+        } else {
+            *animation_progress =
+                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
         }
+
+        let center = rect.center();
+        let radius = rect.height() / 2.0;
+
+        // 繪製圓形背景
+        let bg_color = egui::Color32::from_rgba_unmultiplied(
+            200 + ((55) as f32 * *animation_progress) as u8,
+            200 + ((55) as f32 * *animation_progress) as u8,
+            200 + ((55) as f32 * *animation_progress) as u8,
+            255,
+        );
+        ui.painter()
+            .circle(center, radius, bg_color, egui::Stroke::NONE);
+
+        // 繪製搜索圖標
+        let icon_color = egui::Color32::from_rgba_unmultiplied(
+            0 + ((255) as f32 * *animation_progress) as u8,
+            0 + ((255) as f32 * *animation_progress) as u8,
+            0 + ((255) as f32 * *animation_progress) as u8,
+            255,
+        );
+
+        // 繪製放大鏡
+        let glass_center = center + egui::vec2(-radius * 0.2, -radius * 0.2);
+        let glass_radius = radius * 0.5;
+        ui.painter().circle_stroke(
+            glass_center,
+            glass_radius,
+            egui::Stroke::new(2.0, icon_color),
+        );
+
+        // 繪製放大鏡手柄
+        let handle_start = glass_center + egui::vec2(glass_radius * 0.7, glass_radius * 0.7);
+        let handle_end = handle_start + egui::vec2(radius * 0.4, radius * 0.4);
+        ui.painter().line_segment(
+            [handle_start, handle_end],
+            egui::Stroke::new(2.0, icon_color),
+        );
+
+        response
     }
 
     fn start_download_processor(&self) {
@@ -2761,428 +2968,7 @@ impl SearchApp {
             textures.clear();
         }
     }
-    //繪製播放按鈕
-    fn draw_osu_play_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        rect: egui::Rect,
-        status: PlayStatus,
-    ) -> egui::Response {
-        let animation_progress = self.osu_play_button_states.entry(index).or_insert(0.0);
-        let response = ui.allocate_rect(rect, egui::Sense::click());
 
-        if response.hovered() {
-            *animation_progress =
-                (*animation_progress + ui.input(|i| i.unstable_dt) * ANIMATION_SPEED).min(1.0);
-        } else {
-            *animation_progress =
-                (*animation_progress - ui.input(|i| i.unstable_dt) * ANIMATION_SPEED).max(0.0);
-        }
-
-        let center = rect.center();
-        let radius = rect.height() / 2.0;
-
-        // 繪製圓形背景
-        let bg_color = match status {
-            PlayStatus::Playing => egui::Color32::from_rgba_unmultiplied(0, 255, 0, 255),
-            PlayStatus::Stopped => egui::Color32::from_rgba_unmultiplied(
-                200 + ((55.0 * *animation_progress) as u8),
-                200 + ((55.0 * *animation_progress) as u8),
-                200 + ((55.0 * *animation_progress) as u8),
-                255,
-            ),
-        };
-        ui.painter()
-            .circle(center, radius, bg_color, egui::Stroke::NONE);
-
-        // 繪製播放/暫停圖標
-        let icon_color = egui::Color32::from_rgba_unmultiplied(
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            255,
-        );
-        match status {
-            PlayStatus::Playing => {
-                // 繪製暫停圖標 (兩個豎線)
-                let bar_width = radius * 0.3;
-                let bar_height = radius * 1.2;
-                ui.painter().rect_filled(
-                    egui::Rect::from_center_size(
-                        center + egui::vec2(-bar_width, 0.0),
-                        egui::vec2(bar_width, bar_height),
-                    ),
-                    0.0,
-                    icon_color,
-                );
-                ui.painter().rect_filled(
-                    egui::Rect::from_center_size(
-                        center + egui::vec2(bar_width, 0.0),
-                        egui::vec2(bar_width, bar_height),
-                    ),
-                    0.0,
-                    icon_color,
-                );
-            }
-            PlayStatus::Stopped => {
-                // 繪製播放圖標 (三角形)
-                let triangle_size = radius * 0.7;
-                let triangle_points = [
-                    center + egui::vec2(-triangle_size * 0.5, -triangle_size * 0.866),
-                    center + egui::vec2(-triangle_size * 0.5, triangle_size * 0.866),
-                    center + egui::vec2(triangle_size, 0.0),
-                ];
-                ui.painter().add(egui::Shape::convex_polygon(
-                    triangle_points.to_vec(),
-                    icon_color,
-                    egui::Stroke::NONE,
-                ));
-            }
-        }
-
-        response
-    }
-    //繪製下載按鈕
-    fn draw_download_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        rect: egui::Rect,
-        status: DownloadStatus,
-    ) -> egui::Response {
-        let animation_progress = self.osu_download_button_states.entry(index).or_insert(0.0);
-        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-
-        if response.hovered() {
-            *animation_progress =
-                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
-        } else {
-            *animation_progress =
-                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
-        }
-
-        let center = rect.center();
-        let radius = rect.height() / 2.0;
-
-        // 繪製圓形背景
-        let bg_color = match status {
-            DownloadStatus::NotStarted => egui::Color32::from_rgba_unmultiplied(
-                200 + ((55) as f32 * *animation_progress) as u8,
-                200 + ((55) as f32 * *animation_progress) as u8,
-                200 + ((55) as f32 * *animation_progress) as u8,
-                255,
-            ),
-            DownloadStatus::Waiting => egui::Color32::from_rgba_unmultiplied(255, 255, 0, 255),
-            DownloadStatus::Downloading => egui::Color32::from_rgba_unmultiplied(255, 165, 0, 255),
-            DownloadStatus::Completed => {
-                if response.hovered() {
-                    egui::Color32::from_rgba_unmultiplied(255, 0, 0, 255) // 紅色
-                } else {
-                    egui::Color32::from_rgba_unmultiplied(0, 255, 0, 255) // 綠色
-                }
-            }
-        };
-        ui.painter()
-            .circle(center, radius, bg_color, egui::Stroke::NONE);
-
-        // 繪製圖標
-        let icon_color = egui::Color32::from_rgba_unmultiplied(
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            255,
-        );
-        match status {
-            DownloadStatus::NotStarted => {
-                // 繪製下載圖標 (箭頭指向下方)
-                let arrow_top = center + egui::vec2(0.0, -radius * 0.3);
-                let arrow_bottom = center + egui::vec2(0.0, radius * 0.3);
-                ui.painter().line_segment(
-                    [arrow_top, arrow_bottom],
-                    egui::Stroke::new(2.0, icon_color),
-                );
-                let arrow_left = center + egui::vec2(-radius * 0.2, radius * 0.1);
-                let arrow_right = center + egui::vec2(radius * 0.2, radius * 0.1);
-                ui.painter().line_segment(
-                    [arrow_left, arrow_bottom],
-                    egui::Stroke::new(2.0, icon_color),
-                );
-                ui.painter().line_segment(
-                    [arrow_right, arrow_bottom],
-                    egui::Stroke::new(2.0, icon_color),
-                );
-            }
-            DownloadStatus::Waiting => {
-                // 繪製等待圖標 (例如，一個沙漏或時鐘圖標)
-                let clock_radius = radius * 0.6;
-                ui.painter().circle_stroke(
-                    center,
-                    clock_radius,
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
-                let hand_angle = (ui.input(|i| i.time) as f32 * 2.0) % (2.0 * std::f32::consts::PI);
-                let hand_end =
-                    center + egui::vec2(hand_angle.cos(), hand_angle.sin()) * clock_radius * 0.8;
-                ui.painter().line_segment(
-                    [center, hand_end],
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
-            }
-            DownloadStatus::Downloading => {
-                // 繪製旋轉的圓弧表示下載中
-                let angle = (ui.input(|i| i.time) as f32 * 3.0) % (2.0 * std::f32::consts::PI);
-                let start_angle = angle;
-                let end_angle = angle + std::f32::consts::PI * 1.5;
-
-                // 繪製背景圓圈
-                ui.painter().circle_stroke(
-                    center,
-                    radius * 0.7,
-                    egui::Stroke::new(2.0, egui::Color32::from_gray(200)),
-                );
-
-                // 繪製旋轉的圓弧
-                let num_points = 30; // 控制圓弧的平滑度
-                let points: Vec<egui::Pos2> = (0..=num_points)
-                    .map(|i| {
-                        let t = i as f32 / num_points as f32;
-                        let angle = start_angle + t * (end_angle - start_angle);
-                        center + egui::vec2(angle.cos(), angle.sin()) * (radius * 0.7)
-                    })
-                    .collect();
-                ui.painter().add(egui::Shape::line(
-                    points,
-                    egui::Stroke::new(2.0, egui::Color32::BLUE),
-                ));
-
-                // 繪製箭頭
-                let arrow_top = center + egui::vec2(0.0, -radius * 0.3);
-                let arrow_bottom = center + egui::vec2(0.0, radius * 0.3);
-                ui.painter().line_segment(
-                    [arrow_top, arrow_bottom],
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
-                let arrow_left = center + egui::vec2(-radius * 0.2, radius * 0.1);
-                let arrow_right = center + egui::vec2(radius * 0.2, radius * 0.1);
-                ui.painter().line_segment(
-                    [arrow_left, arrow_bottom],
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
-                ui.painter().line_segment(
-                    [arrow_right, arrow_bottom],
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                );
-            }
-            DownloadStatus::Completed => {
-                if response.hovered() {
-                    // 繪製紅色 X
-                    let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
-                    ui.painter().line_segment(
-                        [
-                            center + egui::vec2(-radius * 0.5, -radius * 0.5),
-                            center + egui::vec2(radius * 0.5, radius * 0.5),
-                        ],
-                        stroke,
-                    );
-                    ui.painter().line_segment(
-                        [
-                            center + egui::vec2(-radius * 0.5, radius * 0.5),
-                            center + egui::vec2(radius * 0.5, -radius * 0.5),
-                        ],
-                        stroke,
-                    );
-                } else {
-                    // 繪製綠色勾勾
-                    let check_left = center + egui::vec2(-radius * 0.3, 0.0);
-                    let check_middle = center + egui::vec2(-radius * 0.1, radius * 0.2);
-                    let check_right = center + egui::vec2(radius * 0.3, -radius * 0.2);
-                    ui.painter().line_segment(
-                        [check_left, check_middle],
-                        egui::Stroke::new(2.0, egui::Color32::WHITE),
-                    );
-                    ui.painter().line_segment(
-                        [check_middle, check_right],
-                        egui::Stroke::new(2.0, egui::Color32::WHITE),
-                    );
-                }
-            }
-        }
-
-        response
-    }
-    //繪製搜索按鈕
-    fn draw_search_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        rect: egui::Rect,
-        button_type: ButtonType,
-    ) -> egui::Response {
-        let animation_progress = match button_type {
-            ButtonType::Spotify => self
-                .spotify_search_button_states
-                .entry(index)
-                .or_insert(0.0),
-            ButtonType::Osu => self.osu_search_button_states.entry(index).or_insert(0.0),
-        };
-        let response = ui.allocate_rect(rect, egui::Sense::click());
-
-        if response.hovered() {
-            *animation_progress =
-                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
-        } else {
-            *animation_progress =
-                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
-        }
-
-        let center = rect.center();
-        let radius = rect.height() / 2.0;
-
-        // 繪製圓形背景
-        let bg_color = egui::Color32::from_rgba_unmultiplied(
-            200 + ((55) as f32 * *animation_progress) as u8,
-            200 + ((55) as f32 * *animation_progress) as u8,
-            200 + ((55) as f32 * *animation_progress) as u8,
-            255,
-        );
-        ui.painter()
-            .circle(center, radius, bg_color, egui::Stroke::NONE);
-
-        // 繪製搜索圖標
-        let icon_color = egui::Color32::from_rgba_unmultiplied(
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            255,
-        );
-
-        // 繪製放大鏡
-        let glass_center = center + egui::vec2(-radius * 0.2, -radius * 0.2);
-        let glass_radius = radius * 0.5;
-        ui.painter().circle_stroke(
-            glass_center,
-            glass_radius,
-            egui::Stroke::new(2.0, icon_color),
-        );
-
-        // 繪製放大鏡手柄
-        let handle_start = glass_center + egui::vec2(glass_radius * 0.7, glass_radius * 0.7);
-        let handle_end = handle_start + egui::vec2(radius * 0.4, radius * 0.4);
-        ui.painter().line_segment(
-            [handle_start, handle_end],
-            egui::Stroke::new(2.0, icon_color),
-        );
-
-        response
-    }
-
-    //繪製前往瀏覽器按鈕
-    fn draw_open_browser_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        rect: egui::Rect,
-        button_type: ButtonType,
-    ) -> egui::Response {
-        let animation_progress = match button_type {
-            ButtonType::Spotify => self.spotify_open_button_states.entry(index).or_insert(0.0),
-            ButtonType::Osu => self.osu_open_button_states.entry(index).or_insert(0.0),
-        };
-        let response = ui.allocate_rect(rect, egui::Sense::click());
-
-        if response.hovered() {
-            *animation_progress =
-                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
-        } else {
-            *animation_progress =
-                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
-        }
-
-        let center = rect.center();
-        let radius = rect.height() / 2.0;
-
-        // 繪製圓形背景
-        let bg_color_start = egui::Color32::from_rgb(200, 200, 200);
-        let bg_color_end = egui::Color32::LIGHT_BLUE;
-        let bg_color = egui::Color32::from_rgba_unmultiplied(
-            bg_color_start.r()
-                + ((bg_color_end.r() as f32 - bg_color_start.r() as f32)
-                    * *animation_progress as f32) as u8,
-            bg_color_start.g()
-                + ((bg_color_end.g() as f32 - bg_color_start.g() as f32)
-                    * *animation_progress as f32) as u8,
-            bg_color_start.b()
-                + ((bg_color_end.b() as f32 - bg_color_start.b() as f32)
-                    * *animation_progress as f32) as u8,
-            255,
-        );
-        ui.painter()
-            .circle(center, radius, bg_color, egui::Stroke::NONE);
-
-        // 繪製瀏覽器圖標
-        let icon_size = radius * 1.2;
-        let top_left = center - egui::vec2(icon_size / 2.0, icon_size / 2.0);
-        let bottom_right = center + egui::vec2(icon_size / 2.0, icon_size / 2.0);
-
-        let icon_color_start = egui::Color32::BLACK;
-        let icon_color_end = egui::Color32::WHITE;
-        let icon_color = egui::Color32::from_rgba_unmultiplied(
-            icon_color_start.r()
-                + ((icon_color_end.r() as f32 - icon_color_start.r() as f32)
-                    * *animation_progress as f32) as u8,
-            icon_color_start.g()
-                + ((icon_color_end.g() as f32 - icon_color_start.g() as f32)
-                    * *animation_progress as f32) as u8,
-            icon_color_start.b()
-                + ((icon_color_end.b() as f32 - icon_color_start.b() as f32)
-                    * *animation_progress as f32) as u8,
-            255,
-        );
-
-        ui.painter().rect_stroke(
-            egui::Rect::from_two_pos(top_left, bottom_right),
-            egui::Rounding::same(2.0),
-            egui::Stroke::new(2.0, icon_color),
-        );
-
-        // 繪製箭頭
-        let arrow_start = center + egui::vec2(-icon_size / 4.0, 0.0);
-        let arrow_end = center + egui::vec2(icon_size / 4.0, 0.0);
-        ui.painter()
-            .line_segment([arrow_start, arrow_end], egui::Stroke::new(2.0, icon_color));
-
-        let arrow_top = arrow_end + egui::vec2(-icon_size / 8.0, -icon_size / 8.0);
-        let arrow_bottom = arrow_end + egui::vec2(-icon_size / 8.0, icon_size / 8.0);
-        ui.painter()
-            .line_segment([arrow_end, arrow_top], egui::Stroke::new(2.0, icon_color));
-        ui.painter().line_segment(
-            [arrow_end, arrow_bottom],
-            egui::Stroke::new(2.0, icon_color),
-        );
-
-        // 繪製動畫效果
-        if *animation_progress > 0.0 {
-            // 內圈動畫
-            ui.painter().circle_stroke(
-                center,
-                radius * (1.0 + *animation_progress * 0.2),
-                egui::Stroke::new(2.0 * *animation_progress as f32, egui::Color32::WHITE),
-            );
-
-            // 外圈動畫
-            ui.painter().circle_stroke(
-                center,
-                radius * (1.0 + *animation_progress * 0.4),
-                egui::Stroke::new(
-                    1.0 * *animation_progress as f32,
-                    egui::Color32::from_white_alpha((128.0 * *animation_progress) as u8),
-                ),
-            );
-        }
-
-        response
-    }
     //加載默認頭像
     fn load_default_avatar(&mut self) {
         let default_avatar_bytes = include_bytes!("assets/login.png");
@@ -4594,6 +4380,26 @@ impl SearchApp {
             "expand_off.png" => {
                 info!("嘗試加載 expand_off.png");
                 include_bytes!("assets/expand_off.png")
+            }
+            "play.png" => {
+                info!("嘗試加載 play.png");
+                include_bytes!("assets/play.png")
+            }
+            "pause.png" => {
+                info!("嘗試加載 pause.png");
+                include_bytes!("assets/pause.png")
+            }
+            "download.png" => {
+                info!("嘗試加載 download.png");
+                include_bytes!("assets/download.png")
+            }
+            "delete.png" => {
+                info!("嘗試加載 delete.png");
+                include_bytes!("assets/delete.png")
+            }
+            "downloading.png" => {
+                info!("嘗試加載 downloading.png");
+                include_bytes!("assets/downloading.png")
             }
             _ => {
                 error!("未知的圖標路徑: {}", icon_path);
