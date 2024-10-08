@@ -2368,35 +2368,37 @@ impl SearchApp {
 
         ui.allocate_ui_at_rect(response.rect, |ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    let is_image_loaded = if let Ok(textures) = self.cover_textures.try_read() {
-                        textures.get(&index).map_or(false, |opt| opt.is_some())
-                    } else {
-                        false
-                    };
+                if !self.show_side_menu {
+                    ui.vertical(|ui| {
+                        let is_image_loaded = if let Ok(textures) = self.cover_textures.try_read() {
+                            textures.get(&index).map_or(false, |opt| opt.is_some())
+                        } else {
+                            false
+                        };
 
-                    if is_image_loaded {
-                        if let Ok(textures) = self.cover_textures.try_read() {
-                            if let Some(Some((texture, size))) = textures.get(&index) {
-                                let max_height = 100.0;
-                                let aspect_ratio = size.0 / size.1;
-                                let image_size =
-                                    egui::Vec2::new(max_height * aspect_ratio, max_height);
-                                let image_response = ui.add(
-                                    egui::Image::new((texture.id(), image_size))
-                                        .sense(egui::Sense::click()),
-                                );
-                                if image_response.clicked() {
-                                    self.selected_beatmapset = Some(index);
+                        if is_image_loaded {
+                            if let Ok(textures) = self.cover_textures.try_read() {
+                                if let Some(Some((texture, size))) = textures.get(&index) {
+                                    let max_height = 100.0;
+                                    let aspect_ratio = size.0 / size.1;
+                                    let image_size =
+                                        egui::Vec2::new(max_height * aspect_ratio, max_height);
+                                    let image_response = ui.add(
+                                        egui::Image::new((texture.id(), image_size))
+                                            .sense(egui::Sense::click()),
+                                    );
+                                    if image_response.clicked() {
+                                        self.selected_beatmapset = Some(index);
+                                    }
                                 }
                             }
+                        } else {
+                            ui.add_sized([100.0, 100.0], egui::Spinner::new().size(32.0));
                         }
-                    } else {
-                        ui.add_sized([100.0, 100.0], egui::Spinner::new().size(32.0));
-                    }
-                });
+                    });
 
-                ui.add_space(10.0);
+                    ui.add_space(10.0);
+                }
 
                 ui.vertical(|ui| {
                     ui.label(
