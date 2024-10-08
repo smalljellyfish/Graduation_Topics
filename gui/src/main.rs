@@ -59,7 +59,7 @@ use crate::osu::{
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
     get_user_playlists, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
-    remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
+    remove_track_from_liked, search_track, update_currently_playing_wrapper,search_by_artist, Album, AuthStatus,
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{
@@ -1334,6 +1334,7 @@ impl SearchApp {
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
         let spotify_client = self.spotify_client.clone(); // 添加這行
+        let spotify_client = self.spotify_client.clone();
         let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
         self.displayed_osu_results = 10;
         self.clear_cover_textures();
@@ -1432,6 +1433,7 @@ impl SearchApp {
                             external_urls: twc.external_urls.clone(),
                             index: twc.index,
                             is_liked: None, // 添加缺失的 is_liked 字段
+                            on_artist_click: None, // 初始化為 None
                         })
                         .collect();
 
@@ -1572,6 +1574,9 @@ impl SearchApp {
                                     external_urls: twc.external_urls.clone(),
                                     index: twc.index,
                                     is_liked: None, // 初始化為 None
+                                    on_artist_click: Some(Arc::new(Mutex::new(|artist_name: &str| {
+                                        search_by_artist(artist_name);
+                                    }))),
                                 })
                                 .collect();
 
@@ -1882,6 +1887,14 @@ impl SearchApp {
                 )
                 .font(egui::FontId::proportional(self.global_font_size * 0.9)),
             );
+            for artist in &track.artists {
+                if ui.add(egui::Button::new(&artist.name)).clicked() {
+                    if let Some(on_artist_click) = &track.on_artist_click {
+                        let on_artist_click = on_artist_click.lock().unwrap();
+                        on_artist_click(&artist.name);
+                    }
+                }
+            }
             ui.label(
                 egui::RichText::new(&track.album.name)
                     .font(egui::FontId::proportional(self.global_font_size * 0.8)),
