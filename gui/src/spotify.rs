@@ -166,8 +166,7 @@ pub struct Track {
     pub is_liked: Option<bool>,
     #[serde(skip)]
     pub index: usize,
-    #[serde(skip)]
-    pub on_artist_click: Option<Arc<Mutex<dyn Fn(&str) + Send + Sync>>>,
+    
 }
 pub struct TrackWithCover {
     pub name: String,
@@ -202,10 +201,6 @@ pub enum SpotifyUrlStatus {
 pub struct CurrentlyPlaying {
     pub track_info: TrackInfo,
     pub spotify_url: Option<String>,
-}
-
-pub fn search_by_artist(artist_name: &str) {
-    info!("Searching for artist: {}", artist_name);
 }
 
 pub fn is_valid_spotify_url(url: &str) -> Result<SpotifyUrlStatus, SpotifyError> {

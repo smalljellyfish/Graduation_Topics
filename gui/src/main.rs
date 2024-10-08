@@ -59,7 +59,7 @@ use crate::osu::{
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
     get_user_playlists, is_valid_spotify_url, load_spotify_icon, open_spotify_url,
-    remove_track_from_liked, search_track, update_currently_playing_wrapper,search_by_artist, Album, AuthStatus,
+    remove_track_from_liked, search_track, update_currently_playing_wrapper, Album, AuthStatus,
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{
@@ -1334,10 +1334,10 @@ impl SearchApp {
         let err_msg = self.err_msg.clone();
         let sender = self.sender.clone();
         let spotify_client = self.spotify_client.clone(); // 添加這行
-        let spotify_client = self.spotify_client.clone();
         let ctx_clone = ctx.clone(); // 在這裡克隆 ctx
         self.displayed_osu_results = 10;
         self.clear_cover_textures();
+        self.expanded_beatmapset_index = None;
 
         info!("使用者搜尋: {}", query);
 
@@ -1433,7 +1433,6 @@ impl SearchApp {
                             external_urls: twc.external_urls.clone(),
                             index: twc.index,
                             is_liked: None, // 添加缺失的 is_liked 字段
-                            on_artist_click: None, // 初始化為 None
                         })
                         .collect();
 
@@ -1574,9 +1573,6 @@ impl SearchApp {
                                     external_urls: twc.external_urls.clone(),
                                     index: twc.index,
                                     is_liked: None, // 初始化為 None
-                                    on_artist_click: Some(Arc::new(Mutex::new(|artist_name: &str| {
-                                        search_by_artist(artist_name);
-                                    }))),
                                 })
                                 .collect();
 
@@ -1695,6 +1691,7 @@ impl SearchApp {
             result
         })
     }
+    
 
     //顯示Spotify搜索結果
     fn display_spotify_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
@@ -1869,35 +1866,35 @@ impl SearchApp {
         }
     }
 
-    fn display_track_info(&self, ui: &mut egui::Ui, track: &Track) {
+    fn display_track_info(&mut self, ui: &mut egui::Ui, track: &Track) {
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(&track.name)
                     .font(egui::FontId::proportional(self.global_font_size * 1.0))
                     .strong(),
             );
-            ui.label(
-                egui::RichText::new(
-                    &track
-                        .artists
-                        .iter()
-                        .map(|a| a.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", "),
+            
+            let artist_names = track
+                .artists
+                .iter()
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            
+            if ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&artist_names)
+                        .font(egui::FontId::proportional(self.global_font_size * 0.9))
                 )
-                .font(egui::FontId::proportional(self.global_font_size * 0.9)),
-            );
-            for artist in &track.artists {
-                if ui.add(egui::Button::new(&artist.name)).clicked() {
-                    if let Some(on_artist_click) = &track.on_artist_click {
-                        let on_artist_click = on_artist_click.lock().unwrap();
-                        on_artist_click(&artist.name);
-                    }
-                }
+                .sense(egui::Sense::click())
+            ).clicked() {
+                self.search_query = artist_names.clone();
+                self.perform_search(self.ctx.clone());
             }
+            
             ui.label(
                 egui::RichText::new(&track.album.name)
-                    .font(egui::FontId::proportional(self.global_font_size * 0.8)),
+                    .font(egui::FontId::proportional(self.global_font_size * 0.7)),
             );
         });
     }
@@ -2419,13 +2416,19 @@ impl SearchApp {
                             .font(egui::FontId::proportional(self.global_font_size * 1.0))
                             .strong(),
                     );
-                    ui.label(
-                        egui::RichText::new(&beatmapset.artist)
-                            .font(egui::FontId::proportional(self.global_font_size * 0.9)),
-                    );
+                    if ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&beatmapset.artist)
+                                .font(egui::FontId::proportional(self.global_font_size * 0.9))
+                        )
+                        .sense(egui::Sense::click())
+                    ).clicked() {
+                        self.search_query = beatmapset.artist.clone();
+                        self.perform_search(self.ctx.clone());
+                    }
                     ui.label(
                         egui::RichText::new(format!("by {}", beatmapset.creator))
-                            .font(egui::FontId::proportional(self.global_font_size * 0.8)),
+                            .font(egui::FontId::proportional(self.global_font_size * 0.7)),
                     );
                 });
             });
@@ -2486,7 +2489,7 @@ impl SearchApp {
                 egui::Stroke::NONE,
             );
 
-            let total_buttons = 4;
+            let total_buttons = 5; // 增加到5個按鈕
             let spacing = animated_width / (total_buttons as f32 + 1.0);
 
             for i in 0..total_buttons {
@@ -2526,7 +2529,8 @@ impl SearchApp {
                                     "下載"
                                 }
                             }
-                            3 => "收起",
+                            3 => "以此尋找",
+                            4 => "收起",
                             _ => "",
                         };
                         response.on_hover_text(hover_text);
@@ -2613,6 +2617,16 @@ impl SearchApp {
                 }
             }
             3 => {
+                if let Some(texture) = self.preloaded_icons.get("search.png") {
+                    ui.painter().image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::from_hex("#FF66AA").unwrap(), // 使用HEX #FF66AA
+                    );
+                }
+            }
+            4 => {
                 if let Some(texture) = self.preloaded_icons.get("expand_off.png") {
                     ui.painter().image(
                         texture.id(),
@@ -2636,10 +2650,22 @@ impl SearchApp {
             0 => self.handle_osu_preview_click(beatmapset),
             1 => self.handle_osu_open_click(beatmapset),
             2 => self.handle_osu_download_click(beatmapset, ctx),
-            3 => self.expanded_beatmapset_index = None, // 收起按鈕的處理邏輯
+            3 => self.handle_osu_search_click(beatmapset),
+            4 => self.expanded_beatmapset_index = None, // 收起按鈕的處理邏輯
             _ => {}
         }
     }
+
+    fn handle_osu_search_click(&mut self, beatmapset: &Beatmapset) {
+        self.expanded_beatmapset_index = None;
+        self.search_query = if beatmapset.id != 0 {
+            format!("https://osu.ppy.sh/beatmapsets/{}", beatmapset.id)
+        } else {
+            format!("{} {}", beatmapset.artist, beatmapset.title)
+        };
+        self.perform_search(self.ctx.clone());
+    }
+
 
     fn handle_osu_preview_click(&mut self, beatmapset: &Beatmapset) {
         // 實現預覽播放邏輯
