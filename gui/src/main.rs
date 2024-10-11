@@ -1,5 +1,6 @@
 // 本地模組
 mod osu;
+mod osuhelper;
 mod spotify;
 
 // 標準庫導入
@@ -50,6 +51,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
+use rand::Rng;
 
 // 本地模組導入
 use crate::osu::{
@@ -67,6 +69,8 @@ use lib::{
     need_select_download_directory, read_config, read_login_info, save_download_directory,
     set_log_level, ConfigError,
 };
+
+use osuhelper::OsuHelper;
 
 const BASE_SIDE_MENU_WIDTH: f32 = 300.0;
 const MIN_SIDE_MENU_WIDTH: f32 = 200.0;
@@ -210,7 +214,6 @@ struct SearchApp {
     global_font_size: f32,
     search_bar_expanded: bool,
     is_beatmap_playing: bool,
-
     // 紋理和圖像
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
     cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
@@ -243,8 +246,6 @@ struct SearchApp {
 
     // UI 元素狀態
     spotify_search_button_states: HashMap<usize, f32>,
-    osu_search_button_states: HashMap<usize, f32>,
-
     side_menu_animation: HashMap<egui::Id, f32>,
     global_volume: f32,
     expanded_track_index: Option<usize>,
@@ -257,6 +258,7 @@ struct SearchApp {
     should_detect_now_playing: Arc<AtomicBool>,
     spotify_track_liked_status: Arc<Mutex<HashMap<String, bool>>>,
     osu_download_statuses: HashMap<usize, DownloadStatus>,
+    osu_helper: OsuHelper,
 
     // 快取
     liked_songs_cache: Arc<Mutex<Option<PlaylistCache>>>,
@@ -267,6 +269,7 @@ struct SearchApp {
     update_check_result: Arc<Mutex<Option<bool>>>,
     update_check_sender: Sender<bool>,
     update_check_receiver: Receiver<bool>,
+    last_background_key: String,
 
     // 下載相關
     download_directory: PathBuf,
@@ -966,6 +969,11 @@ impl SearchApp {
             "download.png",
             "delete.png",
             "downloading.png",
+            "background1.jpg",
+            "background_light1.jpg",
+            "background2.jpg",
+            "background_light2.jpg",
+            "background3.jpg",
         ];
         for path in icon_paths {
             if let Some(texture) = Self::load_icon(&ctx, path) {
@@ -1081,7 +1089,6 @@ impl SearchApp {
 
             // UI 元素狀態
             spotify_search_button_states: HashMap::new(),
-            osu_search_button_states: HashMap::new(),
             side_menu_animation: HashMap::new(),
 
             // 其他功能
@@ -1091,6 +1098,7 @@ impl SearchApp {
             should_detect_now_playing: Arc::new(AtomicBool::new(false)),
             spotify_track_liked_status: Arc::new(Mutex::new(HashMap::new())),
             osu_download_statuses: HashMap::new(),
+            osu_helper: OsuHelper::new(),
 
             // 快取
             liked_songs_cache: Arc::new(Mutex::new(None)),
@@ -1101,6 +1109,7 @@ impl SearchApp {
             update_check_result: Arc::new(Mutex::new(None)),
             update_check_sender,
             update_check_receiver,
+            last_background_key: String::new(),
 
             // 下載相關
             download_directory,
@@ -1691,7 +1700,6 @@ impl SearchApp {
             result
         })
     }
-    
 
     //顯示Spotify搜索結果
     fn display_spotify_results(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
@@ -1873,25 +1881,28 @@ impl SearchApp {
                     .font(egui::FontId::proportional(self.global_font_size * 1.0))
                     .strong(),
             );
-            
+
             let artist_names = track
                 .artists
                 .iter()
                 .map(|a| a.name.clone())
                 .collect::<Vec<_>>()
                 .join(", ");
-            
-            if ui.add(
-                egui::Label::new(
-                    egui::RichText::new(&artist_names)
-                        .font(egui::FontId::proportional(self.global_font_size * 0.9))
+
+            if ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(&artist_names)
+                            .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+                    )
+                    .sense(egui::Sense::click()),
                 )
-                .sense(egui::Sense::click())
-            ).clicked() {
+                .clicked()
+            {
                 self.search_query = artist_names.clone();
                 self.perform_search(self.ctx.clone());
             }
-            
+
             ui.label(
                 egui::RichText::new(&track.album.name)
                     .font(egui::FontId::proportional(self.global_font_size * 0.7)),
@@ -2416,13 +2427,16 @@ impl SearchApp {
                             .font(egui::FontId::proportional(self.global_font_size * 1.0))
                             .strong(),
                     );
-                    if ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&beatmapset.artist)
-                                .font(egui::FontId::proportional(self.global_font_size * 0.9))
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(&beatmapset.artist)
+                                    .font(egui::FontId::proportional(self.global_font_size * 0.9)),
+                            )
+                            .sense(egui::Sense::click()),
                         )
-                        .sense(egui::Sense::click())
-                    ).clicked() {
+                        .clicked()
+                    {
                         self.search_query = beatmapset.artist.clone();
                         self.perform_search(self.ctx.clone());
                     }
@@ -2510,7 +2524,7 @@ impl SearchApp {
 
                     let response = ui.allocate_rect(rect, egui::Sense::click());
                     if response.clicked() {
-                        self.handle_osu_button_click(i, beatmapset,  ui.ctx().clone());
+                        self.handle_osu_button_click(i, beatmapset, ui.ctx().clone());
                     }
                     if response.hovered() {
                         ui.painter().circle(
@@ -2666,7 +2680,6 @@ impl SearchApp {
         self.perform_search(self.ctx.clone());
     }
 
-
     fn handle_osu_preview_click(&mut self, beatmapset: &Beatmapset) {
         // 實現預覽播放邏輯
         if let Some(stream_handle) = self.audio_output.as_ref().map(|(_, handle)| handle.clone()) {
@@ -2709,11 +2722,7 @@ impl SearchApp {
         }
     }
 
-    fn handle_osu_download_click(
-        &mut self,
-        beatmapset: &Beatmapset,
-        ctx: egui::Context,
-    ) {
+    fn handle_osu_download_click(&mut self, beatmapset: &Beatmapset, ctx: egui::Context) {
         let beatmapset_id = beatmapset.id;
         if self.is_beatmap_downloaded(beatmapset_id) {
             // 如果已下載,則刪除
@@ -2784,7 +2793,6 @@ impl SearchApp {
                 .spotify_search_button_states
                 .entry(index)
                 .or_insert(0.0),
-
         };
         let response = ui.allocate_rect(rect, egui::Sense::click());
 
@@ -3222,6 +3230,7 @@ impl SearchApp {
                 {
                     info!("點擊了: Spotify 搜尋");
                     self.show_side_menu = false;
+                    self.osu_helper.show = false;
                 }
                 if self
                     .create_auth_button(ui, "Playlists", "spotify_icon_black.png")
@@ -3230,13 +3239,7 @@ impl SearchApp {
                     info!("點擊了: Spotify 播放清單");
                     self.show_playlists = true;
                     self.load_user_playlists();
-                }
-                if self
-                    .create_auth_button(ui, "Now Playing", "spotify_icon_black.png")
-                    .clicked()
-                {
-                    info!("點擊了: Spotify 正在播放");
-                    self.show_side_menu = false;
+                    self.osu_helper.show = false;
                 }
             });
 
@@ -3251,6 +3254,7 @@ impl SearchApp {
                 {
                     info!("點擊了: Osu 節奏圖譜");
                     self.show_side_menu = false;
+                    self.osu_helper.show = false;
                 }
                 if self
                     .create_auth_button(ui, "Scores", "osu!logo.png")
@@ -3258,12 +3262,22 @@ impl SearchApp {
                 {
                     info!("點擊了: Osu 分數");
                     self.show_side_menu = false;
+                    self.osu_helper.show = false;
                 }
                 if self
                     .create_auth_button(ui, "Profile", "osu!logo.png")
                     .clicked()
                 {
                     info!("點擊了: Osu 個人檔案");
+                    self.show_side_menu = false;
+                    self.osu_helper.show = false;
+                }
+                if self
+                    .create_auth_button(ui, "Osu Helper", "osu!logo.png")
+                    .clicked()
+                {
+                    info!("點擊了: Osu Helper");
+                    self.osu_helper.show = true;
                     self.show_side_menu = false;
                 }
             });
@@ -3367,6 +3381,7 @@ impl SearchApp {
                 if ui.button("About").clicked() {
                     info!("點擊了: 關於");
                     self.show_side_menu = false;
+                    self.osu_helper.show = false;
                 }
             });
     }
@@ -4442,6 +4457,26 @@ impl SearchApp {
                 info!("嘗試加載 downloading.png");
                 include_bytes!("assets/downloading.png")
             }
+            "background1.jpg" => {
+                info!("嘗試加載 background.jpg");
+                include_bytes!("assets/background1.jpg")
+            }
+            "background_light1.jpg" => {
+                info!("嘗試加載 background_light.jpg");
+                include_bytes!("assets/background_light1.jpg")
+            }
+            "background2.jpg" => {
+                info!("嘗試加載 background2.jpg");
+                include_bytes!("assets/background2.jpg")
+            }
+            "background_light2.jpg" => {
+                info!("嘗試加載 background_light2.jpg");
+                include_bytes!("assets/background_light2.jpg")
+            }
+            "background3.jpg" => {
+                info!("嘗試加載 background3.jpg");
+                include_bytes!("assets/background3.jpg")
+            }
             _ => {
                 error!("未知的圖標路徑: {}", icon_path);
                 return None;
@@ -4468,39 +4503,68 @@ impl SearchApp {
     // 渲染中央面板
     fn render_central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let available_width = ui.available_width();
-            let available_height = ui.available_height();
+            let available_rect = ui.max_rect();
+    
+            // 如果背景圖片尚未選擇，則根據主題模式選擇一張背景圖片
+            if self.last_background_key.is_empty() {
+                let mut rng = rand::thread_rng();
+                let background_index = if self.last_background_key == "background2.jpg" || self.last_background_key == "background_light2.jpg" {
+                    if rng.gen_bool(0.5) { 1 } else { 3 }
+                } else {
+                    rng.gen_range(1..=3)
+                };
+                
+                if ui.visuals().dark_mode {
+                    self.last_background_key = format!("background{}.jpg", background_index);
+                } else {
+                    self.last_background_key = format!("background_light{}.jpg", if background_index == 3 { 1 } else { background_index });
+                }
+                
+                info!("選擇背景圖片: {}", self.last_background_key);
+            }
 
+            // 加載背景圖片
+            let background_image = self.preloaded_icons.get(&self.last_background_key).cloned().unwrap_or_else(|| {
+                Self::load_icon(ctx, &self.last_background_key).unwrap_or_else(|| {
+                    error!("無法加載背景圖片");
+                    ctx.load_texture("background_fallback", egui::ColorImage::example(), Default::default())
+                })
+            });
+    
+            // 渲染背景圖片，增加透明度
+            ui.painter().image(
+                background_image.id(),
+                available_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180), // 增加透明度
+            );
+    
+            // 根據主題選擇遮罩顏色
+            let mask_color = if ui.visuals().dark_mode {
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150) // 半透明黑色
+            } else {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50) // 降低白色透明度
+            };
+    
+            // 添加半透明遮罩
+            ui.painter().rect_filled(
+                available_rect,
+                0.0,
+                mask_color,
+            );
+    
+            // 在背景上方渲染其他內容
             egui::Frame::none()
-                .fill(ui.style().visuals.window_fill())
+                .fill(egui::Color32::TRANSPARENT) // 使用透明背景
                 .show(ui, |ui| {
-                    ui.set_min_width(100.0); // 設置一個合理的最小寬度
-                    ui.set_max_width(available_width); // 使用可用寬度作為最大寬度
-
-                    let window_size = egui::Vec2::new(available_width, available_height);
-
-                    // 使用 egui 的緩存機制來減少重繪
-                    let window_size_changed = ui
-                        .memory_mut(|mem| {
-                            mem.data
-                                .get_temp::<egui::Vec2>(egui::Id::new("window_size"))
-                        })
-                        .map_or(true, |old_size| old_size != window_size);
-
-                    if window_size_changed {
-                        ui.memory_mut(|mem| {
-                            mem.data
-                                .insert_temp(egui::Id::new("window_size"), window_size)
-                        });
-                    }
-
-                    // 使用緩存來減少不必要的樣式更新
+                    let content_rect = ui.max_rect();
+                    let window_size = content_rect.size();
+    
                     self.update_font_size(ui);
-
                     self.display_error_message(ui);
-
+    
                     // 根據視窗大小決定佈局
-                    if available_width >= 1000.0 {
+                    if window_size.x >= 1000.0 {
                         self.render_large_window_layout(ui, window_size);
                     } else {
                         self.render_small_window_layout(ui, window_size);
@@ -4572,40 +4636,40 @@ impl SearchApp {
     }
 
     fn render_small_window_layout(&mut self, ui: &mut egui::Ui, window_size: egui::Vec2) {
-        let scroll_area = egui::ScrollArea::vertical().id_source("small_window_scroll");
-
-        scroll_area.show(ui, |ui| {
-            // Spotify 結果
-            egui::CollapsingHeader::new(
-                egui::RichText::new("Spotify 結果").size(self.global_font_size * 1.1),
-            )
-            .default_open(true)
+        egui::ScrollArea::vertical()
+            .id_source("small_window_scroll")
             .show(ui, |ui| {
-                if self.spotify_scroll_to_top {
-                    ui.scroll_to_cursor(Some(egui::Align::TOP));
-                    self.spotify_scroll_to_top = false;
-                    ui.ctx().request_repaint();
-                }
-                self.display_spotify_results(ui, window_size);
+                // Spotify 結果
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Spotify 結果").size(self.global_font_size * 1.1),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    if self.spotify_scroll_to_top {
+                        ui.scroll_to_cursor(Some(egui::Align::TOP));
+                        self.spotify_scroll_to_top = false;
+                        ui.ctx().request_repaint();
+                    }
+                    self.display_spotify_results(ui, window_size);
+                });
+    
+                // 添加一些間距
+                ui.add_space(20.0);
+    
+                // Osu 結果
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("osu! 結果").size(self.global_font_size * 1.1),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    if self.osu_scroll_to_top {
+                        ui.scroll_to_cursor(Some(egui::Align::TOP));
+                        self.osu_scroll_to_top = false;
+                        ui.ctx().request_repaint();
+                    }
+                    self.display_osu_results(ui, window_size);
+                });
             });
-
-            // 添加一些間距
-            ui.add_space(20.0);
-
-            // Osu 結果
-            egui::CollapsingHeader::new(
-                egui::RichText::new("osu! 結果").size(self.global_font_size * 1.1),
-            )
-            .default_open(true)
-            .show(ui, |ui| {
-                if self.osu_scroll_to_top {
-                    ui.scroll_to_cursor(Some(egui::Align::TOP));
-                    self.osu_scroll_to_top = false;
-                    ui.ctx().request_repaint();
-                }
-                self.display_osu_results(ui, window_size);
-            });
-        });
     }
 
     fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -4941,6 +5005,7 @@ async fn main() -> Result<(), AppError> {
         min_inner_size: Some(egui::Vec2::new(730.0, 430.0)),
         resizable: Some(true),
         maximize_button: Some(true),
+        transparent: Some(true),
         ..Default::default()
     };
 
