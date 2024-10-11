@@ -10,7 +10,7 @@
 > 以什麼語言製作的？為什麼?以及製作過程
   
 我們以Rust製作  
- ==因為Rust有媲美C++的效率，又比C++安全很多== (我恨你空指標)  
+**因為Rust有媲美C++的效率，又比C++安全很多***(我恨你空指標)*  
 在漫長的6個月中，我與我們的組員都十分配合，該寫程式的，該做報告的以及[每天打遊戲王的](https://github.com/Molaylay)  
 至少 我們全都做完了。對吧  
    
@@ -20,3 +20,26 @@
 > 他是如何動的?
 
 流程圖之後再放上來，還沒畫好 他還在打遊戲王
+
+##　詳細的程式
+> 裡面有什麼東西  
+  
+這是我們應用程式最基礎介面的程式
+```rust
+fn update_ui(&mut self, ctx: &egui::Context) {
+    if self
+        .need_repaint
+        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        ctx.request_repaint();
+    }
+
+    egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+        self.render_top_panel(ui);
+    });
+
+    self.render_side_menu(ctx);
+    self.render_central_panel(ctx);
+}
+```
