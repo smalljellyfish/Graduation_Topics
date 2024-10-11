@@ -1,5 +1,5 @@
 # 關於我們的專題 - OSU小工具
-> 從osu找到spotify的同一首歌 以及 從spotify找到osu的同一首歌
+> 從osu找到spotify的同一首歌 以及 從spotify找到osu的同一首歌  
  一切始於我們又又又換專題主題的那個晚上，本來unity要準備開始了，但組員的一番提議，我們從C#鬼轉Rust
 ---
 ## 如何製作的?
