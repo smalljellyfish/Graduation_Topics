@@ -7,7 +7,7 @@
 ---
   
 ## 如何製作的?
-> 以什麼語言製作的？為什麼?以及製作過程
+> 以什麼語言製作的？為什麼?以及製作過程依參數格式化輸出
   
 我們以Rust製作  
 **因為Rust有媲美C++的效率，又比C++安全很多***(我恨你空指標)*  
@@ -18,9 +18,40 @@
   
 ## OSU小工具的流程圖
 > 他是如何動的?
+  
+流程圖之後再放上來，還沒畫好 他還在打遊戲王  
+  
+```mermaid
 
-流程圖之後再放上來，還沒畫好 他還在打遊戲王
+```
+  
+## 開發時程(甘特圖)  
+>我們在這期間都做了些什麼  
+  
+```mermaid
+    gantt
+        title 開發歷程
+        dateFormat MM-DD
+            axisFormat %y-%m-%d
+            
+            section 主題確認  
+                組內討論:crit,active, discuss, 2024-03-02,2d
+            section 可行性研究  
+                Rust程式語言學習:active, done,after discuss,120d
+            section APP製作  
+                程式撰寫:active, done,after discuss,220d
+                APP版面設計:active, done,after discuss,30d
+                APP版面重設:active, done,2024-5-15,30d
+            section 程式測試與修正  
+                程式檢測:active, down,2024-5-1,100d
+                程式檢測:active, down,2024-8-30,20d
+                程式修正:active, down,2024-5-20,100d
+                程式修正:active, down,2024-9-10,30d
+            section 專題製作(報告,海報方面)  
+                海報設計:crit, uxt,2024-9-30,35d
+                簡報製作:crit, uxt,2024-9-30,35d
 
+```
 ## 詳細的程式
 > 裡面有什麼東西  
   
