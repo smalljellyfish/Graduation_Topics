@@ -52,25 +52,202 @@
                 簡報製作:crit, uxt,2024-9-30,35d
 
 ```
-## 詳細的程式
-> 裡面有什麼東西  
+## 詳細的程式 - 簡單了解他是怎麼運作的
+> 裡面是什麼動得很厲害  
   
-這是我們應用程式最基礎介面的程式
+
+就如上面流程圖(他目前還不存在)所展示的，我們是透過Spotify與OSU所提供的API來做最基本的運作
+
+> API的連線(OSU) 
 ```rust
-fn update_ui(&mut self, ctx: &egui::Context) {
-    if self
-        .need_repaint
-        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        ctx.request_repaint();
+pub async fn get_osu_token(client: &Client, debug_mode: bool) -> Result<String, OsuError> {
+    if debug_mode {
+        debug!("開始獲取 Osu token");
     }
 
-    egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-        self.render_top_panel(ui);
-    });
+    let config = read_config(debug_mode).map_err(|e| {
+        error!("讀取配置文件時出錯: {}", e);
+        OsuError::ConfigError(format!("Error reading config: {}", e))
+    })?;
 
-    self.render_side_menu(ctx);
-    self.render_central_panel(ctx);
+    let client_id = &config.osu.client_id;
+    let client_secret = &config.osu.client_secret;
+
+    if debug_mode {
+        debug!("成功讀取 Osu client_id 和 client_secret");
+    }
+
+    let url = "https://osu.ppy.sh/oauth/token";
+    let params = [
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("grant_type", &"client_credentials".to_string()),
+        ("scope", &"public".to_string()),
+    ];
+
+    if debug_mode {
+        debug!("準備發送 Osu token 請求");
+    }
+
+    let response = client.post(url).form(&params).send().await.map_err(|e| {
+        error!("發送 Osu token 請求時出錯: {}", e);
+        OsuError::RequestError(e)
+    })?;
+
+    let token_response: TokenResponse = response.json().await.map_err(|e| {
+        error!("解析 Osu token 回應時出錯: {}", e);
+        OsuError::RequestError(e)
+    })?;
+
+    if debug_mode {
+        debug!("成功獲取 Osu token");
+    }
+
+    Ok(token_response.access_token)
+}
+```
+>輸入框的例外處理(連結錯誤)
+```rust
+pub fn is_valid_spotify_url(url: &str) -> Result<SpotifyUrlStatus, SpotifyError> {
+    lazy_static! {
+        static ref SPOTIFY_URL_REGEX: Regex = Regex::new(
+            r"^https?://open\.spotify\.com/(track|album|playlist)/[a-zA-Z0-9]+(?:\?.*)?$"
+        )
+        .unwrap();
+    }
+
+    if let Ok(parsed_url) = url::Url::parse(url) {
+        match parsed_url.domain() {
+            Some("open.spotify.com") => {
+                if SPOTIFY_URL_REGEX.is_match(url) {
+                    Ok(SpotifyUrlStatus::Valid)
+                } else {
+                    Ok(SpotifyUrlStatus::Incomplete)
+                }
+            }
+            Some(_) => {
+                if url.contains("/track/") || url.contains("/album/") || url.contains("/playlist/")
+                {
+                    Ok(SpotifyUrlStatus::Invalid)
+                } else {
+                    Ok(SpotifyUrlStatus::NotSpotify)
+                }
+            }
+            None => Ok(SpotifyUrlStatus::NotSpotify),
+        }
+    } else {
+        Ok(SpotifyUrlStatus::NotSpotify)
+    }
+}
+```
+接下來確認輸入框的東西都沒問題的話，開始把從個別資料庫中的信息取出(如:歌名、作者名...等)，之後等待兩邊的資料回傳。
+>回傳的結構體樣式(spotify)
+```rust
+pub struct Track {
+    pub name: String,
+    pub artists: Vec<Artist>,
+    pub external_urls: HashMap<String, String>,
+    pub album: Album,
+    pub is_liked: Option<bool>,
+    #[serde(skip)]
+    pub index: usize,
+}
+```
+>將資料放進結構體當中
+```rust
+pub async fn search_track(
+    client: &Client,
+    query: &str,
+    token: &str,
+    limit: u32,
+    offset: u32,
+    debug_mode: bool,
+) -> Result<(Vec<TrackWithCover>, u32), SpotifyError> {
+    let url = format!(
+        "{}/search?q={}&type=track&limit={}&offset={}",
+        SPOTIFY_API_BASE_URL, query, limit, offset
+    );
+
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| SpotifyError::RequestError(e))?;
+
+    if debug_mode {
+        info!("Spotify API 請求詳情:");
+        info!("  URL: {}", url);
+        info!("收到回應狀態碼: {}", response.status());
+    }
+
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| SpotifyError::RequestError(e))?;
+
+    if debug_mode {
+        info!("Spotify API 回應 JSON: {}", response_text);
+    }
+
+    let search_result: SearchResult =
+        serde_json::from_str(&response_text).map_err(|e| SpotifyError::JsonError(e))?;
+
+        match search_result.tracks {
+            Some(tracks) => {
+                let total_tracks = tracks.total;
+                let total_pages = (total_tracks + limit - 1) / limit;
+
+            if debug_mode {
+                info!("找到 {} 首曲目，共 {} 頁", tracks.total, total_pages);
+            }
+
+            let track_infos: Vec<TrackWithCover> = tracks
+                .items
+                .into_iter()
+                .enumerate()
+                .map(|(index, track)| {
+                    let cover_url = track.album.images.first().map(|img| img.url.clone());
+                    let artists_names = track
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.clone())
+                        .collect::<Vec<String>>()
+                        .join(", ");
+
+                    if debug_mode {
+                        if let Some(url) = &cover_url {
+                            info!(
+                                "處理曲目 {}: \"{}\" by {}",
+                                index, track.name, artists_names
+                            );
+                            info!("  專輯封面 URL: {}", url);
+                        } else {
+                            error!(
+                                "處理曲目 {} 時出錯: \"{}\" by {} - 缺少封面 URL",
+                                index, track.name, artists_names
+                            );
+                        }
+                    }
+
+                    TrackWithCover {
+                        name: track.name,
+                        artists: track.artists,
+                        external_urls: track.external_urls,
+                        album_name: track.album.name,
+                        cover_url,
+                        index: index + (offset as usize),
+                    }
+                })
+                .collect();
+
+            if debug_mode {
+                info!("成功處理 {} 首曲目", track_infos.len());
+            }
+
+            Ok((track_infos, total_pages))
+        }
+        None => Err(SpotifyError::ApiError("搜索結果中沒有找到曲目".to_string())),
+    }
 }
 ```
