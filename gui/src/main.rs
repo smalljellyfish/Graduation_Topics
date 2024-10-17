@@ -51,7 +51,6 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use rand::Rng;
 
 // 本地模組導入
 use crate::osu::{
@@ -65,9 +64,9 @@ use crate::spotify::{
     CurrentlyPlaying, Image, SpotifyError, SpotifyUrlStatus, Track, TrackWithCover,
 };
 use lib::{
-    check_and_refresh_token, get_app_data_path, load_download_directory,
-    need_select_download_directory, read_config, read_login_info, save_download_directory,
-    set_log_level, ConfigError,
+    check_and_refresh_token, get_app_data_path, load_background_path, load_download_directory,
+    load_scale_factor, need_select_download_directory, read_config, read_login_info,
+    save_background_path, save_download_directory, save_scale_factor, set_log_level, ConfigError,
 };
 
 use osuhelper::OsuHelper;
@@ -214,6 +213,9 @@ struct SearchApp {
     global_font_size: f32,
     search_bar_expanded: bool,
     is_beatmap_playing: bool,
+    scale_factor: f32,
+    is_first_update: bool,
+
     // 紋理和圖像
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
     cover_textures: Arc<RwLock<HashMap<usize, Option<(Arc<TextureHandle>, (f32, f32))>>>>,
@@ -283,6 +285,11 @@ struct SearchApp {
     // 預覽播放
     audio_output: Option<(OutputStream, OutputStreamHandle)>,
     current_previews: Arc<TokioMutex<HashMap<i32, Sink>>>,
+
+    // 自定義背景
+    custom_background_path: Option<PathBuf>,
+    custom_background: Option<egui::TextureHandle>,
+    need_load_background: bool,
 }
 
 impl eframe::App for SearchApp {
@@ -290,6 +297,15 @@ impl eframe::App for SearchApp {
         if !self.initialized {
             self.initialize(ctx);
         }
+        if self.need_load_background {
+            self.load_background(ctx);
+            self.need_load_background = false;
+        }
+        if self.is_first_update {
+            ctx.set_pixels_per_point(self.scale_factor);
+            self.is_first_update = false;
+        }
+
 
         self.handle_avatar_loading(ctx);
         self.check_auth_status();
@@ -327,6 +343,24 @@ impl SearchApp {
                 Self::handle_osu_cover_load_error(e, debug_mode, &ctx);
             }
         });
+    }
+
+    fn load_background(&mut self, ctx: &egui::Context) {
+        match load_background_path() {
+            Ok(Some(path)) => {
+                self.custom_background_path = Some(path.clone());
+                if let Err(e) = self.load_custom_background(ctx) {
+                    error!("加載自定義背景失敗: {:?}", e);
+                    self.custom_background_path = None;
+                }
+            }
+            Ok(None) => {
+                // 沒有保存的背景路徑，使用默認背景
+            }
+            Err(e) => {
+                error!("加載背景路徑失敗: {:?}", e);
+            }
+        }
     }
 
     fn handle_osu_cover_load_error(e: impl std::fmt::Debug, debug_mode: bool, ctx: &egui::Context) {
@@ -868,6 +902,8 @@ impl SearchApp {
 
         let audio_output = OutputStream::try_default().ok();
 
+        let scale_factor = load_scale_factor().unwrap_or(Some(2.0)).unwrap_or(2.0);
+
         tokio::spawn(async move {
             let client_guard = client_for_refresh.lock().await;
             match check_and_refresh_token(&client_guard, &config, "spotify").await {
@@ -970,10 +1006,7 @@ impl SearchApp {
             "delete.png",
             "downloading.png",
             "background1.jpg",
-            "background_light1.jpg",
-            "background2.jpg",
             "background_light2.jpg",
-            "background3.jpg",
         ];
         for path in icon_paths {
             if let Some(texture) = Self::load_icon(&ctx, path) {
@@ -1013,6 +1046,9 @@ impl SearchApp {
         });
 
         let mut app = Self {
+            // 自定義背景
+            custom_background_path: None,
+            custom_background: None,
             // 認證相關
             access_token: Arc::new(tokio::sync::Mutex::new(String::new())),
             auth_in_progress: Arc::new(AtomicBool::new(false)),
@@ -1056,7 +1092,9 @@ impl SearchApp {
             expanded_track_index: None,
             expanded_beatmapset_index: None,
             is_beatmap_playing: false,
-
+            scale_factor,
+            is_first_update: true,
+            
             // 紋理和圖像
             avatar_load_handle: None,
             cover_textures,
@@ -1123,6 +1161,7 @@ impl SearchApp {
             // 音頻播放
             audio_output,
             current_previews: Arc::new(TokioMutex::new(HashMap::new())),
+            need_load_background: true,
         };
         // 檢查並加載本地頭像
         if let Some(user_name) = app.spotify_user_name.lock().unwrap().clone() {
@@ -3292,13 +3331,19 @@ impl SearchApp {
                 ui.horizontal(|ui| {
                     ui.label("整體縮放:");
                     if ui.button("-").clicked() {
-                        let new_scale = (ui.ctx().pixels_per_point() - 0.1).max(0.5);
-                        ui.ctx().set_pixels_per_point(new_scale);
+                        self.scale_factor = (self.scale_factor - 0.1).max(0.5);
+                        ui.ctx().set_pixels_per_point(self.scale_factor);
+                        if let Err(e) = save_scale_factor(self.scale_factor) {
+                            error!("保存縮放因子失敗: {:?}", e);
+                        }
                     }
-                    ui.label(format!("{:.2}", ui.ctx().pixels_per_point()));
+                    ui.label(format!("{:.2}", self.scale_factor));
                     if ui.button("+").clicked() {
-                        let new_scale = (ui.ctx().pixels_per_point() + 0.1).min(3.0);
-                        ui.ctx().set_pixels_per_point(new_scale);
+                        self.scale_factor = (self.scale_factor + 0.1).min(3.0);
+                        ui.ctx().set_pixels_per_point(self.scale_factor);
+                        if let Err(e) = save_scale_factor(self.scale_factor) {
+                            error!("保存縮放因子失敗: {:?}", e);
+                        }
                     }
                 });
 
@@ -3378,12 +3423,81 @@ impl SearchApp {
                     }
                 });
 
+                ui.add_space(10.0);
+
+                // 自定義背景設置
+                ui.horizontal(|ui| {
+                    ui.label("背景圖片:");
+                    if ui.button("選擇背景").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("圖片", &["png", "jpg", "jpeg"])
+                            .pick_file()
+                        {
+                            self.custom_background_path = Some(path.clone());
+                            if let Err(e) = self.load_custom_background(ui.ctx()) {
+                                error!("加載背景失敗: {:?}", e);
+                                self.custom_background_path = None;
+
+                                // 顯示錯誤視窗
+                                let error_window = egui::Window::new("錯誤")
+                                    .collapsible(false)
+                                    .resizable(false);
+                                error_window.show(ui.ctx(), |ui| {
+                                    ui.label("無法讀取自定義背景,已恢復使用預設背景。");
+                                    if ui.button("確認").clicked() {
+                                        ui.close_menu();
+                                    }
+                                });
+                            } else {
+                                info!("自定義背景已設置: {:?}", path);
+                                if let Err(e) = save_background_path(&self.custom_background_path) {
+                                    error!("保存背景位置失敗: {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("恢復預設背景").clicked() {
+                        self.custom_background_path = None;
+                        self.custom_background = None;
+                        if let Err(e) = save_background_path(&None) {
+                            error!("保存背景位置失敗: {:?}", e);
+                        }
+                        info!("已恢復使用預設背景");
+                    }
+                });
+                if let Some(path) = &self.custom_background_path {
+                    ui.label(format!("當前背景: {}", path.to_string_lossy()));
+                } else {
+                    ui.label("當前使用預設背景");
+                }
+
                 if ui.button("About").clicked() {
                     info!("點擊了: 關於");
                     self.show_side_menu = false;
                     self.osu_helper.show = false;
                 }
             });
+    }
+
+    fn load_custom_background(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(path) = &self.custom_background_path {
+            let image = image::ImageReader::open(path)?.decode()?;
+            let size = [image.width() as _, image.height() as _];
+            let image_buffer = image.to_rgba8();
+            let pixels = image_buffer.as_flat_samples();
+            let texture = ctx.load_texture(
+                "custom_background",
+                egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()),
+                egui::TextureOptions::default(),
+            );
+            self.custom_background = Some(texture);
+            Ok(())
+        } else {
+            Err("No custom background path set".into())
+        }
     }
 
     fn render_playlists(&mut self, ui: &mut egui::Ui) {
@@ -4461,21 +4575,9 @@ impl SearchApp {
                 info!("嘗試加載 background.jpg");
                 include_bytes!("assets/background1.jpg")
             }
-            "background_light1.jpg" => {
-                info!("嘗試加載 background_light.jpg");
-                include_bytes!("assets/background_light1.jpg")
-            }
-            "background2.jpg" => {
-                info!("嘗試加載 background2.jpg");
-                include_bytes!("assets/background2.jpg")
-            }
             "background_light2.jpg" => {
                 info!("嘗試加載 background_light2.jpg");
                 include_bytes!("assets/background_light2.jpg")
-            }
-            "background3.jpg" => {
-                info!("嘗試加載 background3.jpg");
-                include_bytes!("assets/background3.jpg")
             }
             _ => {
                 error!("未知的圖標路徑: {}", icon_path);
@@ -4504,65 +4606,61 @@ impl SearchApp {
     fn render_central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_rect = ui.max_rect();
-    
-            // 如果背景圖片尚未選擇，則根據主題模式選擇一張背景圖片
-            if self.last_background_key.is_empty() {
-                let mut rng = rand::thread_rng();
-                let background_index = if self.last_background_key == "background2.jpg" || self.last_background_key == "background_light2.jpg" {
-                    if rng.gen_bool(0.5) { 1 } else { 3 }
-                } else {
-                    rng.gen_range(1..=3)
-                };
-                
-                if ui.visuals().dark_mode {
-                    self.last_background_key = format!("background{}.jpg", background_index);
-                } else {
-                    self.last_background_key = format!("background_light{}.jpg", if background_index == 3 { 1 } else { background_index });
-                }
-                
-                info!("選擇背景圖片: {}", self.last_background_key);
-            }
 
-            // 加載背景圖片
-            let background_image = self.preloaded_icons.get(&self.last_background_key).cloned().unwrap_or_else(|| {
-                Self::load_icon(ctx, &self.last_background_key).unwrap_or_else(|| {
-                    error!("無法加載背景圖片");
-                    ctx.load_texture("background_fallback", egui::ColorImage::example(), Default::default())
-                })
-            });
-    
-            // 渲染背景圖片，增加透明度
+            // 選擇背景圖片
+            let background_image = if let Some(custom_bg) = &self.custom_background {
+                custom_bg.clone()
+            } else {
+                // 使用預設背景的邏輯保持不變
+                if ui.visuals().dark_mode {
+                    self.last_background_key = "background1.jpg".to_string();
+                } else {
+                    self.last_background_key = "background_light2.jpg".to_string();
+                }
+
+                self.preloaded_icons
+                    .get(&self.last_background_key)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Self::load_icon(ctx, &self.last_background_key).unwrap_or_else(|| {
+                            error!("無法加載背景圖片");
+                            ctx.load_texture(
+                                "background_fallback",
+                                egui::ColorImage::example(),
+                                Default::default(),
+                            )
+                        })
+                    })
+            };
+
+            // 渲染背景圖片
             ui.painter().image(
                 background_image.id(),
                 available_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180), // 增加透明度
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
             );
-    
+
             // 根據主題選擇遮罩顏色
             let mask_color = if ui.visuals().dark_mode {
                 egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150) // 半透明黑色
             } else {
                 egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50) // 降低白色透明度
             };
-    
+
             // 添加半透明遮罩
-            ui.painter().rect_filled(
-                available_rect,
-                0.0,
-                mask_color,
-            );
-    
+            ui.painter().rect_filled(available_rect, 0.0, mask_color);
+
             // 在背景上方渲染其他內容
             egui::Frame::none()
                 .fill(egui::Color32::TRANSPARENT) // 使用透明背景
                 .show(ui, |ui| {
                     let content_rect = ui.max_rect();
                     let window_size = content_rect.size();
-    
+
                     self.update_font_size(ui);
                     self.display_error_message(ui);
-    
+
                     // 根據視窗大小決定佈局
                     if window_size.x >= 1000.0 {
                         self.render_large_window_layout(ui, window_size);
@@ -4652,10 +4750,10 @@ impl SearchApp {
                     }
                     self.display_spotify_results(ui, window_size);
                 });
-    
+
                 // 添加一些間距
                 ui.add_space(20.0);
-    
+
                 // Osu 結果
                 egui::CollapsingHeader::new(
                     egui::RichText::new("osu! 結果").size(self.global_font_size * 1.1),

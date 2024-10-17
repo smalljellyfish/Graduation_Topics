@@ -336,6 +336,56 @@ pub fn save_download_directory(download_directory: &PathBuf) -> Result<(), std::
     Ok(())
 }
 
+pub fn save_background_path(custom_background_path: &Option<PathBuf>) -> Result<(), std::io::Error> {
+    let app_data_path = get_app_data_path();
+    fs::create_dir_all(&app_data_path)?;
+    let config_path = app_data_path.join("background_config.json");
+    
+    let config = serde_json::json!({
+        "background_path": custom_background_path
+    });
+    
+    fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn load_background_path() -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let config_path = get_app_data_path().join("background_config.json");
+    if config_path.exists() {
+        let content = fs::read_to_string(config_path)?;
+        let config: serde_json::Value = serde_json::from_str(&content)?;
+        if let Some(path) = config["background_path"].as_str() {
+            return Ok(Some(PathBuf::from(path)));
+        }
+    }
+    Ok(None)
+}
+
+pub fn save_scale_factor(scale: f32) -> Result<(), std::io::Error> {
+    let app_data_path = get_app_data_path();
+    fs::create_dir_all(&app_data_path)?;
+    let config_path = app_data_path.join("scale_config.json");
+    
+    let config = serde_json::json!({
+        "scale_factor": scale
+    });
+    
+    fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn load_scale_factor() -> Result<Option<f32>, Box<dyn std::error::Error>> {
+    let config_path = get_app_data_path().join("scale_config.json");
+    if config_path.exists() {
+        let content = fs::read_to_string(config_path)?;
+        let config: serde_json::Value = serde_json::from_str(&content)?;
+        if let Some(scale) = config["scale_factor"].as_f64() {
+            return Ok(Some(scale as f32));
+        }
+    }
+    Ok(None)
+}
+
 // 新增一個函數來檢查是否需要選擇下載目錄
 pub fn need_select_download_directory() -> bool {
     load_download_directory().is_none()
