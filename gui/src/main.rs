@@ -7,6 +7,7 @@ mod spotify;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::default::Default;
 use std::env;
 use std::fs;
@@ -54,8 +55,9 @@ use tokio::{
 
 // 本地模組導入
 use crate::osu::{
-    delete_beatmap, get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets, get_osu_token,
-    load_osu_covers, parse_osu_url, preview_beatmap, print_beatmap_info_gui, Beatmapset,
+    delete_beatmap, get_beatmapset_by_id, get_beatmapset_details, get_beatmapsets,
+    get_downloaded_beatmaps, get_osu_token, load_osu_covers, parse_osu_url, preview_beatmap,
+    print_beatmap_info_gui, Beatmapset,
 };
 use crate::spotify::{
     add_track_to_liked, authorize_spotify, get_access_token, get_playlist_tracks, get_track_info,
@@ -99,11 +101,6 @@ pub enum AppError {
 pub enum AuthPlatform {
     Spotify,
     Osu,
-}
-// 定義 ButtonType 列舉，用於標識不同的按鈕類型
-#[derive(Clone, Copy)]
-enum ButtonType {
-    Spotify,
 }
 // 定義 DownloadStatus 列舉，用於標識不同的下載狀態
 #[derive(Clone, Copy, PartialEq)]
@@ -193,6 +190,9 @@ struct SearchApp {
     osu_search_results: Arc<tokio::sync::Mutex<Vec<Beatmapset>>>,
     displayed_spotify_results: usize,
     displayed_osu_results: usize,
+    downloaded_maps_search: String,
+    playlist_search_query: String,
+    tracks_search_query: String,
 
     // 播放列表和曲目
     spotify_user_playlists: Arc<Mutex<Vec<SimplifiedPlaylist>>>,
@@ -215,6 +215,12 @@ struct SearchApp {
     is_beatmap_playing: bool,
     scale_factor: f32,
     is_first_update: bool,
+    show_downloaded_maps: bool,
+    expanded_map_indices: HashSet<String>,
+    show_osu_search_bar: bool,
+    show_playlist_search_bar: bool,
+    show_tracks_search_bar: bool,
+
 
     // 紋理和圖像
     avatar_load_handle: Option<tokio::task::JoinHandle<()>>,
@@ -247,7 +253,6 @@ struct SearchApp {
     sender: Sender<(usize, Arc<TextureHandle>, (f32, f32))>,
 
     // UI 元素狀態
-    spotify_search_button_states: HashMap<usize, f32>,
     side_menu_animation: HashMap<egui::Id, f32>,
     global_volume: f32,
     expanded_track_index: Option<usize>,
@@ -305,7 +310,6 @@ impl eframe::App for SearchApp {
             ctx.set_pixels_per_point(self.scale_factor);
             self.is_first_update = false;
         }
-
 
         self.handle_avatar_loading(ctx);
         self.check_auth_status();
@@ -1069,7 +1073,9 @@ impl SearchApp {
             osu_search_results: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             displayed_spotify_results: 10,
             displayed_osu_results: 10,
-
+            downloaded_maps_search: String::new(),
+            playlist_search_query: String::new(),
+            tracks_search_query: String::new(),
             // 播放列表和曲目
             spotify_user_playlists: Arc::new(Mutex::new(Vec::new())),
             spotify_playlist_tracks: Arc::new(Mutex::new(Vec::new())),
@@ -1094,7 +1100,12 @@ impl SearchApp {
             is_beatmap_playing: false,
             scale_factor,
             is_first_update: true,
-            
+            show_downloaded_maps: false,
+            expanded_map_indices: HashSet::new(),
+            show_osu_search_bar: false,
+            show_playlist_search_bar: false,
+            show_tracks_search_bar: false,
+
             // 紋理和圖像
             avatar_load_handle: None,
             cover_textures,
@@ -1126,7 +1137,6 @@ impl SearchApp {
             sender,
 
             // UI 元素狀態
-            spotify_search_button_states: HashMap::new(),
             side_menu_animation: HashMap::new(),
 
             // 其他功能
@@ -2819,70 +2829,6 @@ impl SearchApp {
                 .unwrap_or(DownloadStatus::NotStarted)
         }
     }
-    //繪製搜索按鈕
-    fn draw_search_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        index: usize,
-        rect: egui::Rect,
-        button_type: ButtonType,
-    ) -> egui::Response {
-        let animation_progress = match button_type {
-            ButtonType::Spotify => self
-                .spotify_search_button_states
-                .entry(index)
-                .or_insert(0.0),
-        };
-        let response = ui.allocate_rect(rect, egui::Sense::click());
-
-        if response.hovered() {
-            *animation_progress =
-                (*animation_progress + ui.input(|i| i.unstable_dt) * 3.0).min(1.0);
-        } else {
-            *animation_progress =
-                (*animation_progress - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
-        }
-
-        let center = rect.center();
-        let radius = rect.height() / 2.0;
-
-        // 繪製圓形背景
-        let bg_color = egui::Color32::from_rgba_unmultiplied(
-            200 + ((55) as f32 * *animation_progress) as u8,
-            200 + ((55) as f32 * *animation_progress) as u8,
-            200 + ((55) as f32 * *animation_progress) as u8,
-            255,
-        );
-        ui.painter()
-            .circle(center, radius, bg_color, egui::Stroke::NONE);
-
-        // 繪製搜索圖標
-        let icon_color = egui::Color32::from_rgba_unmultiplied(
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            0 + ((255) as f32 * *animation_progress) as u8,
-            255,
-        );
-
-        // 繪製放大鏡
-        let glass_center = center + egui::vec2(-radius * 0.2, -radius * 0.2);
-        let glass_radius = radius * 0.5;
-        ui.painter().circle_stroke(
-            glass_center,
-            glass_radius,
-            egui::Stroke::new(2.0, icon_color),
-        );
-
-        // 繪製放大鏡手柄
-        let handle_start = glass_center + egui::vec2(glass_radius * 0.7, glass_radius * 0.7);
-        let handle_end = handle_start + egui::vec2(radius * 0.4, radius * 0.4);
-        ui.painter().line_segment(
-            [handle_start, handle_end],
-            egui::Stroke::new(2.0, icon_color),
-        );
-
-        response
-    }
 
     fn start_download_processor(&self) {
         let download_queue_receiver = self.download_queue_receiver.clone();
@@ -3200,7 +3146,9 @@ impl SearchApp {
     }
 
     fn render_side_menu_content(&mut self, ui: &mut egui::Ui) {
-        if self.show_liked_tracks || self.selected_playlist.is_some() {
+        if self.show_downloaded_maps {
+            self.render_downloaded_maps_list(ui);
+        } else if self.show_liked_tracks || self.selected_playlist.is_some() {
             self.render_playlist_content(ui);
         } else if self.show_playlists {
             self.render_playlists(ui);
@@ -3288,36 +3236,21 @@ impl SearchApp {
             .show(ui, |ui| {
                 ui.add_space(5.0);
                 if self
-                    .create_auth_button(ui, "Beatmaps", "osu!logo.png")
-                    .clicked()
-                {
-                    info!("點擊了: Osu 節奏圖譜");
-                    self.show_side_menu = false;
-                    self.osu_helper.show = false;
-                }
-                if self
-                    .create_auth_button(ui, "Scores", "osu!logo.png")
-                    .clicked()
-                {
-                    info!("點擊了: Osu 分數");
-                    self.show_side_menu = false;
-                    self.osu_helper.show = false;
-                }
-                if self
-                    .create_auth_button(ui, "Profile", "osu!logo.png")
-                    .clicked()
-                {
-                    info!("點擊了: Osu 個人檔案");
-                    self.show_side_menu = false;
-                    self.osu_helper.show = false;
-                }
-                if self
                     .create_auth_button(ui, "Osu Helper", "osu!logo.png")
                     .clicked()
                 {
                     info!("點擊了: Osu Helper");
                     self.osu_helper.show = true;
                     self.show_side_menu = false;
+                }
+
+                ui.add_space(5.0);
+                if self
+                    .create_auth_button(ui, "已下載圖譜", "osu!logo.png")
+                    .clicked()
+                {
+                    info!("點擊了: 已下載圖譜");
+                    self.show_downloaded_maps = true;
                 }
             });
 
@@ -3479,6 +3412,164 @@ impl SearchApp {
             });
     }
 
+    fn render_downloaded_maps_list(&mut self, ui: &mut egui::Ui) {
+        let fixed_width = BASE_SIDE_MENU_WIDTH;
+
+        ui.vertical(|ui| {
+            ui.set_width(fixed_width);
+
+            // 頂部標題列
+            ui.horizontal(|ui| {
+                if ui.button("< 返回").clicked() {
+                    self.show_downloaded_maps = false;
+                    self.show_side_menu = true;
+                }
+                ui.heading("已下載的圖譜");
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                        if ui
+                            .add(egui::ImageButton::new(egui::load::SizedTexture::new(
+                                search_icon.id(),
+                                egui::vec2(16.0, 16.0),
+                            )))
+                            .clicked()
+                        {
+                            self.show_osu_search_bar = !self.show_osu_search_bar;
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(10.0);
+
+            // 搜尋欄（只在需要時顯示）
+            if self.show_osu_search_bar {
+                ui.horizontal(|ui| {
+                    if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                        ui.image(egui::load::SizedTexture::new(
+                            search_icon.id(),
+                            egui::vec2(16.0, 16.0),
+                        ));
+                    }
+                    ui.add_space(5.0);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.downloaded_maps_search)
+                            .hint_text("搜尋圖譜...")
+                            .desired_width(fixed_width - 50.0),
+                    );
+                    if response.changed() {
+                        info!("搜尋關鍵字: {}", self.downloaded_maps_search);
+                    }
+                });
+                ui.add_space(10.0);
+            }
+
+            // 圖譜列表
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let downloaded = get_downloaded_beatmaps(&self.download_directory);
+                if downloaded.is_empty() {
+                    ui.label("尚未下載任何圖譜");
+                } else {
+                    // 先收集所有符合搜尋條件的檔案
+                    let search_term = self.downloaded_maps_search.to_lowercase();
+                    let filtered_maps: Vec<_> = downloaded
+                        .into_iter()
+                        .filter(|file_name| {
+                            search_term.is_empty()
+                                || file_name.to_lowercase().contains(&search_term)
+                        })
+                        .collect();
+
+                    for file_name in filtered_maps {
+                        ui.horizontal(|ui| {
+                            let is_expanded = self.expanded_map_indices.contains(&file_name);
+
+                            // 展開/收起按鈕
+                            if let Some(icon) = self.preloaded_icons.get(if is_expanded {
+                                "expand_off.png"
+                            } else {
+                                "expand_on.png"
+                            }) {
+                                if ui
+                                    .add(egui::ImageButton::new(egui::load::SizedTexture::new(
+                                        icon.id(),
+                                        egui::vec2(16.0, 16.0),
+                                    )))
+                                    .clicked()
+                                {
+                                    if is_expanded {
+                                        self.expanded_map_indices.remove(&file_name);
+                                    } else {
+                                        self.expanded_map_indices.insert(file_name.clone());
+                                    }
+                                }
+                            }
+
+                            // 檔案名稱顯示
+                            let available_width = fixed_width - 50.0;
+                            let text = egui::RichText::new(&file_name).size(14.0);
+
+                            egui::Frame::none().show(ui, |ui| {
+                                ui.set_max_width(available_width);
+                                ui.label(text).on_hover_text(&file_name);
+                            });
+                        });
+
+                        // 如果展開，顯示操作按鈕
+                        if self.expanded_map_indices.contains(&file_name) {
+                            let file_name_clone = file_name.clone();
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+
+                                // 刪除按鈕
+                                if let Some(delete_icon) = self.preloaded_icons.get("delete.png") {
+                                    if ui
+                                        .add(egui::ImageButton::new(egui::load::SizedTexture::new(
+                                            delete_icon.id(),
+                                            egui::vec2(16.0, 16.0),
+                                        )))
+                                        .clicked()
+                                    {
+                                        if let Err(e) = fs::remove_file(
+                                            self.download_directory.join(&file_name),
+                                        ) {
+                                            error!("刪除檔案失敗: {}", e);
+                                        }
+                                    }
+                                }
+
+                                // 搜尋按鈕
+                                if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                                    if ui
+                                        .add(egui::ImageButton::new(egui::load::SizedTexture::new(
+                                            search_icon.id(),
+                                            egui::vec2(16.0, 16.0),
+                                        )))
+                                        .clicked()
+                                    {
+                                        if let Some(id) = Self::extract_beatmap_id(&file_name_clone)
+                                        {
+                                            self.search_query =
+                                                format!("https://osu.ppy.sh/beatmapsets/{}", id);
+                                            self.perform_search(ui.ctx().clone());
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        ui.separator();
+                    }
+                }
+            });
+        });
+    }
+
+    // 新增一個輔助函數來從檔名提取 beatmap ID
+    fn extract_beatmap_id(file_name: &str) -> Option<&str> {
+        file_name.split(' ').find(|s| s.parse::<u32>().is_ok())
+    }
+
     fn load_custom_background(
         &mut self,
         ctx: &egui::Context,
@@ -3507,18 +3598,53 @@ impl SearchApp {
                     self.show_playlists = false;
                 }
                 ui.heading("我的播放清單");
+                
+                // 新增搜尋按鈕
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                        if ui.add(egui::ImageButton::new(
+                            egui::load::SizedTexture::new(
+                                search_icon.id(),
+                                egui::vec2(16.0, 16.0),
+                            ),
+                        )).clicked() {
+                            self.show_playlist_search_bar = !self.show_playlist_search_bar;
+                        }
+                    }
+                });
             });
-
+    
             ui.add_space(10.0);
-
+    
+            // 搜尋欄
+            if self.show_playlist_search_bar {
+                ui.horizontal(|ui| {
+                    if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                        ui.image(egui::load::SizedTexture::new(
+                            search_icon.id(),
+                            egui::vec2(16.0, 16.0),
+                        ));
+                    }
+                    ui.add_space(5.0);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.playlist_search_query)
+                            .hint_text("搜尋播放清單...")
+                            .desired_width(ui.available_width() - 50.0)
+                    );
+                    if response.changed() {
+                        info!("播放清單搜尋關鍵字: {}", self.playlist_search_query);
+                    }
+                });
+                ui.add_space(10.0);
+            }
+    
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // Liked Songs 項目
+                // Liked Songs 項目總是顯示
                 self.render_liked_songs_item(ui);
-
                 ui.add_space(5.0);
                 ui.separator();
-
-                // 原有的播放清單顯示邏輯
+    
+                // 過濾播放清單
                 let playlists_clone = {
                     if let Ok(playlists) = self.spotify_user_playlists.lock() {
                         playlists.clone()
@@ -3526,8 +3652,14 @@ impl SearchApp {
                         Vec::new()
                     }
                 };
-
-                for playlist in playlists_clone {
+    
+                let search_term = self.playlist_search_query.to_lowercase();
+                let filtered_playlists = playlists_clone.into_iter().filter(|playlist| {
+                    search_term.is_empty() || 
+                    playlist.name.to_lowercase().contains(&search_term)
+                });
+    
+                for playlist in filtered_playlists {
                     self.render_playlist_item(ui, &playlist);
                 }
             });
@@ -3687,6 +3819,7 @@ impl SearchApp {
     }
     fn render_playlist_content(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
+            // 頂部標題列
             ui.horizontal(|ui| {
                 if ui.button("< 返回").clicked() {
                     self.selected_playlist = None;
@@ -3705,32 +3838,23 @@ impl SearchApp {
 
                 // 動態調整標題大小或截斷
                 let mut font_size = 24.0;
-                while ui
-                    .fonts(|f| {
-                        f.layout_no_wrap(
-                            title.clone(),
-                            egui::FontId::new(font_size, egui::FontFamily::Proportional),
-                            egui::Color32::WHITE,
-                        )
-                    })
-                    .size()
-                    .x
-                    > available_width - 100.0
+                while ui.fonts(|f| {
+                    f.layout_no_wrap(
+                        title.clone(),
+                        egui::FontId::new(font_size, egui::FontFamily::Proportional),
+                        egui::Color32::WHITE,
+                    )
+                }).size().x > available_width - 150.0 // 為搜尋按鈕預留更多空間
                 {
                     font_size -= 1.0;
                     if font_size < 16.0 {
-                        // 如果字體大小太小，開始截斷文字
-                        while ui
-                            .fonts(|f| {
-                                f.layout_no_wrap(
-                                    title.clone(),
-                                    egui::FontId::new(16.0, egui::FontFamily::Proportional),
-                                    egui::Color32::WHITE,
-                                )
-                            })
-                            .size()
-                            .x
-                            > available_width - 100.0
+                        while ui.fonts(|f| {
+                            f.layout_no_wrap(
+                                title.clone(),
+                                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                                egui::Color32::WHITE,
+                            )
+                        }).size().x > available_width - 150.0
                         {
                             if title.chars().count() > 3 {
                                 title.pop();
@@ -3746,47 +3870,83 @@ impl SearchApp {
 
                 ui.heading(egui::RichText::new(title).size(font_size));
 
-                if ui.button("🔄 重新加載").clicked() {
-                    if self.show_liked_tracks {
-                        self.load_user_liked_tracks();
-                    } else if let Some(playlist) = &self.selected_playlist {
-                        self.load_playlist_tracks(playlist.id.clone());
-                    }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🔄 重新加載").clicked() {
+                        if self.show_liked_tracks {
+                            self.load_user_liked_tracks();
+                        } else if let Some(playlist) = &self.selected_playlist {
+                            self.load_playlist_tracks(playlist.id.clone());
+                        }
 
-                    // 觸發更新檢查
-                    let spotify_client = self.spotify_client.clone();
-                    let liked_songs_cache = self.liked_songs_cache.clone();
-                    let sender = self.update_check_sender.clone();
+                        // 觸發更新檢查
+                        let spotify_client = self.spotify_client.clone();
+                        let liked_songs_cache = self.liked_songs_cache.clone();
+                        let sender = self.update_check_sender.clone();
 
-                    tokio::spawn(async move {
-                        let spotify = spotify_client.lock().unwrap().clone();
+                        tokio::spawn(async move {
+                            let spotify = spotify_client.lock().unwrap().clone();
 
-                        if let Some(spotify) = spotify {
-                            let cache_path = {
-                                let cache = liked_songs_cache.lock().unwrap();
-                                cache
-                                    .as_ref()
-                                    .map(|c| PathBuf::from(&format!("{:?}", c.last_updated)))
-                            };
+                            if let Some(spotify) = spotify {
+                                let cache_path = {
+                                    let cache = liked_songs_cache.lock().unwrap();
+                                    cache
+                                        .as_ref()
+                                        .map(|c| PathBuf::from(&format!("{:?}", c.last_updated)))
+                                };
 
-                            if let Some(path) = cache_path {
-                                match Self::check_for_updates(&spotify, &path).await {
-                                    Ok(has_updates) => {
-                                        if let Err(e) = sender.send(has_updates).await {
-                                            error!("發送更新檢查結果時發生錯誤: {:?}", e);
+                                if let Some(path) = cache_path {
+                                    match Self::check_for_updates(&spotify, &path).await {
+                                        Ok(has_updates) => {
+                                            if let Err(e) = sender.send(has_updates).await {
+                                                error!("發送更新檢查結果時發生錯誤: {:?}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("檢查更新時發生錯誤: {:?}", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        error!("檢查更新時發生錯誤: {:?}", e);
-                                    }
+                                } else {
+                                    error!("無法獲取緩存路徑");
                                 }
-                            } else {
-                                error!("無法獲取緩存路徑");
                             }
+                        });
+                    }
+
+                    // 搜尋按鈕
+                    if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                        if ui.add(egui::ImageButton::new(
+                            egui::load::SizedTexture::new(
+                                search_icon.id(),
+                                egui::vec2(16.0, 16.0),
+                            ),
+                        )).clicked() {
+                            self.show_tracks_search_bar = !self.show_tracks_search_bar;
                         }
-                    });
-                }
+                    }
+                });
             });
+
+            // 搜尋欄
+            if self.show_tracks_search_bar {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                        ui.image(egui::load::SizedTexture::new(
+                            search_icon.id(),
+                            egui::vec2(16.0, 16.0),
+                        ));
+                    }
+                    ui.add_space(5.0);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.tracks_search_query)
+                            .hint_text("搜尋歌曲...")
+                            .desired_width(ui.available_width() - 50.0)
+                    );
+                    if response.changed() {
+                        info!("歌曲搜尋關鍵字: {}", self.tracks_search_query);
+                    }
+                });
+            }
 
             // 處理更新檢查結果
             while let Ok(has_updates) = self.update_check_receiver.try_recv() {
@@ -3821,13 +3981,32 @@ impl SearchApp {
                 ui.add_space(20.0);
                 ui.label("沒有找到曲目");
             } else {
-                egui::ScrollArea::vertical().show_rows(ui, 40.0, tracks.len(), |ui, row_range| {
-                    for i in row_range {
-                        if let Some(track) = tracks.get(i) {
-                            self.render_track_item(ui, track, i);
+                // 過濾歌曲
+                let search_term = self.tracks_search_query.to_lowercase();
+                let filtered_tracks: Vec<_> = tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| {
+                        search_term.is_empty() ||
+                        track.name.to_lowercase().contains(&search_term) ||
+                        track.artists.iter().any(|artist| 
+                            artist.name.to_lowercase().contains(&search_term)
+                        )
+                    })
+                    .collect();
+
+                egui::ScrollArea::vertical().show_rows(
+                    ui,
+                    40.0,
+                    filtered_tracks.len(),
+                    |ui, row_range| {
+                        for i in row_range {
+                            if let Some((original_index, track)) = filtered_tracks.get(i) {
+                                self.render_track_item(ui, track, *original_index);
+                            }
                         }
-                    }
-                });
+                    },
+                );
             }
         });
     }
@@ -3840,16 +4019,16 @@ impl SearchApp {
                     .wrap(false),
             );
             ui.add_space(10.0);
-
-            let content_width = ui.available_width() - 40.0; // 為按鈕預留空間
-
+    
+            let content_width = ui.available_width() - 40.0;
+    
             ui.vertical(|ui| {
                 ui.set_width(content_width);
-
+    
                 // 歌曲名稱
                 let title = track.name.clone();
                 ui.label(egui::RichText::new(title).size(18.0).strong());
-
+    
                 // 歌手名稱
                 let artists = track
                     .artists
@@ -3859,41 +4038,37 @@ impl SearchApp {
                     .join(", ");
                 ui.label(egui::RichText::new(artists).size(16.0).weak());
             });
-
-            // 添加搜索按鈕
-            let button_size = egui::vec2(24.0, 24.0);
-            let search_button_rect = ui.max_rect();
-            let search_button_rect = egui::Rect::from_center_size(
-                search_button_rect.center()
-                    + egui::vec2(
-                        search_button_rect.width() / 2.0 - button_size.x / 2.0 - 5.0,
-                        0.0,
+    
+            // 搜尋按鈕
+            if let Some(search_icon) = self.preloaded_icons.get("search.png") {
+                let response = ui.add(egui::ImageButton::new(
+                    egui::load::SizedTexture::new(
+                        search_icon.id(),
+                        egui::vec2(16.0, 16.0),
                     ),
-                button_size,
-            );
-            let search_button_response =
-                self.draw_search_button(ui, index, search_button_rect, ButtonType::Spotify);
-
-            if search_button_response.clicked() {
-                if let Some(spotify_url) = track.external_urls.get("spotify") {
-                    self.search_query = spotify_url.clone();
-                } else {
-                    self.search_query = format!(
-                        "{} {}",
-                        track.name,
-                        track
-                            .artists
-                            .iter()
-                            .map(|a| a.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    );
+                ));
+    
+                if response.clicked() {
+                    if let Some(spotify_url) = track.external_urls.get("spotify") {
+                        self.search_query = spotify_url.clone();
+                    } else {
+                        self.search_query = format!(
+                            "{} {}",
+                            track.name,
+                            track
+                                .artists
+                                .iter()
+                                .map(|a| a.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                    let ctx = ui.ctx().clone();
+                    self.perform_search(ctx);
                 }
-                let ctx = ui.ctx().clone();
-                self.perform_search(ctx);
+    
+                response.on_hover_text("以此搜尋");
             }
-
-            search_button_response.on_hover_text("以此搜尋");
         });
         ui.add_space(5.0);
         ui.separator();

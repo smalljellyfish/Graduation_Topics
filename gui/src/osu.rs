@@ -63,11 +63,11 @@ pub struct SearchResponse {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Beatmap {
     pub difficulty_rating: f32,
-    pub _id: i32,
+    pub id: i32,
     pub mode: String,
     pub status: String,
     pub total_length: i32,
-    pub _user_id: i32,
+    pub user_id: i32,
     pub version: String,
 }
 pub struct BeatmapInfo {
@@ -377,26 +377,64 @@ pub fn is_beatmap_downloaded(download_directory: &Path, beatmapset_id: i32) -> b
     }
     false
 }
+pub fn get_downloaded_beatmaps(download_directory: &Path) -> Vec<String> {
+    let mut downloaded = Vec::new();
+    
+    if let Ok(entries) = fs::read_dir(download_directory) {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                let path = entry.path();
+                let is_valid = if path.is_file() {
+                    file_name.ends_with(".osz")
+                } else if path.is_dir() {
+                    // 檢查資料夾名稱是否包含數字（beatmapset ID）
+                    file_name.split_whitespace()
+                        .next()
+                        .map(|first_part| first_part.parse::<i32>().is_ok())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if is_valid {
+                    if let Ok(metadata) = entry.metadata() {
+                        if let Ok(modified) = metadata.modified() {
+                            downloaded.push((file_name, modified));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 按照修改時間降序排序（最新的在前）
+    downloaded.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // 只返回檔案名稱
+    downloaded.into_iter().map(|(name, _)| name).collect()
+}
+
 pub async fn download_beatmap(
     beatmapset_id: i32,
     download_directory: &Path,
-    mut update_status: impl FnMut(DownloadStatus) + Send + 'static
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    mut update_status: impl FnMut(DownloadStatus) + Send + 'static,
+) -> Result<(), OsuError> {  // 改用 OsuError
     let url = format!("https://api.nerinyan.moe/d/{}", beatmapset_id);
 
-    // 開始下載前，將狀態更新為 Downloading
     update_status(DownloadStatus::Downloading);
 
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
-        .build()?;
+        .build()
+        .map_err(|e| OsuError::RequestError(e))?;
 
     let response = client.get(&url)
         .header("Accept", "application/x-osu-beatmap-archive")
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
         .header("Origin", "https://osu.ppy.sh")
         .send()
-        .await?;
+        .await
+        .map_err(|e| OsuError::RequestError(e))?;
 
     if response.status().is_success() {
         let filename = response.headers()
@@ -407,25 +445,34 @@ pub async fn download_beatmap(
             .unwrap_or(&format!("{}.osz", beatmapset_id))
             .to_string();
 
-        let content = response.bytes().await?;
+        let content = response.bytes().await.map_err(|e| OsuError::RequestError(e))?;
 
-        // 使用 tokio 的阻塞任務來處理文件 I/O
         let download_path = download_directory.join(&filename);
-        task::spawn_blocking(move || -> Result<(), std::io::Error> {
-            let mut dest = File::create(&download_path)?;
-            copy(&mut content.as_ref(), &mut dest)?;
+        task::spawn_blocking(move || -> Result<(), OsuError> {
+            let mut dest = File::create(&download_path)
+                .map_err(|e| OsuError::IoError(e.to_string()))?;
+            copy(&mut content.as_ref(), &mut dest)
+                .map_err(|e| OsuError::IoError(e.to_string()))?;
             Ok(())
-        }).await??;
+        })
+        .await
+        .map_err(|e| OsuError::Other(e.to_string()))??;
 
         info!("Beatmap {} downloaded successfully as: {}", beatmapset_id, filename);
         update_status(DownloadStatus::Completed);
         Ok(())
     } else {
-        error!("Failed to download beatmap {}: {}", beatmapset_id, response.status());
+        let error_message = format!(
+            "下載譜面失敗 (beatmapset ID: {})\n狀態碼: {}\n請稍後再試",
+            beatmapset_id,
+            response.status()
+        );
+        error!("{}", error_message);
         update_status(DownloadStatus::NotStarted);
-        Err(format!("Failed to download beatmap: {}", response.status()).into())
+        Err(OsuError::ApiError(error_message))
     }
 }
+
 pub fn delete_beatmap(download_directory: &Path, beatmapset_id: i32) -> std::io::Result<()> {
     let mut deleted = false;
 
